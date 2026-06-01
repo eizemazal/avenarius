@@ -13,6 +13,28 @@ data class Account(
     val userId: Long,
     val firstName: String,
     val lastName: String? = null,
+    val avatarUrl: String? = null,
+)
+
+/** A name-search hit (a contact-dialog or a public chat/channel) that can be opened. */
+data class SearchResult(
+    val chatId: Long,
+    val title: String,
+    val avatarUrl: String?,
+    val isDialog: Boolean,
+)
+
+/** A user/contact, used for the contacts list, search results and the profile page. */
+data class UserInfo(
+    val id: Long,
+    val name: String,
+    val avatarUrl: String? = null,
+    val description: String? = null,
+    val phone: String? = null,
+    val gender: String? = null,
+    val link: String? = null,
+    val country: String? = null,
+    val registrationTime: Long? = null,
 )
 
 /** A conversation in the chat list. */

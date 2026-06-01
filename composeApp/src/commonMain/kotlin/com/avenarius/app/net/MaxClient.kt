@@ -6,6 +6,8 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.SearchResult
+import com.avenarius.app.model.UserInfo
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -53,6 +55,7 @@ class MaxClient {
         private const val OP_CONTACT_UPDATE = 34
         private const val OP_CONTACT_BY_PHONE = 46
         private const val OP_FETCH_HISTORY = 49
+        private const val OP_PUBLIC_SEARCH = 60
         private const val OP_VIDEO_PLAY = 83
         private const val OP_MARK_READ = 50
         private const val OP_SEND_MESSAGE = 64
@@ -89,7 +92,7 @@ class MaxClient {
     /** Result of submitting an SMS code. */
     sealed interface CodeResult {
         data class Success(val loginToken: String) : CodeResult
-        data class NeedPassword(val trackId: String) : CodeResult
+        data class NeedPassword(val trackId: String, val hint: String?) : CodeResult
         /** This phone has no account yet — registration (a name) is required. */
         data object NeedRegister : CodeResult
     }
@@ -173,7 +176,7 @@ class MaxClient {
             put("authTokenType", "CHECK_CODE")
         })
         payload.loginToken()?.let { return CodeResult.Success(it) }
-        payload.passwordTrackId()?.let { return CodeResult.NeedPassword(it) }
+        payload.passwordTrackId()?.let { return CodeResult.NeedPassword(it, payload.passwordHint()) }
         // New, unregistered phone: the server returns a REGISTER token + preset avatars.
         payload.registerToken()?.let { regToken ->
             authToken = regToken
@@ -267,6 +270,8 @@ class MaxClient {
         val chats: List<Chat>,
         /** userId -> display name, for avatars and sender labels. */
         val contacts: Map<Long, String>,
+        /** Full contact info for the Contacts page. */
+        val contactsList: List<UserInfo>,
         /** The server rolls the login token on each sync; persist it if present. */
         val refreshedToken: String?,
     )
@@ -292,15 +297,14 @@ class MaxClient {
             userId = myId,
             firstName = contact.firstName() ?: "Я",
             lastName = contact.lastName(),
+            avatarUrl = contact?.avatarUrl(),
         )
 
-        // --- contacts: id -> display name, for naming 1:1 dialogs ---
-        val names = mutableMapOf<Long, String>()
-        payload["contacts"]?.jsonArray?.forEach { el ->
-            val c = el.jsonObject
-            val id = c["id"]?.jsonPrimitive?.long ?: return@forEach
-            names[id] = c.displayName() ?: "Контакт $id"
-        }
+        // --- contacts: full info for the Contacts page + id->name for dialog titles ---
+        val contactsList = payload["contacts"]?.jsonArray.orEmptyList()
+            .mapNotNull { parseUser(it.jsonObject) }
+            .sortedBy { it.name.lowercase() }
+        val names = contactsList.associate { it.id to it.name }.toMutableMap()
 
         // --- chats ---
         val chats = payload["chats"]?.jsonArray.orEmptyList().mapNotNull { el ->
@@ -347,7 +351,31 @@ class MaxClient {
         // The server returns a (possibly rolled) login token here — persist it.
         val refreshedToken = payload["token"]?.jsonPrimitive?.contentOrNullSafe()
 
-        return SyncResult(account, chats, names, refreshedToken)
+        return SyncResult(account, chats, names, contactsList, refreshedToken)
+    }
+
+    /** Full profile of a single user (for the user page). */
+    suspend fun fetchUser(userId: Long): UserInfo? {
+        val payload = transport.request(OP_CONTACT_INFO, buildJsonObject {
+            put("contactIds", buildJsonArray { add(userId) })
+        })
+        return payload["contacts"]?.jsonArray?.firstOrNull()?.jsonObject?.let { parseUser(it) }
+    }
+
+    /** Public search by name — returns openable chats/channels (each result wraps a `chat`). */
+    suspend fun searchChats(query: String): List<SearchResult> {
+        val payload = transport.request(OP_PUBLIC_SEARCH, buildJsonObject {
+            put("query", query)
+            put("count", 20)
+            put("type", "ALL")
+        })
+        return payload["result"]?.jsonArray.orEmptyList().mapNotNull { el ->
+            val chat = el.jsonObject["chat"]?.jsonObject ?: return@mapNotNull null
+            val id = chat["id"]?.jsonPrimitive?.longOrNullSafe() ?: return@mapNotNull null
+            val type = chat["type"]?.jsonPrimitive?.contentOrNullSafe()
+            val title = chat["title"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null } ?: "Чат $id"
+            SearchResult(chatId = id, title = title, avatarUrl = chat.avatarUrl(), isDialog = type == "DIALOG")
+        }.distinctBy { it.chatId }
     }
 
     // ---------------------------------------------------------------------
@@ -486,6 +514,10 @@ private fun JsonObject.passwordTrackId(): String? {
     return challenge.jsonPrimitive.contentOrNullSafe()
 }
 
+/** Optional password hint from the passwordChallenge. */
+private fun JsonObject.passwordHint(): String? =
+    (this["passwordChallenge"] as? JsonObject)?.get("hint")?.jsonPrimitive?.contentOrNullSafe()
+
 /** Maps the server's localization-key placeholders to Russian text. */
 private val LOCALIZED_TEXT = mapOf(
     "welcome.saved.dialog.message" to "Добро пожаловать! Здесь хранятся ваши сохранённые сообщения.",
@@ -527,4 +559,25 @@ private fun JsonObject.displayName(): String? {
     val first = firstName()
     val last = lastName()
     return listOfNotNull(first, last).joinToString(" ").ifBlank { null }
+}
+
+/** Best available avatar URL from a user/contact/chat object. */
+private fun JsonObject.avatarUrl(): String? =
+    (this["baseRawUrl"] ?: this["baseUrl"] ?: this["baseRawIconUrl"] ?: this["baseIconUrl"])
+        ?.jsonPrimitive?.contentOrNullSafe()
+
+/** Parses a server user/contact object into [UserInfo]. */
+private fun parseUser(o: JsonObject): UserInfo? {
+    val id = o["id"]?.jsonPrimitive?.longOrNullSafe() ?: return null
+    return UserInfo(
+        id = id,
+        name = o.displayName() ?: "Пользователь $id",
+        avatarUrl = o.avatarUrl(),
+        description = o["description"]?.jsonPrimitive?.contentOrNullSafe(),
+        phone = o["phone"]?.jsonPrimitive?.contentOrNullSafe(),
+        gender = o["gender"]?.jsonPrimitive?.contentOrNullSafe(),
+        link = o["link"]?.jsonPrimitive?.contentOrNullSafe(),
+        country = o["country"]?.jsonPrimitive?.contentOrNullSafe(),
+        registrationTime = o["registrationTime"]?.jsonPrimitive?.longOrNullSafe(),
+    )
 }

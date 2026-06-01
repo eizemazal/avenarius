@@ -32,6 +32,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Scaffold
@@ -55,20 +57,31 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.ImageLoader
 import coil3.compose.AsyncImage
 import coil3.compose.setSingletonImageLoaderFactory
 import coil3.network.ktor3.KtorNetworkFetcherFactory
+import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.SearchResult
+import com.avenarius.app.model.UserInfo
 
 private val AvenariusColors = darkColorScheme()
 
@@ -86,7 +99,7 @@ fun App(viewModel: AppViewModel) {
 
             // Intercept the Android system back so leaving a chat returns to the
             // list (and code/password screens return to login) instead of exiting.
-            PlatformBackHandler(enabled = viewModel.canGoBack(state.screen)) {
+            PlatformBackHandler(enabled = viewModel.canGoBack(state.screen, state.tab)) {
                 viewModel.onBack()
             }
 
@@ -114,6 +127,7 @@ fun App(viewModel: AppViewModel) {
                 Screen.PASSWORD -> PasswordScreen(
                     busy = state.busy,
                     error = state.error,
+                    hint = state.passwordHint,
                     onSubmit = viewModel::submitPassword,
                 )
                 Screen.REGISTER -> RegisterScreen(
@@ -121,20 +135,20 @@ fun App(viewModel: AppViewModel) {
                     error = state.error,
                     onSubmit = viewModel::submitRegister,
                 )
-                Screen.CHATS -> ChatsScreen(
-                    title = state.account?.let { "Авенариус — ${it.firstName}" } ?: "Авенариус",
-                    chats = state.chats,
-                    isRefreshing = state.refreshing,
-                    onRefresh = viewModel::refresh,
-                    onOpen = viewModel::openChat,
-                    onStartChat = viewModel::startChatByPhone,
-                    onLogout = viewModel::logout,
+                Screen.CHATS -> MainScreen(state, viewModel)
+                Screen.USER -> UserScreen(
+                    user = state.viewingUser,
+                    isMe = state.viewingUser?.id == state.account?.userId,
+                    onBack = viewModel::closeUser,
+                    onWrite = viewModel::openDialogWith,
+                    onAvatarClick = viewModel::openImage,
                 )
                 Screen.CHAT -> ChatScreen(
                     chat = state.currentChat,
                     messages = state.messages,
                     myId = state.account?.userId ?: -1L,
                     contacts = state.contacts,
+                    senderAvatars = state.contactsList.associate { it.id to it.avatarUrl },
                     unreadAtOpen = state.openUnreadCount,
                     busy = state.busy,
                     error = state.error,
@@ -143,6 +157,7 @@ fun App(viewModel: AppViewModel) {
                     onBack = viewModel::backToChats,
                     onSend = viewModel::sendMessage,
                     onMediaClick = viewModel::openMedia,
+                    onOpenUser = viewModel::openUser,
                 )
                     }
                 }
@@ -262,14 +277,17 @@ private fun CodeScreen(busy: Boolean, error: String?, codeLength: Int, onSubmit:
 }
 
 @Composable
-private fun PasswordScreen(busy: Boolean, error: String?, onSubmit: (String) -> Unit) {
+private fun PasswordScreen(busy: Boolean, error: String?, hint: String?, onSubmit: (String) -> Unit) {
     var password by remember { mutableStateOf("") }
     CenteredForm {
-        Text("Облачный пароль", style = MaterialTheme.typography.headlineMedium)
+        Text("Пароль для входа", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "На аккаунте включена двухэтапная проверка. Введите пароль.",
+            "Для входа на новом устройстве введите пароль, заданный в настройках Max (Безопасность → Пароль для входа).",
             style = MaterialTheme.typography.bodyMedium,
         )
+        if (!hint.isNullOrBlank()) {
+            Text("Подсказка: $hint", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         OutlinedTextField(
             value = password,
             onValueChange = { password = it },
@@ -291,27 +309,62 @@ private fun PasswordScreen(busy: Boolean, error: String?, onSubmit: (String) -> 
 }
 
 @Composable
-private fun NewChatDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
-    var phone by remember { mutableStateOf("+7") }
+private fun NewChatDialog(
+    searchResults: List<SearchResult>,
+    searching: Boolean,
+    onSearch: (String) -> Unit,
+    onPickResult: (SearchResult) -> Unit,
+    onPhone: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    // A query that's basically a phone number is opened by number; otherwise we
+    // search users by name.
+    val looksLikePhone = query.isNotBlank() && query.all { it.isDigit() || it == '+' || it == ' ' }
+
+    LaunchedEffect(query) {
+        if (!looksLikePhone && query.trim().length >= 2) onSearch(query) else onSearch("")
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Новый чат") },
         text = {
             Column {
-                Text("Введите номер телефона пользователя Max", style = MaterialTheme.typography.bodyMedium)
+                Text("Имя пользователя или номер телефона", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
-                    value = phone,
-                    onValueChange = { phone = it },
+                    value = query,
+                    onValueChange = { query = it },
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    placeholder = { Text("Например: Алиса или +7…") },
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Spacer(Modifier.height(8.dp))
+                if (!looksLikePhone) {
+                    if (searching) {
+                        Box(Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(20.dp))
+                        }
+                    }
+                    LazyColumn(Modifier.heightIn(max = 280.dp)) {
+                        items(searchResults, key = { it.chatId }) { result ->
+                            Row(
+                                Modifier.fillMaxWidth().clickableRow { onPickResult(result) }.padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Avatar(result.title, result.avatarUrl, 36.dp)
+                                Spacer(Modifier.width(10.dp))
+                                Text(result.title, style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(phone) }, enabled = phone.any { it.isDigit() }) {
-                Text("Открыть")
+            if (looksLikePhone) {
+                TextButton(onClick = { onPhone(query) }) { Text("Открыть по номеру") }
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
@@ -347,69 +400,289 @@ private fun RegisterScreen(busy: Boolean, error: String?, onSubmit: (String) -> 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ChatsScreen(
-    title: String,
-    chats: List<Chat>,
-    isRefreshing: Boolean,
-    onRefresh: () -> Unit,
-    onOpen: (Chat) -> Unit,
-    onStartChat: (String) -> Unit,
-    onLogout: () -> Unit,
-) {
+private fun MainScreen(state: AppState, vm: AppViewModel) {
     var showNewChat by remember { mutableStateOf(false) }
     if (showNewChat) {
         NewChatDialog(
-            onDismiss = { showNewChat = false },
-            onConfirm = { phone -> showNewChat = false; onStartChat(phone) },
+            searchResults = state.searchResults,
+            searching = state.searching,
+            onSearch = vm::searchUsers,
+            onPickResult = { r -> showNewChat = false; vm.clearSearch(); vm.openSearchResult(r) },
+            onPhone = { phone -> showNewChat = false; vm.clearSearch(); vm.startChatByPhone(phone) },
+            onDismiss = { showNewChat = false; vm.clearSearch() },
         )
     }
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(title) },
-                actions = { TextButton(onClick = onLogout) { Text("Выйти") } },
-            )
+            TopAppBar(title = {
+                Text(
+                    when (state.tab) {
+                        Tab.CHATS -> "Чаты"
+                        Tab.CONTACTS -> "Контакты"
+                        Tab.SETTINGS -> "Настройки"
+                    },
+                )
+            })
+        },
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    selected = state.tab == Tab.CHATS,
+                    onClick = { vm.selectTab(Tab.CHATS) },
+                    icon = { Text("💬") },
+                    label = { Text("Чаты") },
+                )
+                NavigationBarItem(
+                    selected = state.tab == Tab.CONTACTS,
+                    onClick = { vm.selectTab(Tab.CONTACTS) },
+                    icon = { Text("👥") },
+                    label = { Text("Контакты") },
+                )
+                NavigationBarItem(
+                    selected = state.tab == Tab.SETTINGS,
+                    onClick = { vm.selectTab(Tab.SETTINGS) },
+                    icon = { Text("⚙") },
+                    label = { Text("Настройки") },
+                )
+            }
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = { showNewChat = true }) {
-                Text("✎", style = MaterialTheme.typography.headlineSmall)
+            if (state.tab == Tab.CHATS) {
+                FloatingActionButton(onClick = { showNewChat = true }) {
+                    Text("✎", style = MaterialTheme.typography.headlineSmall)
+                }
             }
         },
     ) { padding ->
-        // Pull down anywhere on the list to force a re-sync.
-        PullToRefreshBox(
-            isRefreshing = isRefreshing,
-            onRefresh = onRefresh,
-            modifier = Modifier.fillMaxSize().padding(padding),
-        ) {
-            if (chats.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Чатов пока нет (потяните вниз для обновления)", style = MaterialTheme.typography.bodyMedium)
-                }
-            } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(chats, key = { it.id }) { chat ->
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickableRow { onOpen(chat) }
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                        ) {
-                            Text(chat.title, style = MaterialTheme.typography.titleMedium)
+        Box(Modifier.fillMaxSize().padding(padding)) {
+            when (state.tab) {
+                Tab.CHATS -> ChatsTab(
+                    chats = state.chats,
+                    myId = state.account?.userId ?: -1L,
+                    contacts = state.contactsList,
+                    isRefreshing = state.refreshing,
+                    onRefresh = vm::refresh,
+                    onOpenChat = vm::openChat,
+                    onOpenUser = vm::openUser,
+                )
+                Tab.CONTACTS -> ContactsTab(state.contactsList, vm::openUser)
+                Tab.SETTINGS -> SettingsTab(
+                    account = state.account,
+                    onOpenProfile = { state.account?.let { vm.openUser(it.userId) } },
+                    onLogout = vm::logout,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatsTab(
+    chats: List<Chat>,
+    myId: Long,
+    contacts: List<UserInfo>,
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit,
+    onOpenChat: (Chat) -> Unit,
+    onOpenUser: (Long) -> Unit,
+) {
+    PullToRefreshBox(isRefreshing = isRefreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
+        if (chats.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Чатов пока нет (потяните вниз для обновления)", style = MaterialTheme.typography.bodyMedium)
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(chats, key = { it.id }) { chat ->
+                    val otherId = if (chat.isDialog) chat.id xor myId else null
+                    val avatarUrl = otherId?.let { id -> contacts.firstOrNull { it.id == id }?.avatarUrl }
+                    Row(
+                        Modifier.fillMaxWidth().clickableRow { onOpenChat(chat) }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Avatar(chat.title, avatarUrl, 44.dp, onClick = otherId?.let { id -> { onOpenUser(id) } })
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(chat.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, modifier = Modifier.weight(1f))
+                                if (chat.unreadCount > 0) UnreadBadge(chat.unreadCount)
+                            }
                             chat.lastMessageText?.let {
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    it,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                )
+                                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                             }
                         }
-                        HorizontalDivider()
+                    }
+                    HorizontalDivider()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContactsTab(contacts: List<UserInfo>, onOpenUser: (Long) -> Unit) {
+    if (contacts.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Контактов нет", style = MaterialTheme.typography.bodyMedium)
+        }
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(contacts, key = { it.id }) { c ->
+            Row(
+                Modifier.fillMaxWidth().clickableRow { onOpenUser(c.id) }.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Avatar(c.name, c.avatarUrl, 44.dp)
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(c.name, style = MaterialTheme.typography.titleMedium)
+                    c.description?.takeIf { it.isNotBlank() }?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                     }
                 }
             }
+            HorizontalDivider()
+        }
+    }
+}
+
+@Composable
+private fun SettingsTab(account: Account?, onOpenProfile: () -> Unit, onLogout: () -> Unit) {
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Row(
+            Modifier.fillMaxWidth().clickableRow(onOpenProfile).padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Avatar(account?.firstName ?: "Я", account?.avatarUrl, 64.dp)
+            Spacer(Modifier.width(16.dp))
+            Column {
+                Text(
+                    listOfNotNull(account?.firstName, account?.lastName).joinToString(" ").ifBlank { "Профиль" },
+                    style = MaterialTheme.typography.titleLarge,
+                )
+                Text("Открыть профиль", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+            }
+        }
+        HorizontalDivider()
+        TextButton(onClick = onLogout) { Text("Выйти из аккаунта") }
+    }
+}
+
+@Composable
+private fun UnreadBadge(count: Int) {
+    Box(
+        Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.primary).padding(horizontal = 7.dp, vertical = 2.dp),
+    ) {
+        Text("$count", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun UserScreen(
+    user: UserInfo?,
+    isMe: Boolean,
+    onBack: () -> Unit,
+    onWrite: (UserInfo) -> Unit,
+    onAvatarClick: (String) -> Unit,
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Профиль") },
+                navigationIcon = { IconButton(onClick = onBack) { Text("‹", style = MaterialTheme.typography.headlineMedium) } },
+            )
+        },
+    ) { padding ->
+        if (user == null) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { CenteredSpinner() }
+            return@Scaffold
+        }
+        Column(
+            Modifier.fillMaxSize().padding(padding).padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // Tapping the avatar opens it full-screen (reusing the image viewer).
+            Avatar(user.name, user.avatarUrl, 96.dp, onClick = user.avatarUrl?.let { url -> { onAvatarClick(url) } })
+            Text(user.name, style = MaterialTheme.typography.headlineSmall)
+            // Bio — render URLs as clickable links.
+            user.description?.takeIf { it.isNotBlank() }?.let { bio ->
+                LinkedText(
+                    bio,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!isMe) {
+                Button(onClick = { onWrite(user) }) { Text("Написать") }
+            }
+            HorizontalDivider()
+            InfoRow("Телефон", user.phone?.let { "+$it" })
+            InfoRow("Пол", when (user.gender) { "MALE" -> "Мужской"; "FEMALE" -> "Женский"; else -> user.gender })
+            InfoRow("Страна", user.country)
+            InfoRow("Ссылка", user.link)
+            InfoRow("Регистрация", user.registrationTime?.takeIf { it > 0 }?.let { formatDate(it) })
+            InfoRow("ID", user.id.toString())
+        }
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String?) {
+    if (value.isNullOrBlank()) return
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+private val UrlRegex = Regex(
+    """(https?://[^\s]+)|([\w.-]+\.(?:ru|com|org|net|me|io|info|app|tv|dev)(?:/[^\s]*)?)""",
+    RegexOption.IGNORE_CASE,
+)
+
+/** Renders [text] with embedded URLs as tappable links (opens the system browser). */
+@Composable
+private fun LinkedText(text: String, style: TextStyle, color: Color) {
+    val linkColor = MaterialTheme.colorScheme.primary
+    val annotated = remember(text, linkColor) {
+        buildAnnotatedString {
+            var last = 0
+            for (m in UrlRegex.findAll(text)) {
+                if (m.range.first > last) append(text.substring(last, m.range.first))
+                val raw = m.value
+                val url = if (raw.startsWith("http", ignoreCase = true)) raw else "https://$raw"
+                withLink(
+                    LinkAnnotation.Url(
+                        url,
+                        TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)),
+                    ),
+                ) { append(raw) }
+                last = m.range.last + 1
+            }
+            if (last < text.length) append(text.substring(last))
+        }
+    }
+    Text(annotated, style = style, color = color)
+}
+
+@Composable
+private fun Avatar(name: String, url: String?, size: Dp, onClick: (() -> Unit)? = null) {
+    var mod = Modifier.size(size).clip(CircleShape).background(avatarColor(name))
+    if (onClick != null) mod = mod.clickable(onClick = onClick)
+    if (!url.isNullOrBlank()) {
+        AsyncImage(model = url, contentDescription = name, contentScale = ContentScale.Crop, modifier = mod)
+    } else {
+        Box(mod, contentAlignment = Alignment.Center) {
+            Text(
+                name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+            )
         }
     }
 }
@@ -421,6 +694,7 @@ private fun ChatScreen(
     messages: List<Message>,
     myId: Long,
     contacts: Map<Long, String>,
+    senderAvatars: Map<Long, String?>,
     unreadAtOpen: Int,
     busy: Boolean,
     error: String?,
@@ -429,10 +703,13 @@ private fun ChatScreen(
     onBack: () -> Unit,
     onSend: (String) -> Unit,
     onMediaClick: (MediaAttach, String?) -> Unit,
+    onOpenUser: (Long) -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val isDialog = chat?.isDialog ?: true
+    // For a 1:1 dialog the other user's id is chatId XOR myId.
+    val otherUserId = if (isDialog && chat != null && myId >= 0) chat.id xor myId else null
 
     // Index of the first unread message (the divider sits just before it).
     val firstUnread = if (unreadAtOpen in 1..messages.size) messages.size - unreadAtOpen else -1
@@ -482,7 +759,10 @@ private fun ChatScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(chat?.title ?: "Чат") },
+                title = {
+                    val titleMod = if (otherUserId != null) Modifier.clickable { onOpenUser(otherUserId) } else Modifier
+                    Text(chat?.title ?: "Чат", modifier = titleMod)
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) { Text("‹", style = MaterialTheme.typography.headlineMedium) }
                 },
@@ -545,9 +825,11 @@ private fun ChatScreen(
                         msg = msg,
                         isMine = isMine,
                         senderName = contacts[msg.senderId] ?: "—",
-                        showName = !isMine && !isDialog && startsRun,
-                        showAvatar = !isMine && startsRun,
+                        senderAvatar = senderAvatars[msg.senderId],
+                        isGroup = !isDialog,
+                        startsRun = startsRun,
                         onMediaClick = onMediaClick,
+                        onAvatarClick = { onOpenUser(msg.senderId) },
                     )
                 }
             }
@@ -560,16 +842,20 @@ private fun MessageRow(
     msg: Message,
     isMine: Boolean,
     senderName: String,
-    showName: Boolean,
-    showAvatar: Boolean,
+    senderAvatar: String?,
+    isGroup: Boolean,
+    startsRun: Boolean,
     onMediaClick: (MediaAttach, String?) -> Unit,
+    onAvatarClick: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start,
     ) {
-        if (!isMine) {
-            if (showAvatar) LetterAvatar(senderName) else Spacer(Modifier.size(32.dp))
+        // Avatars are only meaningful in group chats; in a 1:1 dialog the only
+        // other participant is obvious, so no avatar gutter is shown.
+        if (!isMine && isGroup) {
+            if (startsRun) Avatar(senderName, senderAvatar, 32.dp, onClick = onAvatarClick) else Spacer(Modifier.size(32.dp))
             Spacer(Modifier.width(6.dp))
         }
         val bg = if (isMine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
@@ -581,7 +867,7 @@ private fun MessageRow(
                 .padding(horizontal = 12.dp, vertical = 6.dp),
         ) {
             Column {
-                if (showName) {
+                if (isGroup && !isMine && startsRun) {
                     Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
                 msg.media.forEach { media ->
@@ -672,17 +958,6 @@ private fun ZoomableImage(url: String) {
                 }
             },
     )
-}
-
-@Composable
-private fun LetterAvatar(name: String) {
-    val letter = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
-    Box(
-        Modifier.size(32.dp).clip(CircleShape).background(avatarColor(name)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(letter, color = Color.White, style = MaterialTheme.typography.titleSmall)
-    }
 }
 
 private val AvatarColors = listOf(

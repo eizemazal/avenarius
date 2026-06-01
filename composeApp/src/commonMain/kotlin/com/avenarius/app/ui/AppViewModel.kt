@@ -9,6 +9,8 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.SearchResult
+import com.avenarius.app.model.UserInfo
 import com.avenarius.app.net.MaxClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,7 +21,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT }
+enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT, USER }
+
+/** Bottom-navigation tabs on the main (CHATS) screen. */
+enum class Tab { CHATS, CONTACTS, SETTINGS }
 
 /** Full-screen media viewer overlay state. */
 sealed interface MediaViewer {
@@ -51,6 +56,17 @@ data class AppState(
     val reconnecting: Boolean = false,
     /** Non-null when a full-screen image/video viewer is open. */
     val mediaViewer: MediaViewer? = null,
+    /** Optional server-provided hint shown on the password screen. */
+    val passwordHint: String? = null,
+    /** Selected bottom-nav tab on the main screen. */
+    val tab: Tab = Tab.CHATS,
+    /** Full contact list for the Contacts tab. */
+    val contactsList: List<UserInfo> = emptyList(),
+    /** The user whose profile page is open (Screen.USER). */
+    val viewingUser: UserInfo? = null,
+    /** Live results while searching by name in the new-chat dialog. */
+    val searchResults: List<SearchResult> = emptyList(),
+    val searching: Boolean = false,
 )
 
 /**
@@ -158,6 +174,7 @@ class AppViewModel(
                             account = result.account,
                             chats = result.chats,
                             contacts = result.contacts,
+                            contactsList = result.contactsList,
                             reconnecting = false,
                             busy = false,
                             error = null,
@@ -215,7 +232,7 @@ class AppViewModel(
             }
             is MaxClient.CodeResult.NeedPassword -> {
                 passwordTrackId = result.trackId
-                _state.update { it.copy(screen = Screen.PASSWORD) }
+                _state.update { it.copy(screen = Screen.PASSWORD, passwordHint = result.hint) }
             }
             MaxClient.CodeResult.NeedRegister -> {
                 _state.update { it.copy(screen = Screen.REGISTER) }
@@ -253,6 +270,7 @@ class AppViewModel(
                 account = result.account,
                 chats = result.chats,
                 contacts = result.contacts,
+                contactsList = result.contactsList,
                 busy = false,
                 error = null,
             )
@@ -308,6 +326,78 @@ class AppViewModel(
         _state.update { it.copy(screen = Screen.CHATS, currentChat = null, messages = emptyList()) }
     }
 
+    fun selectTab(tab: Tab) = _state.update { it.copy(tab = tab) }
+
+    /** Opens a user's profile page (from a chat, the chat list, or contacts). */
+    fun openUser(userId: Long) {
+        // Seed from cached info, then fetch full details.
+        val cached = _state.value.contactsList.firstOrNull { it.id == userId }
+            ?: _state.value.contacts[userId]?.let { UserInfo(userId, it) }
+        _state.update { it.copy(screen = Screen.USER, viewingUser = cached) }
+        viewModelScope.launch {
+            runCatching { client.fetchUser(userId) }.getOrNull()?.let { full ->
+                _state.update { if (it.screen == Screen.USER) it.copy(viewingUser = full) else it }
+            }
+        }
+    }
+
+    fun closeUser() {
+        // Return to the conversation if one is open, otherwise the main screen.
+        _state.update {
+            it.copy(screen = if (it.currentChat != null) Screen.CHAT else Screen.CHATS, viewingUser = null)
+        }
+    }
+
+    /** Searches by name for the new-chat dialog: your contacts (instant) + public chats. */
+    fun searchUsers(query: String) {
+        val q = query.trim()
+        if (q.isBlank()) {
+            _state.update { it.copy(searchResults = emptyList(), searching = false) }
+            return
+        }
+        val myId = _state.value.account?.userId
+        // Local contacts matching the query, opened as 1:1 dialogs.
+        val local = if (myId == null) emptyList() else _state.value.contactsList
+            .filter { it.name.contains(q, ignoreCase = true) }
+            .map { SearchResult(client.dialogChatId(myId, it.id), it.name, it.avatarUrl, isDialog = true) }
+        _state.update { it.copy(searchResults = local, searching = true) }
+        viewModelScope.launch {
+            val remote = runCatching { client.searchChats(q) }.getOrDefault(emptyList())
+            _state.update { it.copy(searchResults = (local + remote).distinctBy { r -> r.chatId }, searching = false) }
+        }
+    }
+
+    fun clearSearch() = _state.update { it.copy(searchResults = emptyList(), searching = false) }
+
+    /** Opens a chat/channel chosen from search results. */
+    fun openSearchResult(result: SearchResult) {
+        openChat(
+            Chat(
+                id = result.chatId,
+                title = result.title,
+                lastMessageText = null,
+                lastEventTime = nowMillis(),
+                unreadCount = 0,
+                isDialog = result.isDialog,
+            ),
+        )
+    }
+
+    /** Opens (or starts) a dialog with a user found via search/contacts. */
+    fun openDialogWith(user: UserInfo) {
+        val myId = _state.value.account?.userId ?: return
+        _state.update { it.copy(contacts = it.contacts + (user.id to user.name)) }
+        val chat = Chat(
+            id = client.dialogChatId(myId, user.id),
+            title = user.name,
+            lastMessageText = null,
+            lastEventTime = nowMillis(),
+            unreadCount = 0,
+            isDialog = true,
+        )
+        openChat(chat)
+    }
+
     /** Opens the full-screen viewer for a tapped photo/video. */
     fun openMedia(media: MediaAttach, messageId: String?) {
         when (media.type) {
@@ -329,6 +419,9 @@ class AppViewModel(
             }
         }
     }
+
+    /** Opens an arbitrary image URL (e.g. a profile avatar) in the full-screen viewer. */
+    fun openImage(url: String) = _state.update { it.copy(mediaViewer = MediaViewer.Image(url)) }
 
     fun closeMedia() = _state.update { it.copy(mediaViewer = null) }
 
@@ -397,16 +490,23 @@ class AppViewModel(
      * [PlatformBackHandler] is disabled there and the system handles it (exit).
      */
     fun onBack() {
-        when (_state.value.screen) {
+        val s = _state.value
+        when (s.screen) {
+            Screen.USER -> closeUser()
             Screen.CHAT -> backToChats()
-            Screen.CODE, Screen.PASSWORD -> _state.update { it.copy(screen = Screen.LOGIN, error = null) }
+            Screen.CODE, Screen.PASSWORD, Screen.REGISTER ->
+                _state.update { it.copy(screen = Screen.LOGIN, error = null) }
+            Screen.CHATS -> if (s.tab != Tab.CHATS) _state.update { it.copy(tab = Tab.CHATS) }
             else -> Unit
         }
     }
 
-    /** True when there is a screen to go back to (so we should intercept "back"). */
-    fun canGoBack(screen: Screen): Boolean =
-        screen == Screen.CHAT || screen == Screen.CODE || screen == Screen.PASSWORD
+    /** True when there is a screen/tab to go back to (so we should intercept "back"). */
+    fun canGoBack(screen: Screen, tab: Tab): Boolean = when (screen) {
+        Screen.CHAT, Screen.USER, Screen.CODE, Screen.PASSWORD, Screen.REGISTER -> true
+        Screen.CHATS -> tab != Tab.CHATS
+        else -> false
+    }
 
     /** Pull-to-refresh on the chat list: re-runs sync over the open connection. */
     fun refresh() {
@@ -426,6 +526,7 @@ class AppViewModel(
                         chats = result.chats,
                         account = result.account,
                         contacts = result.contacts,
+                        contactsList = result.contactsList,
                         refreshing = false,
                         error = null,
                     )

@@ -45,12 +45,15 @@ class MainActivity : ComponentActivity() {
                 Session.chatInfo = state.chats.associate { it.id to ChatBrief(it.title, it.isDialog) }
             }
 
-            // Run the foreground service while logged in; stop it on logout.
+            // Keep the foreground service (and thus the live connection) running
+            // from the moment an auth session exists (CODE screen) through the chat
+            // screens — NOT just after login. Otherwise backgrounding while waiting
+            // for the SMS suspends the connection and the auth session is lost.
             LaunchedEffect(state.screen) {
                 when (state.screen) {
-                    Screen.CHATS, Screen.CHAT -> ConnectionService.start(this@MainActivity)
-                    Screen.LOGIN -> ConnectionService.stop(this@MainActivity)
-                    else -> Unit
+                    Screen.CODE, Screen.PASSWORD, Screen.REGISTER, Screen.CHATS, Screen.CHAT, Screen.USER ->
+                        ConnectionService.start(this@MainActivity)
+                    Screen.LOGIN, Screen.LOADING -> ConnectionService.stop(this@MainActivity)
                 }
             }
 
