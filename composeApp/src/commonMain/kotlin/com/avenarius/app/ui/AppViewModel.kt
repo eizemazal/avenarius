@@ -31,6 +31,10 @@ data class AppState(
     val contacts: Map<Long, String> = emptyMap(),
     /** Unread count of the open chat at the moment it was opened (for the divider). */
     val openUnreadCount: Int = 0,
+    /** True while older messages are being loaded (scroll-up pagination). */
+    val loadingOlder: Boolean = false,
+    /** True once the top of the chat history has been reached. */
+    val noMoreOlder: Boolean = false,
 )
 
 /**
@@ -100,7 +104,18 @@ class AppViewModel(
             if (token == null) {
                 _state.update { it.copy(screen = Screen.LOGIN) }
             } else {
-                connectAndSync(token)
+                // MUST be guarded: an uncaught throw here (e.g. the server rejecting
+                // an expired token on sync) would crash the whole app.
+                try {
+                    connectAndSync(token)
+                } catch (e: Throwable) {
+                    // Never crash here. Drop the token only on a real auth rejection;
+                    // a transient connection error keeps it so the user can retry.
+                    val msg = e.message ?: "Ошибка входа"
+                    val connectivity = msg.contains("соединени", ignoreCase = true)
+                    if (!connectivity) prefs.clear()
+                    _state.update { AppState(screen = Screen.LOGIN, error = msg) }
+                }
             }
         }
     }
@@ -192,18 +207,14 @@ class AppViewModel(
                 currentChat = chat,
                 messages = emptyList(),
                 openUnreadCount = chat.unreadCount,
+                loadingOlder = false,
+                noMoreOlder = false,
             )
         }
         launchBusy {
-            val myId = _state.value.account?.userId
-            val history = client.fetchHistory(chat.id, fromTime = nowMillis(), count = 50)
-                .map { m ->
-                    // Reconstruct ✓✓ on relaunch: our messages the other side has
-                    // already read (time <= their read mark) are READ.
-                    if (myId != null && m.senderId == myId && chat.otherReadMark >= m.time &&
-                        chat.otherReadMark > 0 && m.status != MessageStatus.READ
-                    ) m.copy(status = MessageStatus.READ) else m
-                }
+            val history = withReadMarks(
+                client.fetchHistory(chat.id, fromTime = nowMillis(), count = 50), chat,
+            )
             _state.update { it.copy(messages = history) }
             // Mark read on the server and clear the local unread badge.
             history.lastOrNull()?.let { last ->
@@ -220,6 +231,45 @@ class AppViewModel(
 
     fun backToChats() {
         _state.update { it.copy(screen = Screen.CHATS, currentChat = null, messages = emptyList()) }
+    }
+
+    /** Reconstructs ✓✓ on loaded history: our messages the other side has already read. */
+    private fun withReadMarks(messages: List<Message>, chat: Chat): List<Message> {
+        val myId = _state.value.account?.userId ?: return messages
+        if (chat.otherReadMark <= 0) return messages
+        return messages.map { m ->
+            if (m.senderId == myId && m.time <= chat.otherReadMark && m.status != MessageStatus.READ) {
+                m.copy(status = MessageStatus.READ)
+            } else m
+        }
+    }
+
+    /** Loads an older page of messages when the user scrolls to the top. */
+    fun loadOlder() {
+        val s = _state.value
+        val chat = s.currentChat ?: return
+        val oldest = s.messages.firstOrNull() ?: return
+        if (s.loadingOlder || s.noMoreOlder) return
+        _state.update { it.copy(loadingOlder = true) }
+        viewModelScope.launch {
+            try {
+                val older = client.fetchHistory(chat.id, fromTime = oldest.time, count = 50)
+                val existingIds = _state.value.messages.mapNotNull { it.id }.toSet()
+                val fresh = withReadMarks(
+                    older.filter { it.time < oldest.time && (it.id == null || it.id !in existingIds) },
+                    chat,
+                )
+                _state.update {
+                    it.copy(
+                        messages = fresh + it.messages,
+                        loadingOlder = false,
+                        noMoreOlder = fresh.isEmpty(),
+                    )
+                }
+            } catch (e: Throwable) {
+                _state.update { it.copy(loadingOlder = false, error = e.message ?: "Не удалось загрузить историю") }
+            }
+        }
     }
 
     /** Resolves a phone number to a Max user and opens a dialog with them. */

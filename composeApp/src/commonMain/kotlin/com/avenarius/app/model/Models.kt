@@ -35,6 +35,16 @@ data class Chat(
 /** Message delivery state for outgoing messages (server `status`). */
 enum class MessageStatus { UNKNOWN, SENT, READ }
 
+enum class MediaType { PHOTO, VIDEO }
+
+/** An image/video attachment we can show inline (by its CDN URL). */
+data class MediaAttach(
+    val type: MediaType,
+    val url: String,
+    val width: Int,
+    val height: Int,
+)
+
 /** A single message inside a chat. */
 data class Message(
     /** Server message id (string in the protocol). Null for messages we just sent locally. */
@@ -47,4 +57,6 @@ data class Message(
     val time: Long,
     /** Delivery state (meaningful for our own outgoing messages). */
     val status: MessageStatus = MessageStatus.UNKNOWN,
+    /** Inline image/video attachments. */
+    val media: List<MediaAttach> = emptyList(),
 )

@@ -2,6 +2,8 @@ package com.avenarius.app.net
 
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.MediaAttach
+import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -356,11 +358,23 @@ class MaxClient {
     private fun parseMessage(obj: JsonObject, chatId: Long): Message? {
         val baseText = localize(obj["text"]?.jsonPrimitive?.contentOrNullSafe() ?: "")
         val attaches = obj["attaches"]?.jsonArray.orEmptyList()
-        // We don't render media, but we label it so the message isn't blank.
+
+        // Images/videos we render inline (PHOTO baseUrl, VIDEO thumbnail).
+        val media = attaches.mapNotNull { el ->
+            val a = el.jsonObject
+            val w = a["width"]?.jsonPrimitive?.intOrNullSafe() ?: 0
+            val h = a["height"]?.jsonPrimitive?.intOrNullSafe() ?: 0
+            when (a["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
+                "PHOTO" -> a["baseUrl"]?.jsonPrimitive?.contentOrNullSafe()
+                    ?.let { MediaAttach(MediaType.PHOTO, it, w, h) }
+                "VIDEO" -> a["thumbnail"]?.jsonPrimitive?.contentOrNullSafe()
+                    ?.let { MediaAttach(MediaType.VIDEO, it, w, h) }
+                else -> null
+            }
+        }
+        // Non-renderable attaches still get a text label so they aren't invisible.
         val mediaLabel = attaches.firstNotNullOfOrNull { el ->
             when (el.jsonObject["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
-                "VIDEO" -> "🎬 Видео"
-                "PHOTO" -> "🖼 Фото"
                 "FILE" -> "📎 Файл"
                 "AUDIO" -> "🎵 Голосовое сообщение"
                 "SHARE" -> "🔗 Ссылка"
@@ -391,9 +405,12 @@ class MaxClient {
             3 -> MessageStatus.READ
             else -> MessageStatus.SENT
         }
-        // Skip empty service messages with no text and no id.
-        if (text.isEmpty() && id == null) return null
-        return Message(id = id, cid = cid, chatId = chatId, senderId = sender, text = text, time = time, status = status)
+        // Skip empty service messages with no text, no media and no id.
+        if (text.isEmpty() && media.isEmpty() && id == null) return null
+        return Message(
+            id = id, cid = cid, chatId = chatId, senderId = sender,
+            text = text, time = time, status = status, media = media,
+        )
     }
 
     /** Tells the server we've read everything up to [messageId] in [chatId]. */

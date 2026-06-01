@@ -9,7 +9,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -44,15 +46,23 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.ImageLoader
+import coil3.compose.AsyncImage
+import coil3.compose.setSingletonImageLoaderFactory
+import coil3.network.ktor3.KtorNetworkFetcherFactory
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.MediaAttach
+import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
 
@@ -60,6 +70,12 @@ private val AvenariusColors = darkColorScheme()
 
 @Composable
 fun App(viewModel: AppViewModel) {
+    // Register Coil's Ktor-based network fetcher so AsyncImage can load CDN URLs.
+    setSingletonImageLoaderFactory { context ->
+        ImageLoader.Builder(context)
+            .components { add(KtorNetworkFetcherFactory()) }
+            .build()
+    }
     MaterialTheme(colorScheme = AvenariusColors) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             val state by viewModel.state.collectAsStateWithLifecycle()
@@ -110,6 +126,8 @@ fun App(viewModel: AppViewModel) {
                     unreadAtOpen = state.openUnreadCount,
                     busy = state.busy,
                     error = state.error,
+                    loadingOlder = state.loadingOlder,
+                    onLoadOlder = viewModel::loadOlder,
                     onBack = viewModel::backToChats,
                     onSend = viewModel::sendMessage,
                 )
@@ -359,6 +377,8 @@ private fun ChatScreen(
     unreadAtOpen: Int,
     busy: Boolean,
     error: String?,
+    loadingOlder: Boolean,
+    onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     onSend: (String) -> Unit,
 ) {
@@ -369,19 +389,46 @@ private fun ChatScreen(
     // Index of the first unread message (the divider sits just before it).
     val firstUnread = if (unreadAtOpen in 1..messages.size) messages.size - unreadAtOpen else -1
 
-    // Position once per chat: jump INSTANTLY to the first unread (or bottom),
-    // instead of animating through the whole history.
     var positioned by remember(chat?.id) { mutableStateOf(false) }
+    var prevSize by remember(chat?.id) { mutableStateOf(0) }
+    // When loading older messages we remember the top item so we can stay on it
+    // after the prepend (otherwise the list visibly jumps).
+    var restoreAnchor by remember(chat?.id) { mutableStateOf<Pair<Any, Int>?>(null) }
+
     LaunchedEffect(messages.size, chat?.id) {
         if (messages.isEmpty()) return@LaunchedEffect
-        if (!positioned) {
-            listState.scrollToItem(if (firstUnread > 0) firstUnread else messages.lastIndex)
-            positioned = true
-        } else {
-            // A new message arrived: follow it only if already near the bottom.
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            if (lastVisible >= messages.size - 3) listState.animateScrollToItem(messages.lastIndex)
+        when {
+            !positioned -> {
+                // Jump INSTANTLY to the first unread (or bottom) on open.
+                listState.scrollToItem(if (firstUnread > 0) firstUnread else messages.lastIndex)
+                positioned = true
+            }
+            restoreAnchor != null -> {
+                // Older page prepended: scroll back to the previously-top message.
+                val (key, offset) = restoreAnchor!!
+                val idx = messages.indexOfFirst { (it.id ?: it.cid ?: it.time) == key }
+                if (idx >= 0) listState.scrollToItem(idx, offset)
+                restoreAnchor = null
+            }
+            messages.size > prevSize -> {
+                // New message appended: follow it only if already near the bottom.
+                val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                if (lastVisible >= prevSize - 2) listState.animateScrollToItem(messages.lastIndex)
+            }
         }
+        prevSize = messages.size
+    }
+
+    // Trigger loading older messages when the user reaches the very top.
+    LaunchedEffect(listState, messages.size) {
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .collect { idx ->
+                if (positioned && idx == 0 && messages.isNotEmpty() && restoreAnchor == null) {
+                    val first = messages.first()
+                    restoreAnchor = (first.id ?: first.cid ?: first.time) to listState.firstVisibleItemScrollOffset
+                    onLoadOlder()
+                }
+            }
     }
 
     Scaffold(
@@ -419,6 +466,11 @@ private fun ChatScreen(
         Box(Modifier.fillMaxSize().padding(padding)) {
             if (busy && messages.isEmpty()) {
                 CenteredSpinner()
+            }
+            if (loadingOlder) {
+                CircularProgressIndicator(
+                    modifier = Modifier.align(Alignment.TopCenter).padding(8.dp).size(24.dp),
+                )
             }
             if (error != null) {
                 Text(
@@ -482,7 +534,13 @@ private fun MessageRow(
                 if (showName) {
                     Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
-                Text(msg.text, color = fg, style = MaterialTheme.typography.bodyLarge)
+                msg.media.forEach { media ->
+                    MediaThumbnail(media)
+                    Spacer(Modifier.height(4.dp))
+                }
+                if (msg.text.isNotEmpty()) {
+                    Text(msg.text, color = fg, style = MaterialTheme.typography.bodyLarge)
+                }
                 Row(
                     modifier = Modifier.align(Alignment.End),
                     horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -498,6 +556,31 @@ private fun MessageRow(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaThumbnail(media: MediaAttach) {
+    val shape = RoundedCornerShape(10.dp)
+    var mod = Modifier.widthIn(max = 240.dp).heightIn(max = 320.dp).clip(shape)
+    if (media.width > 0 && media.height > 0) {
+        mod = Modifier.width(240.dp).aspectRatio(media.width.toFloat() / media.height).clip(shape)
+    }
+    Box(contentAlignment = Alignment.Center) {
+        AsyncImage(
+            model = media.url,
+            contentDescription = if (media.type == MediaType.VIDEO) "Видео" else "Фото",
+            contentScale = ContentScale.Crop,
+            modifier = mod,
+        )
+        if (media.type == MediaType.VIDEO) {
+            Box(
+                Modifier.size(44.dp).clip(CircleShape).background(Color(0x88000000)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("▶", color = Color.White, style = MaterialTheme.typography.titleLarge)
             }
         }
     }
