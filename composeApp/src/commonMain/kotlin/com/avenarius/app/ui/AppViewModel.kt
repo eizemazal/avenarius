@@ -37,9 +37,12 @@ data class AppState(
  * Holds all app state and drives the [MaxClient]. Lives in commonMain, so the
  * exact same logic runs on Android and on desktop.
  */
-class AppViewModel(private val prefs: Prefs) : ViewModel() {
-
-    private val client = MaxClient()
+class AppViewModel(
+    private val prefs: Prefs,
+    // The client is app-scoped (shared with the background service), so the
+    // ViewModel must NOT create or tear it down — it's injected.
+    private val client: MaxClient,
+) : ViewModel() {
 
     private val _state = MutableStateFlow(AppState())
     val state: StateFlow<AppState> = _state.asStateFlow()
@@ -147,6 +150,10 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
     }
 
     private suspend fun connectAndSync(token: String) {
+        // The shared client may already be connected (and already synced once) from
+        // a previous Activity/background session, and sync is once-per-connection —
+        // so always (re)connect fresh here.
+        client.disconnect()
         client.connect(prefs.deviceId, prefs.mtInstance)
         val result = client.sync(token)
         prefs.userId = result.account.userId
@@ -160,6 +167,20 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
                 error = null,
             )
         }
+        // If a notification asked us to open a specific chat, do it now.
+        val pending = pendingOpenChatId
+        if (pending != null) {
+            pendingOpenChatId = null
+            result.chats.firstOrNull { it.id == pending }?.let { openChat(it) }
+        }
+    }
+
+    private var pendingOpenChatId: Long? = null
+
+    /** Opens a chat by id (used when a message notification is tapped). */
+    fun openChatById(id: Long) {
+        val chat = _state.value.chats.firstOrNull { it.id == id }
+        if (chat != null) openChat(chat) else pendingOpenChatId = id // open once chats load
     }
 
     fun openChat(chat: Chat) {
@@ -309,7 +330,6 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
         }
     }
 
-    override fun onCleared() {
-        client.disconnect()
-    }
+    // NOTE: we intentionally do NOT disconnect in onCleared — the client is
+    // app-scoped and kept alive by the background service. Only logout disconnects.
 }

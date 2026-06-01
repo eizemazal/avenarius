@@ -7,6 +7,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.avenarius.app.data.Prefs
+import com.avenarius.app.net.MaxClient
 import com.avenarius.app.ui.App
 import com.avenarius.app.ui.AppViewModel
 
@@ -16,7 +17,7 @@ import com.avenarius.app.ui.AppViewModel
  */
 fun main() = application {
     val prefs = Prefs(DesktopStorage())
-    val viewModel = AppViewModel(prefs)
+    val viewModel = AppViewModel(prefs, MaxClient())
 
     Window(
         onCloseRequest = ::exitApplication,
