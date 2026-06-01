@@ -1,5 +1,6 @@
 package com.avenarius.app.net
 
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
@@ -31,9 +32,16 @@ class MobileTransport(
     private val host: String = "api.oneme.ru",
     private val port: Int = 443,
 ) {
+    private companion object {
+        const val PACKET_EVENT = 2 // cmd value for server-pushed event frames
+    }
+
     private val socket = TlsSocket(host, port)
-    private val scope = CoroutineScope(SupervisorJob())
+    // A stray throwable in a background coroutine must never crash the app, so the
+    // scope swallows uncaught exceptions (each coroutine also handles its own).
+    private val scope = CoroutineScope(SupervisorJob() + CoroutineExceptionHandler { _, _ -> })
     private val writeLock = Mutex()
+    private val pendingLock = Mutex()
 
     private var seq = 0
     private val pending = mutableMapOf<Int, CompletableDeferred<JsonObject>>()
@@ -51,6 +59,7 @@ class MobileTransport(
     suspend fun connect() {
         if (connected) return
         socket.connect()
+        seq = 0 // fresh connection -> fresh seq sequence
         connected = true
         readerJob = scope.launch { readLoop() }
     }
@@ -70,17 +79,17 @@ class MobileTransport(
         pingJob?.cancel(); pingJob = null
         readerJob?.cancel(); readerJob = null
         socket.close()
-        pending.values.forEach { it.cancel() }
-        pending.clear()
+        failAllPending(IllegalStateException("Соединение закрыто"))
     }
 
     /** Sends a request and suspends until the reply with the same seq arrives. */
     suspend fun request(opcode: Int, payload: JsonObject, timeoutMs: Long = 30_000): JsonObject {
+        if (!connected) error("Нет соединения с сервером")
         val deferred = CompletableDeferred<JsonObject>()
         writeLock.withLock {
             seq = (seq + 1) and 0xff
             val mySeq = seq
-            pending[mySeq] = deferred
+            pendingLock.withLock { pending[mySeq] = deferred }
             socket.write(encodeFrame(ver = 11, cmd = 0, seq = mySeq, opcode = opcode, payload = payload))
         }
         return withTimeout(timeoutMs) { deferred.await() }
@@ -89,28 +98,59 @@ class MobileTransport(
     private suspend fun readLoop() {
         val header = ByteArray(10)
         while (connected) {
-            socket.readFully(header)
-            val frameSeq = header[3].toInt() and 0xff
-            val opcode = ((header[4].toInt() and 0xff) shl 8) or (header[5].toInt() and 0xff)
-            val packed = ((header[6].toInt() and 0xff) shl 24) or ((header[7].toInt() and 0xff) shl 16) or
-                ((header[8].toInt() and 0xff) shl 8) or (header[9].toInt() and 0xff)
-            val compFlag = packed ushr 24
-            val len = packed and 0xFFFFFF
-
-            val payload = if (len > 0) {
-                val body = ByteArray(len)
-                socket.readFully(body)
-                val raw = if (compFlag != 0) Lz4.decompressBlock(body) else body
-                MsgPack.decode(raw) as? JsonObject ?: JsonObject(emptyMap())
-            } else {
-                JsonObject(emptyMap())
+            // --- read one whole frame off the wire ---
+            // I/O errors here mean the socket is dead -> end the connection.
+            var cmd = 0; var frameSeq = 0; var opcode = 0; var compFlag = 0
+            var body = ByteArray(0)
+            try {
+                socket.readFully(header)
+                cmd = ((header[1].toInt() and 0xff) shl 8) or (header[2].toInt() and 0xff)
+                frameSeq = header[3].toInt() and 0xff
+                opcode = ((header[4].toInt() and 0xff) shl 8) or (header[5].toInt() and 0xff)
+                val packed = ((header[6].toInt() and 0xff) shl 24) or ((header[7].toInt() and 0xff) shl 16) or
+                    ((header[8].toInt() and 0xff) shl 8) or (header[9].toInt() and 0xff)
+                compFlag = packed ushr 24
+                val len = packed and 0xFFFFFF
+                if (len > 0) {
+                    body = ByteArray(len)
+                    socket.readFully(body)
+                }
+            } catch (e: Throwable) {
+                connected = false
+                failAllPending(e)
+                break
             }
 
-            val waiter = pending.remove(frameSeq)
-            if (waiter != null && !waiter.isCompleted) {
-                waiter.complete(payload)
-            } else {
-                _events.emit(opcode to payload)
+            // --- decode + route ---
+            // A decode failure means one bad frame, NOT a dead connection (we
+            // already consumed its bytes, so the stream stays aligned) — skip it.
+            try {
+                val raw = if (compFlag != 0 && body.isNotEmpty()) Lz4.decompressBlock(body) else body
+                val payload = if (raw.isNotEmpty()) MsgPack.decode(raw) as? JsonObject ?: JsonObject(emptyMap())
+                else JsonObject(emptyMap())
+
+                // cmd: 0=REQUEST, 1=RESPONSE, 2=EVENT, 3=ERROR. Server push events
+                // (cmd=2) carry their OWN incrementing seq that can collide with our
+                // in-flight request seqs, so they must NEVER consume a pending slot —
+                // only responses/errors are matched back to a request by seq.
+                if (cmd == PACKET_EVENT) {
+                    _events.emit(opcode to payload)
+                } else {
+                    val waiter = pendingLock.withLock { pending.remove(frameSeq) }
+                    if (waiter != null && !waiter.isCompleted) waiter.complete(payload)
+                    else _events.emit(opcode to payload)
+                }
+            } catch (_: Throwable) {
+                // skip the unparseable frame, keep the connection alive
+            }
+        }
+    }
+
+    private fun failAllPending(cause: Throwable) {
+        scope.launch {
+            pendingLock.withLock {
+                pending.values.forEach { if (!it.isCompleted) it.completeExceptionally(cause) }
+                pending.clear()
             }
         }
     }

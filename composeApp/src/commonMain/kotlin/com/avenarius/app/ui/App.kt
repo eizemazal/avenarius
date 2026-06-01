@@ -24,6 +24,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -54,6 +55,12 @@ fun App(viewModel: AppViewModel) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             val state by viewModel.state.collectAsStateWithLifecycle()
 
+            // Intercept the Android system back so leaving a chat returns to the
+            // list (and code/password screens return to login) instead of exiting.
+            PlatformBackHandler(enabled = viewModel.canGoBack(state.screen)) {
+                viewModel.onBack()
+            }
+
             when (state.screen) {
                 Screen.LOADING -> CenteredSpinner()
                 Screen.LOGIN -> LoginScreen(
@@ -75,6 +82,8 @@ fun App(viewModel: AppViewModel) {
                 Screen.CHATS -> ChatsScreen(
                     title = state.account?.let { "Авенариус — ${it.firstName}" } ?: "Авенариус",
                     chats = state.chats,
+                    isRefreshing = state.refreshing,
+                    onRefresh = viewModel::refresh,
                     onOpen = viewModel::openChat,
                     onLogout = viewModel::logout,
                 )
@@ -203,6 +212,8 @@ private fun PasswordScreen(busy: Boolean, error: String?, onSubmit: (String) -> 
 private fun ChatsScreen(
     title: String,
     chats: List<Chat>,
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit,
     onOpen: (Chat) -> Unit,
     onLogout: () -> Unit,
 ) {
@@ -214,31 +225,38 @@ private fun ChatsScreen(
             )
         },
     ) { padding ->
-        if (chats.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                Text("Чатов пока нет", style = MaterialTheme.typography.bodyMedium)
-            }
-        } else {
-            LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
-                items(chats, key = { it.id }) { chat ->
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickableRow { onOpen(chat) }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                    ) {
-                        Text(chat.title, style = MaterialTheme.typography.titleMedium)
-                        chat.lastMessageText?.let {
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                it,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                            )
+        // Pull down anywhere on the list to force a re-sync.
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = onRefresh,
+            modifier = Modifier.fillMaxSize().padding(padding),
+        ) {
+            if (chats.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("Чатов пока нет (потяните вниз для обновления)", style = MaterialTheme.typography.bodyMedium)
+                }
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    items(chats, key = { it.id }) { chat ->
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickableRow { onOpen(chat) }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                        ) {
+                            Text(chat.title, style = MaterialTheme.typography.titleMedium)
+                            chat.lastMessageText?.let {
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                )
+                            }
                         }
+                        HorizontalDivider()
                     }
-                    HorizontalDivider()
                 }
             }
         }

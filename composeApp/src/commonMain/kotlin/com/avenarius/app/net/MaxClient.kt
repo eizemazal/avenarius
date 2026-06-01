@@ -3,6 +3,7 @@ package com.avenarius.app.net
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.Message
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -49,7 +50,7 @@ class MaxClient {
     }
 
     private val transport = MobileTransport()
-    private val scope = CoroutineScope(SupervisorJob())
+    private val scope = CoroutineScope(SupervisorJob() + CoroutineExceptionHandler { _, _ -> })
 
     /** Temporary token from START_AUTH / a 2FA challenge, needed for the next step. */
     private var authToken: String? = null
@@ -70,12 +71,10 @@ class MaxClient {
     // Connection
     // ---------------------------------------------------------------------
 
-    /** Opens the TLS connection and performs the opcode-6 ANDROID handshake. */
-    suspend fun connect(deviceId: String, mtInstance: String) {
-        if (transport.isConnected) return
-        transport.connect()
-
-        // Route server-pushed new-message frames into [incoming].
+    init {
+        // Subscribe to server-pushed new-message frames ONCE. The transport's
+        // event flow survives reconnects, so we must not re-subscribe in connect()
+        // (that would stack duplicate collectors on every refresh/reconnect).
         scope.launch {
             transport.events.collect { (opcode, payload) ->
                 if (opcode == OP_NEW_MESSAGE) {
@@ -85,6 +84,12 @@ class MaxClient {
                 }
             }
         }
+    }
+
+    /** Opens the TLS connection and performs the opcode-6 ANDROID handshake. */
+    suspend fun connect(deviceId: String, mtInstance: String) {
+        if (transport.isConnected) return
+        transport.connect()
 
         transport.request(OP_HANDSHAKE, buildJsonObject {
             put("clientSessionId", 1)

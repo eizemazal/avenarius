@@ -24,6 +24,8 @@ data class AppState(
     val currentChat: Chat? = null,
     val messages: List<Message> = emptyList(),
     val codeLength: Int = 6,
+    /** True while a pull-to-refresh re-sync of the chat list is in flight. */
+    val refreshing: Boolean = false,
 )
 
 /**
@@ -122,6 +124,44 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
 
     fun backToChats() {
         _state.update { it.copy(screen = Screen.CHATS, currentChat = null, messages = emptyList()) }
+    }
+
+    /**
+     * Handles the platform "back" action. Returns the user one screen up the
+     * stack instead of leaving the app. The chat list / login are roots, so
+     * [PlatformBackHandler] is disabled there and the system handles it (exit).
+     */
+    fun onBack() {
+        when (_state.value.screen) {
+            Screen.CHAT -> backToChats()
+            Screen.CODE, Screen.PASSWORD -> _state.update { it.copy(screen = Screen.LOGIN, error = null) }
+            else -> Unit
+        }
+    }
+
+    /** True when there is a screen to go back to (so we should intercept "back"). */
+    fun canGoBack(screen: Screen): Boolean =
+        screen == Screen.CHAT || screen == Screen.CODE || screen == Screen.PASSWORD
+
+    /** Pull-to-refresh on the chat list: re-runs sync over the open connection. */
+    fun refresh() {
+        val token = prefs.token ?: return
+        _state.update { it.copy(refreshing = true) }
+        viewModelScope.launch {
+            try {
+                // The server allows sync (op 19) only ONCE per connection, so a
+                // refresh re-establishes a fresh session. This also recovers if the
+                // previous connection had dropped.
+                client.disconnect()
+                client.connect(prefs.deviceId, prefs.mtInstance)
+                val result = client.sync(token)
+                _state.update {
+                    it.copy(chats = result.chats, account = result.account, refreshing = false, error = null)
+                }
+            } catch (e: Throwable) {
+                _state.update { it.copy(refreshing = false, error = e.message ?: "Ошибка обновления") }
+            }
+        }
     }
 
     fun sendMessage(text: String) {
