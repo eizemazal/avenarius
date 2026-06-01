@@ -11,7 +11,10 @@ import com.avenarius.app.net.MaxClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT }
@@ -35,6 +38,8 @@ data class AppState(
     val loadingOlder: Boolean = false,
     /** True once the top of the chat history has been reached. */
     val noMoreOlder: Boolean = false,
+    /** True while the app is transparently re-establishing a dropped connection. */
+    val reconnecting: Boolean = false,
 )
 
 /**
@@ -98,24 +103,80 @@ class AppViewModel(
                 }
             }
         }
-        // Auto-login if we already have a token.
+        // Auto-reconnect transparently whenever the connection drops.
         viewModelScope.launch {
-            val token = prefs.token
-            if (token == null) {
-                _state.update { it.copy(screen = Screen.LOGIN) }
-            } else {
-                // MUST be guarded: an uncaught throw here (e.g. the server rejecting
-                // an expired token on sync) would crash the whole app.
-                try {
-                    connectAndSync(token)
-                } catch (e: Throwable) {
-                    // Never crash here. Drop the token only on a real auth rejection;
-                    // a transient connection error keeps it so the user can retry.
-                    val msg = e.message ?: "Ошибка входа"
-                    val connectivity = msg.contains("соединени", ignoreCase = true)
-                    if (!connectivity) prefs.clear()
-                    _state.update { AppState(screen = Screen.LOGIN, error = msg) }
+            client.drops.collect {
+                val screen = _state.value.screen
+                if (prefs.token != null && (screen == Screen.CHATS || screen == Screen.CHAT)) {
+                    connectWithRetry(freshSession = false)
                 }
+            }
+        }
+        // Auto-login if we already have a token.
+        if (prefs.token == null) {
+            _state.update { it.copy(screen = Screen.LOGIN) }
+        } else {
+            connectWithRetry(freshSession = true)
+        }
+    }
+
+    private var connectJob: Job? = null
+
+    /**
+     * Establishes the session and keeps retrying on transient failures (with
+     * backoff) instead of bouncing to login. Only a real auth rejection logs out.
+     * [freshSession] forces a clean reconnect (needed when a previous session may
+     * still be alive, since sync is once-per-connection).
+     */
+    private fun connectWithRetry(freshSession: Boolean) {
+        if (connectJob?.isActive == true) return
+        val token = prefs.token ?: return
+        connectJob = viewModelScope.launch {
+            if (freshSession && client.isConnected) client.disconnect()
+            _state.update { it.copy(reconnecting = true) }
+            var backoff = 1_000L
+            while (isActive) {
+                try {
+                    client.connect(prefs.deviceId, prefs.mtInstance)
+                    val result = client.sync(token)
+                    result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
+                    prefs.userId = result.account.userId
+                    _state.update { s ->
+                        s.copy(
+                            screen = if (s.screen == Screen.LOADING) Screen.CHATS else s.screen,
+                            account = result.account,
+                            chats = result.chats,
+                            contacts = result.contacts,
+                            reconnecting = false,
+                            busy = false,
+                            error = null,
+                        )
+                    }
+                    _state.value.currentChat?.let { reloadOpenChat(it) } // catch up missed messages
+                    return@launch
+                } catch (e: Throwable) {
+                    val msg = e.message ?: "Ошибка"
+                    if (msg.contains("вход", true) || msg.contains("авториз", true)) {
+                        // Genuine auth rejection -> the token is dead, must re-login.
+                        prefs.clear()
+                        client.disconnect()
+                        _state.update { AppState(screen = Screen.LOGIN, error = msg) }
+                        return@launch
+                    }
+                    // Transient (connectivity/other): keep retrying with backoff.
+                    _state.update { it.copy(reconnecting = true) }
+                    delay(backoff)
+                    backoff = (backoff * 2).coerceAtMost(20_000L)
+                }
+            }
+        }
+    }
+
+    private fun reloadOpenChat(chat: Chat) {
+        viewModelScope.launch {
+            runCatching {
+                val history = withReadMarks(client.fetchHistory(chat.id, fromTime = nowMillis(), count = 50), chat)
+                _state.update { if (it.currentChat?.id == chat.id) it.copy(messages = history) else it }
             }
         }
     }
@@ -171,6 +232,9 @@ class AppViewModel(
         client.disconnect()
         client.connect(prefs.deviceId, prefs.mtInstance)
         val result = client.sync(token)
+        // Token refresh: the server rolls the login token on each sync. Persist the
+        // new one so it doesn't expire between launches and force a re-login.
+        result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
         prefs.userId = result.account.userId
         _state.update {
             it.copy(
@@ -321,8 +385,15 @@ class AppViewModel(
                 client.disconnect()
                 client.connect(prefs.deviceId, prefs.mtInstance)
                 val result = client.sync(token)
+                result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
                 _state.update {
-                    it.copy(chats = result.chats, account = result.account, refreshing = false, error = null)
+                    it.copy(
+                        chats = result.chats,
+                        account = result.account,
+                        contacts = result.contacts,
+                        refreshing = false,
+                        error = null,
+                    )
                 }
             } catch (e: Throwable) {
                 _state.update { it.copy(refreshing = false, error = e.message ?: "Ошибка обновления") }

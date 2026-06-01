@@ -52,14 +52,21 @@ class MobileTransport(
     private var pingJob: Job? = null
     private var connected = false
 
+    @Volatile private var manualClose = false
+
     /** Server-pushed frames as (opcode, payload). */
     private val _events = MutableSharedFlow<Pair<Int, JsonObject>>(extraBufferCapacity = 64)
     val events: SharedFlow<Pair<Int, JsonObject>> = _events
+
+    /** Emitted when the connection drops unexpectedly (not via [disconnect]). */
+    private val _drops = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val drops: SharedFlow<Unit> = _drops
 
     val isConnected: Boolean get() = connected
 
     suspend fun connect() {
         if (connected) return
+        manualClose = false
         socket.connect()
         seq = 0 // fresh connection -> fresh seq sequence
         connected = true
@@ -77,6 +84,7 @@ class MobileTransport(
     }
 
     fun disconnect() {
+        manualClose = true
         connected = false
         pingJob?.cancel(); pingJob = null
         readerJob?.cancel(); readerJob = null
@@ -122,6 +130,7 @@ class MobileTransport(
             } catch (e: Throwable) {
                 connected = false
                 failAllPending(e)
+                if (!manualClose) _drops.emit(Unit) // unexpected drop -> let the app reconnect
                 break
             }
 

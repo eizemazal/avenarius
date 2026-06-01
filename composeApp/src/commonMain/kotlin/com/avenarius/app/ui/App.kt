@@ -86,9 +86,16 @@ fun App(viewModel: AppViewModel) {
                 viewModel.onBack()
             }
 
-            when (state.screen) {
-                Screen.LOADING -> CenteredSpinner()
-                Screen.LOGIN -> LoginScreen(
+            Column(Modifier.fillMaxSize()) {
+                // Thin "reconnecting" strip while we transparently re-establish the
+                // connection — shown over the chat list / open chat, never a bounce.
+                if (state.reconnecting && (state.screen == Screen.CHATS || state.screen == Screen.CHAT)) {
+                    ReconnectingBar()
+                }
+                Box(Modifier.weight(1f)) {
+                    when (state.screen) {
+                        Screen.LOADING -> LoadingScreen(reconnecting = state.reconnecting)
+                        Screen.LOGIN -> LoginScreen(
                     busy = state.busy,
                     error = state.error,
                     onSubmit = viewModel::requestCode,
@@ -131,8 +138,39 @@ fun App(viewModel: AppViewModel) {
                     onBack = viewModel::backToChats,
                     onSend = viewModel::sendMessage,
                 )
+                    }
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun LoadingScreen(reconnecting: Boolean) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            CircularProgressIndicator()
+            if (reconnecting) {
+                Text("Переподключение…", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReconnectingBar() {
+    Row(
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.secondaryContainer).padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "Переподключение…",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+        )
     }
 }
 

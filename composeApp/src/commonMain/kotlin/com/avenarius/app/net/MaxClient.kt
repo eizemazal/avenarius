@@ -76,6 +76,9 @@ class MaxClient {
 
     val isConnected: Boolean get() = transport.isConnected
 
+    /** Emitted when the connection drops unexpectedly (for auto-reconnect). */
+    val drops: SharedFlow<Unit> get() = transport.drops
+
     /** Preset avatar id to use when registering a new account (rumax's default). */
     private var registerPhotoId: Long = 2981369L
 
@@ -238,6 +241,8 @@ class MaxClient {
         val chats: List<Chat>,
         /** userId -> display name, for avatars and sender labels. */
         val contacts: Map<Long, String>,
+        /** The server rolls the login token on each sync; persist it if present. */
+        val refreshedToken: String?,
     )
 
     /** Authenticates the connection with [token] and pulls the chat list. */
@@ -313,7 +318,10 @@ class MaxClient {
             )
         }.sortedByDescending { it.lastEventTime }
 
-        return SyncResult(account, chats, names)
+        // The server returns a (possibly rolled) login token here — persist it.
+        val refreshedToken = payload["token"]?.jsonPrimitive?.contentOrNullSafe()
+
+        return SyncResult(account, chats, names, refreshedToken)
     }
 
     // ---------------------------------------------------------------------
