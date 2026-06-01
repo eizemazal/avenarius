@@ -1,0 +1,21 @@
+# Gradle / build
+.gradle/
+build/
+**/build/
+
+# Local machine config (SDK path, etc.)
+local.properties
+
+# Keystores / secrets — never commit these
+*.jks
+*.keystore
+keystore.properties
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+.DS_Store
+
+# Example reference code (not part of the app)
+example_code/

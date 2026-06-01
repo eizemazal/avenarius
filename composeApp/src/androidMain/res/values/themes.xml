@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- A bare Material theme; the actual UI colors come from Compose's MaterialTheme. -->
+    <style name="Theme.Avenarius" parent="android:Theme.Material.NoActionBar" />
+</resources>
