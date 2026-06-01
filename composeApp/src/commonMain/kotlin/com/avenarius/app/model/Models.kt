@@ -25,6 +25,11 @@ data class Chat(
     val unreadCount: Int = 0,
     /** True for one-to-one dialogs (vs. groups/channels). */
     val isDialog: Boolean = false,
+    /**
+     * Latest "read up to" timestamp (ms) of the other participant(s), from the
+     * chat's `participants` map. Our messages with time <= this are read (✓✓).
+     */
+    val otherReadMark: Long = 0,
 )
 
 /** Message delivery state for outgoing messages (server `status`). */

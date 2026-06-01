@@ -280,6 +280,12 @@ class MaxClient {
             val lastTime = c["lastEventTime"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
             val unread = c["newMessages"]?.jsonPrimitive?.intOrNullSafe() ?: 0
             val isDialog = type == "DIALOG"
+            // participants = {userId: lastReadMarkMs}; the other side's mark tells us
+            // how far they've read (so our messages up to it show ✓✓).
+            val otherReadMark = c["participants"]?.jsonObject?.entries
+                ?.filter { it.key.toLongOrNull() != null && it.key.toLong() != myId }
+                ?.mapNotNull { it.value.jsonPrimitive.longOrNullSafe() }
+                ?.maxOrNull() ?: 0L
 
             val title = when {
                 !rawTitle.isNullOrBlank() -> rawTitle
@@ -301,6 +307,7 @@ class MaxClient {
                 lastEventTime = lastTime,
                 unreadCount = unread,
                 isDialog = isDialog,
+                otherReadMark = otherReadMark,
             )
         }.sortedByDescending { it.lastEventTime }
 

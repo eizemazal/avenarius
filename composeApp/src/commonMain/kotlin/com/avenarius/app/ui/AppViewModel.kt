@@ -57,9 +57,11 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
                     } else s
                 }
                 // We're looking at this chat -> immediately mark the new message read.
+                // Use max(now, msg.time) so device-clock skew can't make the mark
+                // fall short of the (server-timestamped) message.
                 val mid = msg.id
                 if (openChatId == msg.chatId && mid != null) {
-                    runCatching { client.markRead(msg.chatId, mid, nowMillis()) }
+                    runCatching { client.markRead(msg.chatId, mid, maxOf(nowMillis(), msg.time)) }
                 }
             }
         }
@@ -70,12 +72,22 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
                 // Only the OTHER party reading our messages flips them to ✓✓.
                 if (rm.userId == myId) return@collect
                 _state.update { s ->
-                    if (s.currentChat?.id != rm.chatId) return@update s
-                    s.copy(messages = s.messages.map { m ->
-                        if (m.senderId == myId && m.time <= rm.mark && m.status != MessageStatus.READ) {
-                            m.copy(status = MessageStatus.READ)
-                        } else m
-                    })
+                    // Persist the new read mark on the chat so re-opening it (same
+                    // session) still shows ✓✓ — not just the currently open messages.
+                    val chats = s.chats.map {
+                        if (it.id == rm.chatId) it.copy(otherReadMark = maxOf(it.otherReadMark, rm.mark)) else it
+                    }
+                    val current = s.currentChat?.let {
+                        if (it.id == rm.chatId) it.copy(otherReadMark = maxOf(it.otherReadMark, rm.mark)) else it
+                    }
+                    val messages = if (s.currentChat?.id == rm.chatId) {
+                        s.messages.map { m ->
+                            if (m.senderId == myId && m.time <= rm.mark && m.status != MessageStatus.READ) {
+                                m.copy(status = MessageStatus.READ)
+                            } else m
+                        }
+                    } else s.messages
+                    s.copy(chats = chats, currentChat = current, messages = messages)
                 }
             }
         }
@@ -162,11 +174,22 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
             )
         }
         launchBusy {
+            val myId = _state.value.account?.userId
             val history = client.fetchHistory(chat.id, fromTime = nowMillis(), count = 50)
+                .map { m ->
+                    // Reconstruct ✓✓ on relaunch: our messages the other side has
+                    // already read (time <= their read mark) are READ.
+                    if (myId != null && m.senderId == myId && chat.otherReadMark >= m.time &&
+                        chat.otherReadMark > 0 && m.status != MessageStatus.READ
+                    ) m.copy(status = MessageStatus.READ) else m
+                }
             _state.update { it.copy(messages = history) }
             // Mark read on the server and clear the local unread badge.
-            history.lastOrNull()?.id?.let { lastId ->
-                runCatching { client.markRead(chat.id, lastId, nowMillis()) }
+            history.lastOrNull()?.let { last ->
+                val lastId = last.id
+                if (lastId != null) {
+                    runCatching { client.markRead(chat.id, lastId, maxOf(nowMillis(), last.time)) }
+                }
             }
             _state.update { s ->
                 s.copy(chats = s.chats.map { if (it.id == chat.id) it.copy(unreadCount = 0) else it })
