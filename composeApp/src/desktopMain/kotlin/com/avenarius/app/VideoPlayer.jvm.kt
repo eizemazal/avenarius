@@ -11,7 +11,10 @@ import java.awt.Desktop
 import java.net.URI
 
 @Composable
-actual fun VideoPlayer(url: String, modifier: Modifier) {
+actual fun VideoPlayer(
+    url: String,
+    modifier: Modifier,
+) {
     // Desktop has no bundled player here — hand the video to the system browser/player.
     LaunchedEffect(url) {
         runCatching { Desktop.getDesktop().browse(URI(url)) }

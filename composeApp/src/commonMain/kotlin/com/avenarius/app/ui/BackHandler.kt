@@ -10,4 +10,7 @@ import androidx.compose.runtime.Composable
  * system back, so its actual is a no-op.
  */
 @Composable
-expect fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit)
+expect fun PlatformBackHandler(
+    enabled: Boolean,
+    onBack: () -> Unit,
+)

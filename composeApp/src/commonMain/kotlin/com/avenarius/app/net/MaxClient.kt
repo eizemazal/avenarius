@@ -26,6 +26,122 @@ import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
+/** A read-mark update: [userId] has read everything up to [mark] (ms) in [chatId]. */
+data class ReadMark(
+    val chatId: Long,
+    val userId: Long,
+    val mark: Long,
+)
+
+/** Result of submitting an SMS code. */
+sealed interface CodeResult {
+    data class Success(
+        val loginToken: String,
+    ) : CodeResult
+
+    data class NeedPassword(
+        val trackId: String,
+        val hint: String?,
+    ) : CodeResult
+
+    /** This phone has no account yet — registration (a name) is required. */
+    data object NeedRegister : CodeResult
+}
+
+/** A user resolved by phone lookup. */
+data class FoundUser(
+    val userId: Long,
+    val name: String,
+)
+
+/** Result of a sync (chats + profile + contacts + a possibly-rolled token). */
+data class SyncResult(
+    val account: Account,
+    val chats: List<Chat>,
+    /** userId -> display name, for avatars and sender labels. */
+    val contacts: Map<Long, String>,
+    /** Full contact info for the Contacts page. */
+    val contactsList: List<UserInfo>,
+    /** The server rolls the login token on each sync; persist it if present. */
+    val refreshedToken: String?,
+)
+
+/**
+ * Protocol surface used by the UI/ViewModel. Implemented by [MaxClient] for real;
+ * a fake implementation drives the ViewModel tests.
+ */
+interface MaxApi {
+    val incoming: SharedFlow<Message>
+    val readMarks: SharedFlow<ReadMark>
+    val drops: SharedFlow<Unit>
+    val isConnected: Boolean
+
+    suspend fun connect(
+        deviceId: String,
+        mtInstance: String,
+    )
+
+    fun disconnect()
+
+    suspend fun startAuth(phone: String): Int
+
+    suspend fun checkCode(code: String): CodeResult
+
+    suspend fun register(
+        firstName: String,
+        lastName: String? = null,
+    ): String
+
+    suspend fun checkPassword(
+        password: String,
+        trackId: String,
+    ): String
+
+    suspend fun sync(token: String): SyncResult
+
+    suspend fun fetchHistory(
+        chatId: Long,
+        fromTime: Long,
+        count: Int = 50,
+    ): List<Message>
+
+    suspend fun sendMessage(
+        chatId: Long,
+        text: String,
+        cid: Long,
+    ): Message?
+
+    suspend fun markRead(
+        chatId: Long,
+        messageId: String,
+        mark: Long,
+    )
+
+    suspend fun findByPhone(phone: String): FoundUser
+
+    suspend fun addContact(
+        userId: Long,
+        firstName: String,
+    )
+
+    fun dialogChatId(
+        myId: Long,
+        otherId: Long,
+    ): Long
+
+    suspend fun fetchUser(userId: Long): UserInfo?
+
+    suspend fun searchChats(query: String): List<SearchResult>
+
+    suspend fun fetchContactName(userId: Long): String?
+
+    suspend fun getVideoUrl(
+        chatId: Long,
+        messageId: Long,
+        videoId: Long,
+    ): String?
+}
+
 /**
  * A minimal client for the "Max" messenger MOBILE protocol.
  *
@@ -37,8 +153,7 @@ import kotlinx.serialization.json.putJsonObject
  * Everything here is platform-independent (commonMain) and shared by the Android
  * and desktop clients; only [TlsSocket] differs per platform.
  */
-class MaxClient {
-
+class MaxClient : MaxApi {
     companion object {
         // Mirrors the official Android client / rumax. appVersion + buildNumber
         // are taken from the current MAX.apk (26.17.0 / 6713).
@@ -72,30 +187,19 @@ class MaxClient {
 
     /** Stream of newly received messages (server push, opcode 128). */
     private val _incoming = MutableSharedFlow<Message>(extraBufferCapacity = 64)
-    val incoming: SharedFlow<Message> = _incoming
-
-    /** A read-mark update: [userId] has read everything up to [mark] (ms) in [chatId]. */
-    data class ReadMark(val chatId: Long, val userId: Long, val mark: Long)
+    override val incoming: SharedFlow<Message> = _incoming
 
     /** Stream of read-mark updates (server push, opcode 130) — e.g. the other side read our messages. */
     private val _readMarks = MutableSharedFlow<ReadMark>(extraBufferCapacity = 64)
-    val readMarks: SharedFlow<ReadMark> = _readMarks
+    override val readMarks: SharedFlow<ReadMark> = _readMarks
 
-    val isConnected: Boolean get() = transport.isConnected
+    override val isConnected: Boolean get() = transport.isConnected
 
     /** Emitted when the connection drops unexpectedly (for auto-reconnect). */
-    val drops: SharedFlow<Unit> get() = transport.drops
+    override val drops: SharedFlow<Unit> get() = transport.drops
 
     /** Preset avatar id to use when registering a new account (rumax's default). */
     private var registerPhotoId: Long = 2981369L
-
-    /** Result of submitting an SMS code. */
-    sealed interface CodeResult {
-        data class Success(val loginToken: String) : CodeResult
-        data class NeedPassword(val trackId: String, val hint: String?) : CodeResult
-        /** This phone has no account yet — registration (a name) is required. */
-        data object NeedRegister : CodeResult
-    }
 
     // ---------------------------------------------------------------------
     // Connection
@@ -125,56 +229,70 @@ class MaxClient {
     }
 
     /** Opens the TLS connection and performs the opcode-6 ANDROID handshake. */
-    suspend fun connect(deviceId: String, mtInstance: String) {
+    override suspend fun connect(
+        deviceId: String,
+        mtInstance: String,
+    ) {
         if (transport.isConnected) return
         transport.connect()
 
-        transport.request(OP_HANDSHAKE, buildJsonObject {
-            put("clientSessionId", 1)
-            put("mt_instanceid", mtInstance)
-            putJsonObject("userAgent") {
-                put("deviceType", "ANDROID")
-                put("appVersion", APP_VERSION)
-                put("osVersion", "Android 13")
-                put("timezone", "Europe/Moscow")
-                put("screen", "130dpi 130dpi 600x874")
-                put("pushDeviceType", "GCM")
-                put("locale", "ru")
-                put("buildNumber", BUILD_NUMBER)
-                put("deviceName", "unknown Generic Android-x86_64")
-                put("deviceLocale", "ru")
-            }
-            put("deviceId", deviceId)
-        })
+        transport.request(
+            OP_HANDSHAKE,
+            buildJsonObject {
+                put("clientSessionId", 1)
+                put("mt_instanceid", mtInstance)
+                putJsonObject("userAgent") {
+                    put("deviceType", "ANDROID")
+                    put("appVersion", APP_VERSION)
+                    put("osVersion", "Android 13")
+                    put("timezone", "Europe/Moscow")
+                    put("screen", "130dpi 130dpi 600x874")
+                    put("pushDeviceType", "GCM")
+                    put("locale", "ru")
+                    put("buildNumber", BUILD_NUMBER)
+                    put("deviceName", "unknown Generic Android-x86_64")
+                    put("deviceLocale", "ru")
+                }
+                put("deviceId", deviceId)
+            },
+        )
         transport.startPing()
     }
 
-    fun disconnect() = transport.disconnect()
+    override fun disconnect() = transport.disconnect()
 
     // ---------------------------------------------------------------------
     // Authentication
     // ---------------------------------------------------------------------
 
     /** Requests an SMS code. Returns the expected code length; throws on refusal. */
-    suspend fun startAuth(phone: String): Int {
-        val payload = transport.request(OP_START_AUTH, buildJsonObject {
-            put("phone", phone)
-            put("type", "START_AUTH")
-            put("language", "ru")
-        })
+    override suspend fun startAuth(phone: String): Int {
+        val payload =
+            transport.request(
+                OP_START_AUTH,
+                buildJsonObject {
+                    put("phone", phone)
+                    put("type", "START_AUTH")
+                    put("language", "ru")
+                },
+            )
         authToken = payload["token"]?.jsonPrimitive?.contentOrNullSafe()
         if (authToken == null) error(payload.serverMessage("Не удалось отправить код"))
         return payload["codeLength"]?.jsonPrimitive?.int ?: 6
     }
 
     /** Submits the SMS code. Either logs in, or signals that a 2FA password is needed. */
-    suspend fun checkCode(code: String): CodeResult {
+    override suspend fun checkCode(code: String): CodeResult {
         val token = authToken ?: error("Сначала запросите код")
-        val payload = transport.request(OP_CHECK_CODE, buildJsonObject {
-            put("token", token)
-            put("verifyCode", code)
-            put("authTokenType", "CHECK_CODE")
-        })
+        val payload =
+            transport.request(
+                OP_CHECK_CODE,
+                buildJsonObject {
+                    put("token", token)
+                    put("verifyCode", code)
+                    put("authTokenType", "CHECK_CODE")
+                },
+            )
         payload.loginToken()?.let { return CodeResult.Success(it) }
         payload.passwordTrackId()?.let { return CodeResult.NeedPassword(it, payload.passwordHint()) }
         // New, unregistered phone: the server returns a REGISTER token + preset avatars.
@@ -187,15 +305,22 @@ class MaxClient {
     }
 
     /** Completes registration of a new account with [firstName]. Returns the login token. */
-    suspend fun register(firstName: String, lastName: String? = null): String {
-        val payload = transport.request(OP_REGISTER, buildJsonObject {
-            put("token", authToken) // the REGISTER token from checkCode — required
-            put("firstName", firstName)
-            put("lastName", lastName)
-            put("photoId", registerPhotoId)
-            put("avatarType", "PRESET_AVATAR")
-            put("tokenType", "REGISTER")
-        })
+    override suspend fun register(
+        firstName: String,
+        lastName: String?,
+    ): String {
+        val payload =
+            transport.request(
+                OP_REGISTER,
+                buildJsonObject {
+                    put("token", authToken) // the REGISTER token from checkCode — required
+                    put("firstName", firstName)
+                    put("lastName", lastName)
+                    put("photoId", registerPhotoId)
+                    put("avatarType", "PRESET_AVATAR")
+                    put("tokenType", "REGISTER")
+                },
+            )
         // The login token may come back under tokenAttrs.LOGIN or as a top-level field.
         return payload.loginToken()
             ?: payload["token"]?.jsonPrimitive?.contentOrNullSafe()
@@ -203,11 +328,18 @@ class MaxClient {
     }
 
     /** Submits the 2FA cloud password. Returns the login token; throws on failure. */
-    suspend fun checkPassword(password: String, trackId: String): String {
-        val payload = transport.request(OP_CHECK_PASSWORD, buildJsonObject {
-            put("password", password)
-            put("trackId", trackId)
-        })
+    override suspend fun checkPassword(
+        password: String,
+        trackId: String,
+    ): String {
+        val payload =
+            transport.request(
+                OP_CHECK_PASSWORD,
+                buildJsonObject {
+                    put("password", password)
+                    put("trackId", trackId)
+                },
+            )
         return payload.loginToken() ?: error(payload.serverMessage("Неверный пароль"))
     }
 
@@ -215,46 +347,67 @@ class MaxClient {
     // Contacts / starting a dialog
     // ---------------------------------------------------------------------
 
-    data class FoundUser(val userId: Long, val name: String)
-
     /** Looks up a Max user by phone number. Throws if not found. */
-    suspend fun findByPhone(phone: String): FoundUser {
+    override suspend fun findByPhone(phone: String): FoundUser {
         val payload = transport.request(OP_CONTACT_BY_PHONE, buildJsonObject { put("phone", phone) })
-        val contact = payload["contact"]?.jsonObject
-            ?: error(payload.serverMessage("Пользователь Max с таким номером не найден"))
-        val id = contact["id"]?.jsonPrimitive?.longOrNullSafe()
-            ?: error("Пользователь Max с таким номером не найден")
+        val contact =
+            payload["contact"]?.jsonObject
+                ?: error(payload.serverMessage("Пользователь Max с таким номером не найден"))
+        val id =
+            contact["id"]?.jsonPrimitive?.longOrNullSafe()
+                ?: error("Пользователь Max с таким номером не найден")
         return FoundUser(id, contact.displayName() ?: phone)
     }
 
     /** Adds [userId] to the contact list under [firstName]. */
-    suspend fun addContact(userId: Long, firstName: String) {
-        transport.request(OP_CONTACT_UPDATE, buildJsonObject {
-            put("contactId", userId)
-            put("firstName", firstName)
-            put("action", "ADD")
-        })
+    override suspend fun addContact(
+        userId: Long,
+        firstName: String,
+    ) {
+        transport.request(
+            OP_CONTACT_UPDATE,
+            buildJsonObject {
+                put("contactId", userId)
+                put("firstName", firstName)
+                put("action", "ADD")
+            },
+        )
     }
 
     /** The 1:1 dialog chat id between two users is the XOR of their ids. */
-    fun dialogChatId(myId: Long, otherId: Long): Long = myId xor otherId
+    override fun dialogChatId(
+        myId: Long,
+        otherId: Long,
+    ): Long = myId xor otherId
 
     /** Looks up a single user's display name by id (for notifications/group senders). */
-    suspend fun fetchContactName(userId: Long): String? {
-        val payload = transport.request(OP_CONTACT_INFO, buildJsonObject {
-            put("contactIds", buildJsonArray { add(userId) })
-        })
+    override suspend fun fetchContactName(userId: Long): String? {
+        val payload =
+            transport.request(
+                OP_CONTACT_INFO,
+                buildJsonObject {
+                    put("contactIds", buildJsonArray { add(userId) })
+                },
+            )
         val contact = payload["contacts"]?.jsonArray?.firstOrNull()?.jsonObject ?: return null
         return contact.displayName()
     }
 
     /** Resolves a playable video URL (best available MP4, else HLS) for a VIDEO attach. */
-    suspend fun getVideoUrl(chatId: Long, messageId: Long, videoId: Long): String? {
-        val payload = transport.request(OP_VIDEO_PLAY, buildJsonObject {
-            put("chatId", chatId)
-            put("messageId", messageId)
-            put("videoId", videoId)
-        })
+    override suspend fun getVideoUrl(
+        chatId: Long,
+        messageId: Long,
+        videoId: Long,
+    ): String? {
+        val payload =
+            transport.request(
+                OP_VIDEO_PLAY,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("messageId", messageId)
+                    put("videoId", videoId)
+                },
+            )
         for (q in listOf("MP4_1080", "MP4_720", "MP4_480", "MP4_360", "HLS")) {
             payload[q]?.jsonPrimitive?.contentOrNullSafe()?.let { return it }
         }
@@ -265,88 +418,101 @@ class MaxClient {
     // Sync (chats + contacts + profile)
     // ---------------------------------------------------------------------
 
-    data class SyncResult(
-        val account: Account,
-        val chats: List<Chat>,
-        /** userId -> display name, for avatars and sender labels. */
-        val contacts: Map<Long, String>,
-        /** Full contact info for the Contacts page. */
-        val contactsList: List<UserInfo>,
-        /** The server rolls the login token on each sync; persist it if present. */
-        val refreshedToken: String?,
-    )
-
     /** Authenticates the connection with [token] and pulls the chat list. */
-    suspend fun sync(token: String): SyncResult {
-        val payload = transport.request(OP_SYNC, buildJsonObject {
-            put("interactive", true)
-            put("token", token)
-            put("chatsSync", 0)
-            put("contactsSync", 0)
-            put("presenceSync", 0)
-            put("draftsSync", 0)
-            put("chatsCount", 40)
-        })
+    override suspend fun sync(token: String): SyncResult {
+        val payload =
+            transport.request(
+                OP_SYNC,
+                buildJsonObject {
+                    put("interactive", true)
+                    put("token", token)
+                    put("chatsSync", 0)
+                    put("contactsSync", 0)
+                    put("presenceSync", 0)
+                    put("draftsSync", 0)
+                    put("chatsCount", 40)
+                },
+            )
 
         payload["error"]?.let { error(payload.serverMessage("Ошибка синхронизации")) }
 
         // --- my profile ---
         val contact = payload["profile"]?.jsonObject?.get("contact")?.jsonObject
         val myId = contact?.get("id")?.jsonPrimitive?.long ?: 0L
-        val account = Account(
-            userId = myId,
-            firstName = contact.firstName() ?: "Я",
-            lastName = contact.lastName(),
-            avatarUrl = contact?.avatarUrl(),
-        )
+        val account =
+            Account(
+                userId = myId,
+                firstName = contact.firstName() ?: "Я",
+                lastName = contact.lastName(),
+                avatarUrl = contact?.avatarUrl(),
+            )
 
         // --- contacts: full info for the Contacts page + id->name for dialog titles ---
-        val contactsList = payload["contacts"]?.jsonArray.orEmptyList()
-            .mapNotNull { parseUser(it.jsonObject) }
-            .sortedBy { it.name.lowercase() }
+        val contactsList =
+            payload["contacts"]
+                ?.jsonArray
+                .orEmptyList()
+                .mapNotNull { parseUser(it.jsonObject) }
+                .sortedBy { it.name.lowercase() }
         val names = contactsList.associate { it.id to it.name }.toMutableMap()
 
         // --- chats ---
-        val chats = payload["chats"]?.jsonArray.orEmptyList().mapNotNull { el ->
-            val c = el.jsonObject
-            val id = c["id"]?.jsonPrimitive?.long ?: return@mapNotNull null
-            val type = c["type"]?.jsonPrimitive?.contentOrNullSafe()
-            val rawTitle = c["title"]?.jsonPrimitive?.contentOrNullSafe()
-            val lastMessage = c["lastMessage"]?.jsonObject
-            val lastText = lastMessage?.get("text")?.jsonPrimitive?.contentOrNullSafe()?.let { localize(it) }
-            val lastTime = c["lastEventTime"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
-            val unread = c["newMessages"]?.jsonPrimitive?.intOrNullSafe() ?: 0
-            val isDialog = type == "DIALOG"
-            // participants = {userId: lastReadMarkMs}; the other side's mark tells us
-            // how far they've read (so our messages up to it show ✓✓).
-            val otherReadMark = c["participants"]?.jsonObject?.entries
-                ?.filter { it.key.toLongOrNull() != null && it.key.toLong() != myId }
-                ?.mapNotNull { it.value.jsonPrimitive.longOrNullSafe() }
-                ?.maxOrNull() ?: 0L
+        val chats =
+            payload["chats"]
+                ?.jsonArray
+                .orEmptyList()
+                .mapNotNull { el ->
+                    val c = el.jsonObject
+                    val id = c["id"]?.jsonPrimitive?.long ?: return@mapNotNull null
+                    val type = c["type"]?.jsonPrimitive?.contentOrNullSafe()
+                    val rawTitle = c["title"]?.jsonPrimitive?.contentOrNullSafe()
+                    val lastMessage = c["lastMessage"]?.jsonObject
+                    val lastText =
+                        lastMessage
+                            ?.get("text")
+                            ?.jsonPrimitive
+                            ?.contentOrNullSafe()
+                            ?.let { localize(it) }
+                    val lastTime = c["lastEventTime"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
+                    val unread = c["newMessages"]?.jsonPrimitive?.intOrNullSafe() ?: 0
+                    val isDialog = type == "DIALOG"
+                    // participants = {userId: lastReadMarkMs}; the other side's mark tells us
+                    // how far they've read (so our messages up to it show ✓✓).
+                    val otherReadMark =
+                        c["participants"]
+                            ?.jsonObject
+                            ?.entries
+                            ?.filter { it.key.toLongOrNull() != null && it.key.toLong() != myId }
+                            ?.mapNotNull { it.value.jsonPrimitive.longOrNullSafe() }
+                            ?.maxOrNull() ?: 0L
 
-            val title = when {
-                !rawTitle.isNullOrBlank() -> rawTitle
-                isDialog -> {
-                    val other = c["participants"]?.jsonObject?.keys
-                        ?.mapNotNull { it.toLongOrNull() }
-                        ?.firstOrNull { it != myId }
-                    when {
-                        other == null -> "Избранное" // self-chat (chatId == myId xor myId == 0)
-                        else -> names[other] ?: "Диалог $id"
-                    }
-                }
-                else -> "Чат $id"
-            }
-            Chat(
-                id = id,
-                title = title,
-                lastMessageText = lastText,
-                lastEventTime = lastTime,
-                unreadCount = unread,
-                isDialog = isDialog,
-                otherReadMark = otherReadMark,
-            )
-        }.sortedByDescending { it.lastEventTime }
+                    val title =
+                        when {
+                            !rawTitle.isNullOrBlank() -> rawTitle
+                            isDialog -> {
+                                val other =
+                                    c["participants"]
+                                        ?.jsonObject
+                                        ?.keys
+                                        ?.mapNotNull { it.toLongOrNull() }
+                                        ?.firstOrNull { it != myId }
+                                when {
+                                    other == null -> "Избранное" // self-chat (chatId == myId xor myId == 0)
+                                    else -> names[other] ?: "Диалог $id"
+                                }
+                            }
+                            else -> "Чат $id"
+                        }
+                    Chat(
+                        id = id,
+                        title = title,
+                        lastMessageText = lastText,
+                        lastEventTime = lastTime,
+                        unreadCount = unread,
+                        isDialog = isDialog,
+                        otherReadMark = otherReadMark,
+                    )
+                }.sortedByDescending { it.lastEventTime }
 
         // The server returns a (possibly rolled) login token here — persist it.
         val refreshedToken = payload["token"]?.jsonPrimitive?.contentOrNullSafe()
@@ -355,27 +521,42 @@ class MaxClient {
     }
 
     /** Full profile of a single user (for the user page). */
-    suspend fun fetchUser(userId: Long): UserInfo? {
-        val payload = transport.request(OP_CONTACT_INFO, buildJsonObject {
-            put("contactIds", buildJsonArray { add(userId) })
-        })
-        return payload["contacts"]?.jsonArray?.firstOrNull()?.jsonObject?.let { parseUser(it) }
+    override suspend fun fetchUser(userId: Long): UserInfo? {
+        val payload =
+            transport.request(
+                OP_CONTACT_INFO,
+                buildJsonObject {
+                    put("contactIds", buildJsonArray { add(userId) })
+                },
+            )
+        return payload["contacts"]
+            ?.jsonArray
+            ?.firstOrNull()
+            ?.jsonObject
+            ?.let { parseUser(it) }
     }
 
     /** Public search by name — returns openable chats/channels (each result wraps a `chat`). */
-    suspend fun searchChats(query: String): List<SearchResult> {
-        val payload = transport.request(OP_PUBLIC_SEARCH, buildJsonObject {
-            put("query", query)
-            put("count", 20)
-            put("type", "ALL")
-        })
-        return payload["result"]?.jsonArray.orEmptyList().mapNotNull { el ->
-            val chat = el.jsonObject["chat"]?.jsonObject ?: return@mapNotNull null
-            val id = chat["id"]?.jsonPrimitive?.longOrNullSafe() ?: return@mapNotNull null
-            val type = chat["type"]?.jsonPrimitive?.contentOrNullSafe()
-            val title = chat["title"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null } ?: "Чат $id"
-            SearchResult(chatId = id, title = title, avatarUrl = chat.avatarUrl(), isDialog = type == "DIALOG")
-        }.distinctBy { it.chatId }
+    override suspend fun searchChats(query: String): List<SearchResult> {
+        val payload =
+            transport.request(
+                OP_PUBLIC_SEARCH,
+                buildJsonObject {
+                    put("query", query)
+                    put("count", 20)
+                    put("type", "ALL")
+                },
+            )
+        return payload["result"]
+            ?.jsonArray
+            .orEmptyList()
+            .mapNotNull { el ->
+                val chat = el.jsonObject["chat"]?.jsonObject ?: return@mapNotNull null
+                val id = chat["id"]?.jsonPrimitive?.longOrNullSafe() ?: return@mapNotNull null
+                val type = chat["type"]?.jsonPrimitive?.contentOrNullSafe()
+                val title = chat["title"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null } ?: "Чат $id"
+                SearchResult(chatId = id, title = title, avatarUrl = chat.avatarUrl(), isDialog = type == "DIALOG")
+            }.distinctBy { it.chatId }
     }
 
     // ---------------------------------------------------------------------
@@ -383,32 +564,50 @@ class MaxClient {
     // ---------------------------------------------------------------------
 
     /** Loads recent messages for [chatId], oldest-first. */
-    suspend fun fetchHistory(chatId: Long, fromTime: Long, count: Int = 50): List<Message> {
-        val payload = transport.request(OP_FETCH_HISTORY, buildJsonObject {
-            put("chatId", chatId)
-            put("from", fromTime)
-            put("forward", 0)
-            put("backward", count)
-            put("getMessages", true)
-        })
-        return payload["messages"]?.jsonArray.orEmptyList()
+    override suspend fun fetchHistory(
+        chatId: Long,
+        fromTime: Long,
+        count: Int,
+    ): List<Message> {
+        val payload =
+            transport.request(
+                OP_FETCH_HISTORY,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("from", fromTime)
+                    put("forward", 0)
+                    put("backward", count)
+                    put("getMessages", true)
+                },
+            )
+        return payload["messages"]
+            ?.jsonArray
+            .orEmptyList()
             .mapNotNull { parseMessage(it.jsonObject, chatId) }
             .sortedBy { it.time }
     }
 
     /** Sends [text] to [chatId]. Returns the server-confirmed message, or null. */
-    suspend fun sendMessage(chatId: Long, text: String, cid: Long): Message? {
-        val payload = transport.request(OP_SEND_MESSAGE, buildJsonObject {
-            put("chatId", chatId)
-            putJsonObject("message") {
-                put("text", text)
-                put("cid", cid)
-                put("elements", buildJsonArrayEmpty())
-                put("attaches", buildJsonArrayEmpty())
-                put("link", kotlinx.serialization.json.JsonNull)
-            }
-            put("notify", true)
-        })
+    override suspend fun sendMessage(
+        chatId: Long,
+        text: String,
+        cid: Long,
+    ): Message? {
+        val payload =
+            transport.request(
+                OP_SEND_MESSAGE,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    putJsonObject("message") {
+                        put("text", text)
+                        put("cid", cid)
+                        put("elements", buildJsonArrayEmpty())
+                        put("attaches", buildJsonArrayEmpty())
+                        put("link", kotlinx.serialization.json.JsonNull)
+                    }
+                    put("notify", true)
+                },
+            )
         val msg = payload["message"]?.jsonObject ?: return null
         return parseMessage(msg, chatId)
     }
@@ -417,93 +616,140 @@ class MaxClient {
     // Helpers
     // ---------------------------------------------------------------------
 
-    private fun parseMessage(obj: JsonObject, chatId: Long): Message? {
+    private fun parseMessage(
+        obj: JsonObject,
+        chatId: Long,
+    ): Message? {
         val baseText = localize(obj["text"]?.jsonPrimitive?.contentOrNullSafe() ?: "")
         val attaches = obj["attaches"]?.jsonArray.orEmptyList()
 
         // Images/videos we render inline (PHOTO baseUrl, VIDEO thumbnail).
-        val media = attaches.mapNotNull { el ->
-            val a = el.jsonObject
-            val w = a["width"]?.jsonPrimitive?.intOrNullSafe() ?: 0
-            val h = a["height"]?.jsonPrimitive?.intOrNullSafe() ?: 0
-            when (a["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
-                "PHOTO" -> a["baseUrl"]?.jsonPrimitive?.contentOrNullSafe()
-                    ?.let { MediaAttach(MediaType.PHOTO, it, w, h) }
-                "VIDEO" -> a["thumbnail"]?.jsonPrimitive?.contentOrNullSafe()
-                    ?.let { MediaAttach(MediaType.VIDEO, it, w, h, a["videoId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L) }
-                else -> null
+        val media =
+            attaches.mapNotNull { el ->
+                val a = el.jsonObject
+                val w = a["width"]?.jsonPrimitive?.intOrNullSafe() ?: 0
+                val h = a["height"]?.jsonPrimitive?.intOrNullSafe() ?: 0
+                when (a["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
+                    "PHOTO" ->
+                        a["baseUrl"]
+                            ?.jsonPrimitive
+                            ?.contentOrNullSafe()
+                            ?.let { MediaAttach(MediaType.PHOTO, it, w, h) }
+                    "VIDEO" ->
+                        a["thumbnail"]
+                            ?.jsonPrimitive
+                            ?.contentOrNullSafe()
+                            ?.let { MediaAttach(MediaType.VIDEO, it, w, h, a["videoId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L) }
+                    else -> null
+                }
             }
-        }
         // Non-renderable attaches still get a text label so they aren't invisible.
-        val mediaLabel = attaches.firstNotNullOfOrNull { el ->
-            when (el.jsonObject["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
-                "FILE" -> "📎 Файл"
-                "AUDIO" -> "🎵 Голосовое сообщение"
-                "SHARE" -> "🔗 Ссылка"
-                else -> null
+        val mediaLabel =
+            attaches.firstNotNullOfOrNull { el ->
+                when (el.jsonObject["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
+                    "FILE" -> "📎 Файл"
+                    "AUDIO" -> "🎵 Голосовое сообщение"
+                    "SHARE" -> "🔗 Ссылка"
+                    else -> null
+                }
             }
-        }
         // System/service messages carry their text in a CONTROL attach.
-        val controlText = attaches.firstNotNullOfOrNull { el ->
-            val a = el.jsonObject
-            if (a["_type"]?.jsonPrimitive?.contentOrNullSafe() == "CONTROL") {
-                (a["message"] ?: a["shortMessage"])?.jsonPrimitive?.contentOrNullSafe()
-            } else null
-        }
-        val text = buildString {
-            append(if (baseText.isNotEmpty()) baseText else (controlText ?: ""))
-            if (mediaLabel != null) {
-                if (isNotEmpty()) append('\n')
-                append(mediaLabel)
+        val controlText =
+            attaches.firstNotNullOfOrNull { el ->
+                val a = el.jsonObject
+                if (a["_type"]?.jsonPrimitive?.contentOrNullSafe() == "CONTROL") {
+                    (a["message"] ?: a["shortMessage"])?.jsonPrimitive?.contentOrNullSafe()
+                } else {
+                    null
+                }
             }
-        }
+        val text =
+            buildString {
+                append(if (baseText.isNotEmpty()) baseText else (controlText ?: ""))
+                if (mediaLabel != null) {
+                    if (isNotEmpty()) append('\n')
+                    append(mediaLabel)
+                }
+            }
         val sender = obj["sender"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
         val time = obj["time"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
         val id = obj["id"]?.jsonPrimitive?.contentOrNullSafe()
         val cid = obj["cid"]?.jsonPrimitive?.longOrNullSafe()
         // Server `status`: 3 == READ (per the maxplus reference), otherwise treat as SENT.
-        val status = when (obj["status"]?.jsonPrimitive?.intOrNullSafe()) {
-            null -> MessageStatus.UNKNOWN
-            3 -> MessageStatus.READ
-            else -> MessageStatus.SENT
-        }
+        val status =
+            when (obj["status"]?.jsonPrimitive?.intOrNullSafe()) {
+                null -> MessageStatus.UNKNOWN
+                3 -> MessageStatus.READ
+                else -> MessageStatus.SENT
+            }
         // Skip empty service messages with no text, no media and no id.
         if (text.isEmpty() && media.isEmpty() && id == null) return null
         return Message(
-            id = id, cid = cid, chatId = chatId, senderId = sender,
-            text = text, time = time, status = status, media = media,
+            id = id,
+            cid = cid,
+            chatId = chatId,
+            senderId = sender,
+            text = text,
+            time = time,
+            status = status,
+            media = media,
         )
     }
 
     /** Tells the server we've read everything up to [messageId] in [chatId]. */
-    suspend fun markRead(chatId: Long, messageId: String, mark: Long) {
+    override suspend fun markRead(
+        chatId: Long,
+        messageId: String,
+        mark: Long,
+    ) {
         // The server expects messageId as a NUMBER; sending it as a string makes
         // the server reply with an error AND drop the connection.
         val mid = messageId.toLongOrNull() ?: return
-        transport.request(OP_MARK_READ, buildJsonObject {
-            put("type", "READ_MESSAGE")
-            put("chatId", chatId)
-            put("messageId", mid)
-            put("mark", mark)
-        })
+        transport.request(
+            OP_MARK_READ,
+            buildJsonObject {
+                put("type", "READ_MESSAGE")
+                put("chatId", chatId)
+                put("messageId", mid)
+                put("mark", mark)
+            },
+        )
     }
 }
 
 /** Extracts tokenAttrs.LOGIN.token if present. */
 private fun JsonObject.loginToken(): String? =
-    this["tokenAttrs"]?.jsonObject?.get("LOGIN")?.jsonObject
-        ?.get("token")?.jsonPrimitive?.contentOrNullSafe()
+    this["tokenAttrs"]
+        ?.jsonObject
+        ?.get("LOGIN")
+        ?.jsonObject
+        ?.get("token")
+        ?.jsonPrimitive
+        ?.contentOrNullSafe()
 
 /** Extracts tokenAttrs.REGISTER.token if present (returned for unregistered phones). */
 private fun JsonObject.registerToken(): String? =
-    this["tokenAttrs"]?.jsonObject?.get("REGISTER")?.jsonObject
-        ?.get("token")?.jsonPrimitive?.contentOrNullSafe()
+    this["tokenAttrs"]
+        ?.jsonObject
+        ?.get("REGISTER")
+        ?.jsonObject
+        ?.get("token")
+        ?.jsonPrimitive
+        ?.contentOrNullSafe()
 
 /** The id of the first server-offered preset avatar, if any. */
 private fun JsonObject.firstPresetAvatarId(): Long? =
-    this["presetAvatars"]?.jsonArray?.firstOrNull()?.jsonObject
-        ?.get("avatars")?.jsonArray?.firstOrNull()?.jsonObject
-        ?.get("id")?.jsonPrimitive?.longOrNullSafe()
+    this["presetAvatars"]
+        ?.jsonArray
+        ?.firstOrNull()
+        ?.jsonObject
+        ?.get("avatars")
+        ?.jsonArray
+        ?.firstOrNull()
+        ?.jsonObject
+        ?.get("id")
+        ?.jsonPrimitive
+        ?.longOrNullSafe()
 
 /** Extracts the 2FA challenge trackId (passwordChallenge may be a string or an object). */
 private fun JsonObject.passwordTrackId(): String? {
@@ -515,13 +761,13 @@ private fun JsonObject.passwordTrackId(): String? {
 }
 
 /** Optional password hint from the passwordChallenge. */
-private fun JsonObject.passwordHint(): String? =
-    (this["passwordChallenge"] as? JsonObject)?.get("hint")?.jsonPrimitive?.contentOrNullSafe()
+private fun JsonObject.passwordHint(): String? = (this["passwordChallenge"] as? JsonObject)?.get("hint")?.jsonPrimitive?.contentOrNullSafe()
 
 /** Maps the server's localization-key placeholders to Russian text. */
-private val LOCALIZED_TEXT = mapOf(
-    "welcome.saved.dialog.message" to "Добро пожаловать! Здесь хранятся ваши сохранённые сообщения.",
-)
+private val LOCALIZED_TEXT =
+    mapOf(
+        "welcome.saved.dialog.message" to "Добро пожаловать! Здесь хранятся ваши сохранённые сообщения.",
+    )
 
 private fun localize(text: String): String = LOCALIZED_TEXT[text] ?: text
 
@@ -538,22 +784,31 @@ private fun buildJsonArrayEmpty() = kotlinx.serialization.json.buildJsonArray { 
 private fun kotlinx.serialization.json.JsonPrimitive.contentOrNullSafe(): String? =
     if (this is kotlinx.serialization.json.JsonNull) null else content
 
-private fun kotlinx.serialization.json.JsonPrimitive.longOrNullSafe(): Long? =
-    contentOrNullSafe()?.toLongOrNull()
+private fun kotlinx.serialization.json.JsonPrimitive.longOrNullSafe(): Long? = contentOrNullSafe()?.toLongOrNull()
 
-private fun kotlinx.serialization.json.JsonPrimitive.intOrNullSafe(): Int? =
-    contentOrNullSafe()?.toIntOrNull()
+private fun kotlinx.serialization.json.JsonPrimitive.intOrNullSafe(): Int? = contentOrNullSafe()?.toIntOrNull()
 
-private fun kotlinx.serialization.json.JsonArray?.orEmptyList(): List<kotlinx.serialization.json.JsonElement> =
-    this ?: emptyList()
+private fun kotlinx.serialization.json.JsonArray?.orEmptyList(): List<kotlinx.serialization.json.JsonElement> = this ?: emptyList()
 
 private fun JsonObject?.firstName(): String? =
-    this?.get("names")?.jsonArray?.firstOrNull()?.jsonObject
-        ?.get("firstName")?.jsonPrimitive?.contentOrNullSafe()
+    this
+        ?.get("names")
+        ?.jsonArray
+        ?.firstOrNull()
+        ?.jsonObject
+        ?.get("firstName")
+        ?.jsonPrimitive
+        ?.contentOrNullSafe()
 
 private fun JsonObject?.lastName(): String? =
-    this?.get("names")?.jsonArray?.firstOrNull()?.jsonObject
-        ?.get("lastName")?.jsonPrimitive?.contentOrNullSafe()
+    this
+        ?.get("names")
+        ?.jsonArray
+        ?.firstOrNull()
+        ?.jsonObject
+        ?.get("lastName")
+        ?.jsonPrimitive
+        ?.contentOrNullSafe()
 
 private fun JsonObject.displayName(): String? {
     val first = firstName()
@@ -564,7 +819,8 @@ private fun JsonObject.displayName(): String? {
 /** Best available avatar URL from a user/contact/chat object. */
 private fun JsonObject.avatarUrl(): String? =
     (this["baseRawUrl"] ?: this["baseUrl"] ?: this["baseRawIconUrl"] ?: this["baseIconUrl"])
-        ?.jsonPrimitive?.contentOrNullSafe()
+        ?.jsonPrimitive
+        ?.contentOrNullSafe()
 
 /** Parses a server user/contact object into [UserInfo]. */
 private fun parseUser(o: JsonObject): UserInfo? {

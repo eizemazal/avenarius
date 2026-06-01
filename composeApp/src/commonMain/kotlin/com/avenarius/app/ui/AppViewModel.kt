@@ -11,12 +11,13 @@ import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
-import com.avenarius.app.net.MaxClient
+import com.avenarius.app.net.CodeResult
+import com.avenarius.app.net.MaxApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -29,8 +30,14 @@ enum class Tab { CHATS, CONTACTS, SETTINGS }
 /** Full-screen media viewer overlay state. */
 sealed interface MediaViewer {
     data object Loading : MediaViewer
-    data class Image(val url: String) : MediaViewer
-    data class Video(val url: String) : MediaViewer
+
+    data class Image(
+        val url: String,
+    ) : MediaViewer
+
+    data class Video(
+        val url: String,
+    ) : MediaViewer
 }
 
 data class AppState(
@@ -77,9 +84,8 @@ class AppViewModel(
     private val prefs: Prefs,
     // The client is app-scoped (shared with the background service), so the
     // ViewModel must NOT create or tear it down — it's injected.
-    private val client: MaxClient,
+    private val client: MaxApi,
 ) : ViewModel() {
-
     private val _state = MutableStateFlow(AppState())
     val state: StateFlow<AppState> = _state.asStateFlow()
 
@@ -93,7 +99,9 @@ class AppViewModel(
                 _state.update { s ->
                     if (s.currentChat?.id == msg.chatId && s.messages.none { it.id == msg.id }) {
                         s.copy(messages = s.messages + msg)
-                    } else s
+                    } else {
+                        s
+                    }
                 }
                 // We're looking at this chat -> immediately mark the new message read.
                 // Use max(now, msg.time) so device-clock skew can't make the mark
@@ -113,19 +121,26 @@ class AppViewModel(
                 _state.update { s ->
                     // Persist the new read mark on the chat so re-opening it (same
                     // session) still shows ✓✓ — not just the currently open messages.
-                    val chats = s.chats.map {
-                        if (it.id == rm.chatId) it.copy(otherReadMark = maxOf(it.otherReadMark, rm.mark)) else it
-                    }
-                    val current = s.currentChat?.let {
-                        if (it.id == rm.chatId) it.copy(otherReadMark = maxOf(it.otherReadMark, rm.mark)) else it
-                    }
-                    val messages = if (s.currentChat?.id == rm.chatId) {
-                        s.messages.map { m ->
-                            if (m.senderId == myId && m.time <= rm.mark && m.status != MessageStatus.READ) {
-                                m.copy(status = MessageStatus.READ)
-                            } else m
+                    val chats =
+                        s.chats.map {
+                            if (it.id == rm.chatId) it.copy(otherReadMark = maxOf(it.otherReadMark, rm.mark)) else it
                         }
-                    } else s.messages
+                    val current =
+                        s.currentChat?.let {
+                            if (it.id == rm.chatId) it.copy(otherReadMark = maxOf(it.otherReadMark, rm.mark)) else it
+                        }
+                    val messages =
+                        if (s.currentChat?.id == rm.chatId) {
+                            s.messages.map { m ->
+                                if (m.senderId == myId && m.time <= rm.mark && m.status != MessageStatus.READ) {
+                                    m.copy(status = MessageStatus.READ)
+                                } else {
+                                    m
+                                }
+                            }
+                        } else {
+                            s.messages
+                        }
                     s.copy(chats = chats, currentChat = current, messages = messages)
                 }
             }
@@ -158,46 +173,47 @@ class AppViewModel(
     private fun connectWithRetry(freshSession: Boolean) {
         if (connectJob?.isActive == true) return
         val token = prefs.token ?: return
-        connectJob = viewModelScope.launch {
-            if (freshSession && client.isConnected) client.disconnect()
-            _state.update { it.copy(reconnecting = true) }
-            var backoff = 1_000L
-            while (isActive) {
-                try {
-                    client.connect(prefs.deviceId, prefs.mtInstance)
-                    val result = client.sync(token)
-                    result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
-                    prefs.userId = result.account.userId
-                    _state.update { s ->
-                        s.copy(
-                            screen = if (s.screen == Screen.LOADING) Screen.CHATS else s.screen,
-                            account = result.account,
-                            chats = result.chats,
-                            contacts = result.contacts,
-                            contactsList = result.contactsList,
-                            reconnecting = false,
-                            busy = false,
-                            error = null,
-                        )
-                    }
-                    _state.value.currentChat?.let { reloadOpenChat(it) } // catch up missed messages
-                    return@launch
-                } catch (e: Throwable) {
-                    val msg = e.message ?: "Ошибка"
-                    if (msg.contains("вход", true) || msg.contains("авториз", true)) {
-                        // Genuine auth rejection -> the token is dead, must re-login.
-                        prefs.clear()
-                        client.disconnect()
-                        _state.update { AppState(screen = Screen.LOGIN, error = msg) }
+        connectJob =
+            viewModelScope.launch {
+                if (freshSession && client.isConnected) client.disconnect()
+                _state.update { it.copy(reconnecting = true) }
+                var backoff = 1_000L
+                while (isActive) {
+                    try {
+                        client.connect(prefs.deviceId, prefs.mtInstance)
+                        val result = client.sync(token)
+                        result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
+                        prefs.userId = result.account.userId
+                        _state.update { s ->
+                            s.copy(
+                                screen = if (s.screen == Screen.LOADING) Screen.CHATS else s.screen,
+                                account = result.account,
+                                chats = result.chats,
+                                contacts = result.contacts,
+                                contactsList = result.contactsList,
+                                reconnecting = false,
+                                busy = false,
+                                error = null,
+                            )
+                        }
+                        _state.value.currentChat?.let { reloadOpenChat(it) } // catch up missed messages
                         return@launch
+                    } catch (e: Throwable) {
+                        val msg = e.message ?: "Ошибка"
+                        if (msg.contains("вход", true) || msg.contains("авториз", true)) {
+                            // Genuine auth rejection -> the token is dead, must re-login.
+                            prefs.clear()
+                            client.disconnect()
+                            _state.update { AppState(screen = Screen.LOGIN, error = msg) }
+                            return@launch
+                        }
+                        // Transient (connectivity/other): keep retrying with backoff.
+                        _state.update { it.copy(reconnecting = true) }
+                        delay(backoff)
+                        backoff = (backoff * 2).coerceAtMost(20_000L)
                     }
-                    // Transient (connectivity/other): keep retrying with backoff.
-                    _state.update { it.copy(reconnecting = true) }
-                    delay(backoff)
-                    backoff = (backoff * 2).coerceAtMost(20_000L)
                 }
             }
-        }
     }
 
     private fun reloadOpenChat(chat: Chat) {
@@ -213,45 +229,49 @@ class AppViewModel(
 
     private var passwordTrackId: String? = null
 
-    fun requestCode(phone: String) = run {
-        // Server expects clean international format, e.g. +79991234567.
-        val normalized = "+" + phone.filter { it.isDigit() }
-        pendingPhone = normalized
+    fun requestCode(phone: String) =
+        run {
+            // Server expects clean international format, e.g. +79991234567.
+            val normalized = "+" + phone.filter { it.isDigit() }
+            pendingPhone = normalized
+            launchBusy {
+                client.connect(prefs.deviceId, prefs.mtInstance)
+                val len = client.startAuth(normalized)
+                _state.update { it.copy(screen = Screen.CODE, codeLength = len) }
+            }
+        }
+
+    fun submitCode(code: String) =
         launchBusy {
-            client.connect(prefs.deviceId, prefs.mtInstance)
-            val len = client.startAuth(normalized)
-            _state.update { it.copy(screen = Screen.CODE, codeLength = len) }
-        }
-    }
-
-    fun submitCode(code: String) = launchBusy {
-        when (val result = client.checkCode(code)) {
-            is MaxClient.CodeResult.Success -> {
-                prefs.token = result.loginToken
-                connectAndSync(result.loginToken)
-            }
-            is MaxClient.CodeResult.NeedPassword -> {
-                passwordTrackId = result.trackId
-                _state.update { it.copy(screen = Screen.PASSWORD, passwordHint = result.hint) }
-            }
-            MaxClient.CodeResult.NeedRegister -> {
-                _state.update { it.copy(screen = Screen.REGISTER) }
+            when (val result = client.checkCode(code)) {
+                is CodeResult.Success -> {
+                    prefs.token = result.loginToken
+                    connectAndSync(result.loginToken)
+                }
+                is CodeResult.NeedPassword -> {
+                    passwordTrackId = result.trackId
+                    _state.update { it.copy(screen = Screen.PASSWORD, passwordHint = result.hint) }
+                }
+                CodeResult.NeedRegister -> {
+                    _state.update { it.copy(screen = Screen.REGISTER) }
+                }
             }
         }
-    }
 
-    fun submitRegister(firstName: String) = launchBusy {
-        val token = client.register(firstName.trim())
-        prefs.token = token
-        connectAndSync(token)
-    }
+    fun submitRegister(firstName: String) =
+        launchBusy {
+            val token = client.register(firstName.trim())
+            prefs.token = token
+            connectAndSync(token)
+        }
 
-    fun submitPassword(password: String) = launchBusy {
-        val trackId = passwordTrackId ?: error("Нет идентификатора пароля")
-        val token = client.checkPassword(password, trackId)
-        prefs.token = token
-        connectAndSync(token)
-    }
+    fun submitPassword(password: String) =
+        launchBusy {
+            val trackId = passwordTrackId ?: error("Нет идентификатора пароля")
+            val token = client.checkPassword(password, trackId)
+            prefs.token = token
+            connectAndSync(token)
+        }
 
     private suspend fun connectAndSync(token: String) {
         // The shared client may already be connected (and already synced once) from
@@ -305,9 +325,11 @@ class AppViewModel(
             )
         }
         launchBusy {
-            val history = withReadMarks(
-                client.fetchHistory(chat.id, fromTime = nowMillis(), count = 50), chat,
-            )
+            val history =
+                withReadMarks(
+                    client.fetchHistory(chat.id, fromTime = nowMillis(), count = 50),
+                    chat,
+                )
             _state.update { it.copy(messages = history) }
             // Mark read on the server and clear the local unread badge.
             history.lastOrNull()?.let { last ->
@@ -331,8 +353,9 @@ class AppViewModel(
     /** Opens a user's profile page (from a chat, the chat list, or contacts). */
     fun openUser(userId: Long) {
         // Seed from cached info, then fetch full details.
-        val cached = _state.value.contactsList.firstOrNull { it.id == userId }
-            ?: _state.value.contacts[userId]?.let { UserInfo(userId, it) }
+        val cached =
+            _state.value.contactsList.firstOrNull { it.id == userId }
+                ?: _state.value.contacts[userId]?.let { UserInfo(userId, it) }
         _state.update { it.copy(screen = Screen.USER, viewingUser = cached) }
         viewModelScope.launch {
             runCatching { client.fetchUser(userId) }.getOrNull()?.let { full ->
@@ -357,9 +380,14 @@ class AppViewModel(
         }
         val myId = _state.value.account?.userId
         // Local contacts matching the query, opened as 1:1 dialogs.
-        val local = if (myId == null) emptyList() else _state.value.contactsList
-            .filter { it.name.contains(q, ignoreCase = true) }
-            .map { SearchResult(client.dialogChatId(myId, it.id), it.name, it.avatarUrl, isDialog = true) }
+        val local =
+            if (myId == null) {
+                emptyList()
+            } else {
+                _state.value.contactsList
+                    .filter { it.name.contains(q, ignoreCase = true) }
+                    .map { SearchResult(client.dialogChatId(myId, it.id), it.name, it.avatarUrl, isDialog = true) }
+            }
         _state.update { it.copy(searchResults = local, searching = true) }
         viewModelScope.launch {
             val remote = runCatching { client.searchChats(q) }.getOrDefault(emptyList())
@@ -387,19 +415,23 @@ class AppViewModel(
     fun openDialogWith(user: UserInfo) {
         val myId = _state.value.account?.userId ?: return
         _state.update { it.copy(contacts = it.contacts + (user.id to user.name)) }
-        val chat = Chat(
-            id = client.dialogChatId(myId, user.id),
-            title = user.name,
-            lastMessageText = null,
-            lastEventTime = nowMillis(),
-            unreadCount = 0,
-            isDialog = true,
-        )
+        val chat =
+            Chat(
+                id = client.dialogChatId(myId, user.id),
+                title = user.name,
+                lastMessageText = null,
+                lastEventTime = nowMillis(),
+                unreadCount = 0,
+                isDialog = true,
+            )
         openChat(chat)
     }
 
     /** Opens the full-screen viewer for a tapped photo/video. */
-    fun openMedia(media: MediaAttach, messageId: String?) {
+    fun openMedia(
+        media: MediaAttach,
+        messageId: String?,
+    ) {
         when (media.type) {
             MediaType.PHOTO -> _state.update { it.copy(mediaViewer = MediaViewer.Image(media.url)) }
             MediaType.VIDEO -> {
@@ -426,13 +458,18 @@ class AppViewModel(
     fun closeMedia() = _state.update { it.copy(mediaViewer = null) }
 
     /** Reconstructs ✓✓ on loaded history: our messages the other side has already read. */
-    private fun withReadMarks(messages: List<Message>, chat: Chat): List<Message> {
+    private fun withReadMarks(
+        messages: List<Message>,
+        chat: Chat,
+    ): List<Message> {
         val myId = _state.value.account?.userId ?: return messages
         if (chat.otherReadMark <= 0) return messages
         return messages.map { m ->
             if (m.senderId == myId && m.time <= chat.otherReadMark && m.status != MessageStatus.READ) {
                 m.copy(status = MessageStatus.READ)
-            } else m
+            } else {
+                m
+            }
         }
     }
 
@@ -446,11 +483,15 @@ class AppViewModel(
         viewModelScope.launch {
             try {
                 val older = client.fetchHistory(chat.id, fromTime = oldest.time, count = 50)
-                val existingIds = _state.value.messages.mapNotNull { it.id }.toSet()
-                val fresh = withReadMarks(
-                    older.filter { it.time < oldest.time && (it.id == null || it.id !in existingIds) },
-                    chat,
-                )
+                val existingIds =
+                    _state.value.messages
+                        .mapNotNull { it.id }
+                        .toSet()
+                val fresh =
+                    withReadMarks(
+                        older.filter { it.time < oldest.time && (it.id == null || it.id !in existingIds) },
+                        chat,
+                    )
                 _state.update {
                     it.copy(
                         messages = fresh + it.messages,
@@ -472,14 +513,15 @@ class AppViewModel(
             val found = client.findByPhone(normalized)
             runCatching { client.addContact(found.userId, found.name) }
             _state.update { it.copy(contacts = it.contacts + (found.userId to found.name)) }
-            val chat = Chat(
-                id = client.dialogChatId(myId, found.userId),
-                title = found.name,
-                lastMessageText = null,
-                lastEventTime = nowMillis(),
-                unreadCount = 0,
-                isDialog = true,
-            )
+            val chat =
+                Chat(
+                    id = client.dialogChatId(myId, found.userId),
+                    title = found.name,
+                    lastMessageText = null,
+                    lastEventTime = nowMillis(),
+                    unreadCount = 0,
+                    isDialog = true,
+                )
             openChat(chat)
         }
     }
@@ -502,11 +544,15 @@ class AppViewModel(
     }
 
     /** True when there is a screen/tab to go back to (so we should intercept "back"). */
-    fun canGoBack(screen: Screen, tab: Tab): Boolean = when (screen) {
-        Screen.CHAT, Screen.USER, Screen.CODE, Screen.PASSWORD, Screen.REGISTER -> true
-        Screen.CHATS -> tab != Tab.CHATS
-        else -> false
-    }
+    fun canGoBack(
+        screen: Screen,
+        tab: Tab,
+    ): Boolean =
+        when (screen) {
+            Screen.CHAT, Screen.USER, Screen.CODE, Screen.PASSWORD, Screen.REGISTER -> true
+            Screen.CHATS -> tab != Tab.CHATS
+            else -> false
+        }
 
     /** Pull-to-refresh on the chat list: re-runs sync over the open connection. */
     fun refresh() {
@@ -546,8 +592,11 @@ class AppViewModel(
             val sent = client.sendMessage(chat.id, trimmed, cid)
             if (sent != null) {
                 _state.update { s ->
-                    if (s.messages.any { it.id == sent.id }) s
-                    else s.copy(messages = s.messages + sent)
+                    if (s.messages.any { it.id == sent.id }) {
+                        s
+                    } else {
+                        s.copy(messages = s.messages + sent)
+                    }
                 }
             }
         }

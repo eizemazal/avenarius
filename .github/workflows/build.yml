@@ -10,6 +10,10 @@ jobs:
   android:
     name: Build Android APK
     runs-on: ubuntu-latest
+    # The `secrets` context can't be used in `if:` expressions, so surface the
+    # keystore secret as an env var here and test that instead (empty when unset).
+    env:
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,12 +37,25 @@ jobs:
 
       - name: Decode keystore (optional, for signed release builds)
         id: keystore
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
           echo "path=$RUNNER_TEMP/release.jks" >> "$GITHUB_OUTPUT"
+
+      - name: Check code style (ktlint)
+        run: ./gradlew :composeApp:ktlintCheck --no-daemon --stacktrace
+
+      - name: Run unit tests
+        run: ./gradlew :composeApp:desktopTest --no-daemon --stacktrace
+
+      - name: Upload reports (ktlint + tests)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: |
+            composeApp/build/reports/ktlint/
+            composeApp/build/reports/tests/
 
       - name: Build debug APK
         run: ./gradlew :composeApp:assembleDebug --no-daemon --stacktrace

@@ -8,9 +8,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -27,22 +27,21 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,16 +56,16 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.withLink
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -89,7 +88,8 @@ private val AvenariusColors = darkColorScheme()
 fun App(viewModel: AppViewModel) {
     // Register Coil's Ktor-based network fetcher so AsyncImage can load CDN URLs.
     setSingletonImageLoaderFactory { context ->
-        ImageLoader.Builder(context)
+        ImageLoader
+            .Builder(context)
             .components { add(KtorNetworkFetcherFactory()) }
             .build()
     }
@@ -104,66 +104,72 @@ fun App(viewModel: AppViewModel) {
             }
 
             Box(Modifier.fillMaxSize()) {
-              Column(Modifier.fillMaxSize()) {
-                // Thin "reconnecting" strip while we transparently re-establish the
-                // connection — shown over the chat list / open chat, never a bounce.
-                if (state.reconnecting && (state.screen == Screen.CHATS || state.screen == Screen.CHAT)) {
-                    ReconnectingBar()
-                }
-                Box(Modifier.weight(1f)) {
-                    when (state.screen) {
-                        Screen.LOADING -> LoadingScreen(reconnecting = state.reconnecting)
-                        Screen.LOGIN -> LoginScreen(
-                    busy = state.busy,
-                    error = state.error,
-                    onSubmit = viewModel::requestCode,
-                )
-                Screen.CODE -> CodeScreen(
-                    busy = state.busy,
-                    error = state.error,
-                    codeLength = state.codeLength,
-                    onSubmit = viewModel::submitCode,
-                )
-                Screen.PASSWORD -> PasswordScreen(
-                    busy = state.busy,
-                    error = state.error,
-                    hint = state.passwordHint,
-                    onSubmit = viewModel::submitPassword,
-                )
-                Screen.REGISTER -> RegisterScreen(
-                    busy = state.busy,
-                    error = state.error,
-                    onSubmit = viewModel::submitRegister,
-                )
-                Screen.CHATS -> MainScreen(state, viewModel)
-                Screen.USER -> UserScreen(
-                    user = state.viewingUser,
-                    isMe = state.viewingUser?.id == state.account?.userId,
-                    onBack = viewModel::closeUser,
-                    onWrite = viewModel::openDialogWith,
-                    onAvatarClick = viewModel::openImage,
-                )
-                Screen.CHAT -> ChatScreen(
-                    chat = state.currentChat,
-                    messages = state.messages,
-                    myId = state.account?.userId ?: -1L,
-                    contacts = state.contacts,
-                    senderAvatars = state.contactsList.associate { it.id to it.avatarUrl },
-                    unreadAtOpen = state.openUnreadCount,
-                    busy = state.busy,
-                    error = state.error,
-                    loadingOlder = state.loadingOlder,
-                    onLoadOlder = viewModel::loadOlder,
-                    onBack = viewModel::backToChats,
-                    onSend = viewModel::sendMessage,
-                    onMediaClick = viewModel::openMedia,
-                    onOpenUser = viewModel::openUser,
-                )
+                Column(Modifier.fillMaxSize()) {
+                    // Thin "reconnecting" strip while we transparently re-establish the
+                    // connection — shown over the chat list / open chat, never a bounce.
+                    if (state.reconnecting && (state.screen == Screen.CHATS || state.screen == Screen.CHAT)) {
+                        ReconnectingBar()
+                    }
+                    Box(Modifier.weight(1f)) {
+                        when (state.screen) {
+                            Screen.LOADING -> LoadingScreen(reconnecting = state.reconnecting)
+                            Screen.LOGIN ->
+                                LoginScreen(
+                                    busy = state.busy,
+                                    error = state.error,
+                                    onSubmit = viewModel::requestCode,
+                                )
+                            Screen.CODE ->
+                                CodeScreen(
+                                    busy = state.busy,
+                                    error = state.error,
+                                    codeLength = state.codeLength,
+                                    onSubmit = viewModel::submitCode,
+                                )
+                            Screen.PASSWORD ->
+                                PasswordScreen(
+                                    busy = state.busy,
+                                    error = state.error,
+                                    hint = state.passwordHint,
+                                    onSubmit = viewModel::submitPassword,
+                                )
+                            Screen.REGISTER ->
+                                RegisterScreen(
+                                    busy = state.busy,
+                                    error = state.error,
+                                    onSubmit = viewModel::submitRegister,
+                                )
+                            Screen.CHATS -> MainScreen(state, viewModel)
+                            Screen.USER ->
+                                UserScreen(
+                                    user = state.viewingUser,
+                                    isMe = state.viewingUser?.id == state.account?.userId,
+                                    onBack = viewModel::closeUser,
+                                    onWrite = viewModel::openDialogWith,
+                                    onAvatarClick = viewModel::openImage,
+                                )
+                            Screen.CHAT ->
+                                ChatScreen(
+                                    chat = state.currentChat,
+                                    messages = state.messages,
+                                    myId = state.account?.userId ?: -1L,
+                                    contacts = state.contacts,
+                                    senderAvatars = state.contactsList.associate { it.id to it.avatarUrl },
+                                    unreadAtOpen = state.openUnreadCount,
+                                    busy = state.busy,
+                                    error = state.error,
+                                    loadingOlder = state.loadingOlder,
+                                    onLoadOlder = viewModel::loadOlder,
+                                    onBack = viewModel::backToChats,
+                                    onSend = viewModel::sendMessage,
+                                    onMediaClick = viewModel::openMedia,
+                                    onOpenUser = viewModel::openUser,
+                                )
+                        }
                     }
                 }
-              }
-              // Full-screen image/video viewer, layered above everything.
-              state.mediaViewer?.let { MediaViewerOverlay(it, onClose = viewModel::closeMedia) }
+                // Full-screen image/video viewer, layered above everything.
+                state.mediaViewer?.let { MediaViewerOverlay(it, onClose = viewModel::closeMedia) }
             }
         }
     }
@@ -221,7 +227,11 @@ private fun CenteredForm(content: @Composable ColumnScopeAlias.() -> Unit) {
 private typealias ColumnScopeAlias = androidx.compose.foundation.layout.ColumnScope
 
 @Composable
-private fun LoginScreen(busy: Boolean, error: String?, onSubmit: (String) -> Unit) {
+private fun LoginScreen(
+    busy: Boolean,
+    error: String?,
+    onSubmit: (String) -> Unit,
+) {
     var phone by remember { mutableStateOf("+7") }
     CenteredForm {
         Text("Авенариус", style = MaterialTheme.typography.headlineMedium)
@@ -249,7 +259,12 @@ private fun LoginScreen(busy: Boolean, error: String?, onSubmit: (String) -> Uni
 }
 
 @Composable
-private fun CodeScreen(busy: Boolean, error: String?, codeLength: Int, onSubmit: (String) -> Unit) {
+private fun CodeScreen(
+    busy: Boolean,
+    error: String?,
+    codeLength: Int,
+    onSubmit: (String) -> Unit,
+) {
     var code by remember { mutableStateOf("") }
     CenteredForm {
         Text("Подтверждение", style = MaterialTheme.typography.headlineMedium)
@@ -277,7 +292,12 @@ private fun CodeScreen(busy: Boolean, error: String?, codeLength: Int, onSubmit:
 }
 
 @Composable
-private fun PasswordScreen(busy: Boolean, error: String?, hint: String?, onSubmit: (String) -> Unit) {
+private fun PasswordScreen(
+    busy: Boolean,
+    error: String?,
+    hint: String?,
+    onSubmit: (String) -> Unit,
+) {
     var password by remember { mutableStateOf("") }
     CenteredForm {
         Text("Пароль для входа", style = MaterialTheme.typography.headlineMedium)
@@ -372,7 +392,11 @@ private fun NewChatDialog(
 }
 
 @Composable
-private fun RegisterScreen(busy: Boolean, error: String?, onSubmit: (String) -> Unit) {
+private fun RegisterScreen(
+    busy: Boolean,
+    error: String?,
+    onSubmit: (String) -> Unit,
+) {
     var name by remember { mutableStateOf("") }
     CenteredForm {
         Text("Регистрация", style = MaterialTheme.typography.headlineMedium)
@@ -400,16 +424,30 @@ private fun RegisterScreen(busy: Boolean, error: String?, onSubmit: (String) -> 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MainScreen(state: AppState, vm: AppViewModel) {
+private fun MainScreen(
+    state: AppState,
+    vm: AppViewModel,
+) {
     var showNewChat by remember { mutableStateOf(false) }
     if (showNewChat) {
         NewChatDialog(
             searchResults = state.searchResults,
             searching = state.searching,
             onSearch = vm::searchUsers,
-            onPickResult = { r -> showNewChat = false; vm.clearSearch(); vm.openSearchResult(r) },
-            onPhone = { phone -> showNewChat = false; vm.clearSearch(); vm.startChatByPhone(phone) },
-            onDismiss = { showNewChat = false; vm.clearSearch() },
+            onPickResult = { r ->
+                showNewChat = false
+                vm.clearSearch()
+                vm.openSearchResult(r)
+            },
+            onPhone = { phone ->
+                showNewChat = false
+                vm.clearSearch()
+                vm.startChatByPhone(phone)
+            },
+            onDismiss = {
+                showNewChat = false
+                vm.clearSearch()
+            },
         )
     }
     Scaffold(
@@ -456,21 +494,23 @@ private fun MainScreen(state: AppState, vm: AppViewModel) {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (state.tab) {
-                Tab.CHATS -> ChatsTab(
-                    chats = state.chats,
-                    myId = state.account?.userId ?: -1L,
-                    contacts = state.contactsList,
-                    isRefreshing = state.refreshing,
-                    onRefresh = vm::refresh,
-                    onOpenChat = vm::openChat,
-                    onOpenUser = vm::openUser,
-                )
+                Tab.CHATS ->
+                    ChatsTab(
+                        chats = state.chats,
+                        myId = state.account?.userId ?: -1L,
+                        contacts = state.contactsList,
+                        isRefreshing = state.refreshing,
+                        onRefresh = vm::refresh,
+                        onOpenChat = vm::openChat,
+                        onOpenUser = vm::openUser,
+                    )
                 Tab.CONTACTS -> ContactsTab(state.contactsList, vm::openUser)
-                Tab.SETTINGS -> SettingsTab(
-                    account = state.account,
-                    onOpenProfile = { state.account?.let { vm.openUser(it.userId) } },
-                    onLogout = vm::logout,
-                )
+                Tab.SETTINGS ->
+                    SettingsTab(
+                        account = state.account,
+                        onOpenProfile = { state.account?.let { vm.openUser(it.userId) } },
+                        onLogout = vm::logout,
+                    )
             }
         }
     }
@@ -498,7 +538,9 @@ private fun ChatsTab(
                     val otherId = if (chat.isDialog) chat.id xor myId else null
                     val avatarUrl = otherId?.let { id -> contacts.firstOrNull { it.id == id }?.avatarUrl }
                     Row(
-                        Modifier.fillMaxWidth().clickableRow { onOpenChat(chat) }
+                        Modifier
+                            .fillMaxWidth()
+                            .clickableRow { onOpenChat(chat) }
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -510,7 +552,12 @@ private fun ChatsTab(
                                 if (chat.unreadCount > 0) UnreadBadge(chat.unreadCount)
                             }
                             chat.lastMessageText?.let {
-                                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                )
                             }
                         }
                     }
@@ -522,7 +569,10 @@ private fun ChatsTab(
 }
 
 @Composable
-private fun ContactsTab(contacts: List<UserInfo>, onOpenUser: (Long) -> Unit) {
+private fun ContactsTab(
+    contacts: List<UserInfo>,
+    onOpenUser: (Long) -> Unit,
+) {
     if (contacts.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("Контактов нет", style = MaterialTheme.typography.bodyMedium)
@@ -540,7 +590,12 @@ private fun ContactsTab(contacts: List<UserInfo>, onOpenUser: (Long) -> Unit) {
                 Column {
                     Text(c.name, style = MaterialTheme.typography.titleMedium)
                     c.description?.takeIf { it.isNotBlank() }?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
                     }
                 }
             }
@@ -550,7 +605,11 @@ private fun ContactsTab(contacts: List<UserInfo>, onOpenUser: (Long) -> Unit) {
 }
 
 @Composable
-private fun SettingsTab(account: Account?, onOpenProfile: () -> Unit, onLogout: () -> Unit) {
+private fun SettingsTab(
+    account: Account?,
+    onOpenProfile: () -> Unit,
+    onLogout: () -> Unit,
+) {
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Row(
             Modifier.fillMaxWidth().clickableRow(onOpenProfile).padding(vertical = 8.dp),
@@ -622,7 +681,14 @@ private fun UserScreen(
             }
             HorizontalDivider()
             InfoRow("Телефон", user.phone?.let { "+$it" })
-            InfoRow("Пол", when (user.gender) { "MALE" -> "Мужской"; "FEMALE" -> "Женский"; else -> user.gender })
+            InfoRow(
+                "Пол",
+                when (user.gender) {
+                    "MALE" -> "Мужской"
+                    "FEMALE" -> "Женский"
+                    else -> user.gender
+                },
+            )
             InfoRow("Страна", user.country)
             InfoRow("Ссылка", user.link)
             InfoRow("Регистрация", user.registrationTime?.takeIf { it > 0 }?.let { formatDate(it) })
@@ -632,7 +698,10 @@ private fun UserScreen(
 }
 
 @Composable
-private fun InfoRow(label: String, value: String?) {
+private fun InfoRow(
+    label: String,
+    value: String?,
+) {
     if (value.isNullOrBlank()) return
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -640,38 +709,49 @@ private fun InfoRow(label: String, value: String?) {
     }
 }
 
-private val UrlRegex = Regex(
-    """(https?://[^\s]+)|([\w.-]+\.(?:ru|com|org|net|me|io|info|app|tv|dev)(?:/[^\s]*)?)""",
-    RegexOption.IGNORE_CASE,
-)
+private val UrlRegex =
+    Regex(
+        """(https?://[^\s]+)|([\w.-]+\.(?:ru|com|org|net|me|io|info|app|tv|dev)(?:/[^\s]*)?)""",
+        RegexOption.IGNORE_CASE,
+    )
 
 /** Renders [text] with embedded URLs as tappable links (opens the system browser). */
 @Composable
-private fun LinkedText(text: String, style: TextStyle, color: Color) {
+private fun LinkedText(
+    text: String,
+    style: TextStyle,
+    color: Color,
+) {
     val linkColor = MaterialTheme.colorScheme.primary
-    val annotated = remember(text, linkColor) {
-        buildAnnotatedString {
-            var last = 0
-            for (m in UrlRegex.findAll(text)) {
-                if (m.range.first > last) append(text.substring(last, m.range.first))
-                val raw = m.value
-                val url = if (raw.startsWith("http", ignoreCase = true)) raw else "https://$raw"
-                withLink(
-                    LinkAnnotation.Url(
-                        url,
-                        TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)),
-                    ),
-                ) { append(raw) }
-                last = m.range.last + 1
+    val annotated =
+        remember(text, linkColor) {
+            buildAnnotatedString {
+                var last = 0
+                for (m in UrlRegex.findAll(text)) {
+                    if (m.range.first > last) append(text.substring(last, m.range.first))
+                    val raw = m.value
+                    val url = if (raw.startsWith("http", ignoreCase = true)) raw else "https://$raw"
+                    withLink(
+                        LinkAnnotation.Url(
+                            url,
+                            TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)),
+                        ),
+                    ) { append(raw) }
+                    last = m.range.last + 1
+                }
+                if (last < text.length) append(text.substring(last))
             }
-            if (last < text.length) append(text.substring(last))
         }
-    }
     Text(annotated, style = style, color = color)
 }
 
 @Composable
-private fun Avatar(name: String, url: String?, size: Dp, onClick: (() -> Unit)? = null) {
+private fun Avatar(
+    name: String,
+    url: String?,
+    size: Dp,
+    onClick: (() -> Unit)? = null,
+) {
     var mod = Modifier.size(size).clip(CircleShape).background(avatarColor(name))
     if (onClick != null) mod = mod.clickable(onClick = onClick)
     if (!url.isNullOrBlank()) {
@@ -679,7 +759,11 @@ private fun Avatar(name: String, url: String?, size: Dp, onClick: (() -> Unit)? 
     } else {
         Box(mod, contentAlignment = Alignment.Center) {
             Text(
-                name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+                name
+                    .trim()
+                    .firstOrNull()
+                    ?.uppercaseChar()
+                    ?.toString() ?: "?",
                 color = Color.White,
                 style = MaterialTheme.typography.titleMedium,
             )
@@ -737,7 +821,10 @@ private fun ChatScreen(
             }
             messages.size > prevSize -> {
                 // New message appended: follow it only if already near the bottom.
-                val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                val lastVisible =
+                    listState.layoutInfo.visibleItemsInfo
+                        .lastOrNull()
+                        ?.index ?: 0
                 if (lastVisible >= prevSize - 2) listState.animateScrollToItem(messages.lastIndex)
             }
         }
@@ -805,9 +892,10 @@ private fun ChatScreen(
                     error,
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(8.dp),
+                    modifier =
+                        Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(8.dp),
                 )
             }
             LazyColumn(
@@ -898,7 +986,10 @@ private fun MessageRow(
 }
 
 @Composable
-private fun MediaThumbnail(media: MediaAttach, onClick: () -> Unit) {
+private fun MediaThumbnail(
+    media: MediaAttach,
+    onClick: () -> Unit,
+) {
     val shape = RoundedCornerShape(10.dp)
     var mod = Modifier.widthIn(max = 240.dp).heightIn(max = 320.dp).clip(shape)
     if (media.width > 0 && media.height > 0) {
@@ -923,7 +1014,10 @@ private fun MediaThumbnail(media: MediaAttach, onClick: () -> Unit) {
 }
 
 @Composable
-private fun MediaViewerOverlay(viewer: MediaViewer, onClose: () -> Unit) {
+private fun MediaViewerOverlay(
+    viewer: MediaViewer,
+    onClose: () -> Unit,
+) {
     PlatformBackHandler(enabled = true, onBack = onClose)
     Box(
         Modifier.fillMaxSize().background(Color(0xF2000000)).clickable(onClick = onClose),
@@ -948,25 +1042,32 @@ private fun ZoomableImage(url: String) {
         model = url,
         contentDescription = null,
         contentScale = ContentScale.Fit,
-        modifier = Modifier
-            .fillMaxSize()
-            .graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y)
-            .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    scale = (scale * zoom).coerceIn(1f, 5f)
-                    offset += pan
-                }
-            },
+        modifier =
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y)
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        scale = (scale * zoom).coerceIn(1f, 5f)
+                        offset += pan
+                    }
+                },
     )
 }
 
-private val AvatarColors = listOf(
-    Color(0xFFE57373), Color(0xFF64B5F6), Color(0xFF81C784), Color(0xFFFFB74D),
-    Color(0xFFBA68C8), Color(0xFF4DB6AC), Color(0xFFF06292), Color(0xFF9575CD),
-)
+private val AvatarColors =
+    listOf(
+        Color(0xFFE57373),
+        Color(0xFF64B5F6),
+        Color(0xFF81C784),
+        Color(0xFFFFB74D),
+        Color(0xFFBA68C8),
+        Color(0xFF4DB6AC),
+        Color(0xFFF06292),
+        Color(0xFF9575CD),
+    )
 
-private fun avatarColor(key: String): Color =
-    AvatarColors[(key.hashCode() and 0x7fffffff) % AvatarColors.size]
+private fun avatarColor(key: String): Color = AvatarColors[(key.hashCode() and 0x7fffffff) % AvatarColors.size]
 
 @Composable
 private fun NewMessagesDivider() {
@@ -1001,5 +1102,4 @@ private fun SmallSpinner() {
 }
 
 /** Small wrapper for a clickable row that works across platforms. */
-private fun Modifier.clickableRow(onClick: () -> Unit): Modifier =
-    this.clickable(onClick = onClick)
+private fun Modifier.clickableRow(onClick: () -> Unit): Modifier = this.clickable(onClick = onClick)

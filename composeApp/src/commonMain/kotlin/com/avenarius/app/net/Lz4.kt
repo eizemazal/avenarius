@@ -34,7 +34,10 @@ object Lz4 {
             var literalLen = token ushr 4
             if (literalLen == 15) {
                 var b: Int
-                do { b = src[i++].toInt() and 0xff; literalLen += b } while (b == 255)
+                do {
+                    b = src[i++].toInt() and 0xff
+                    literalLen += b
+                } while (b == 255)
             }
             ensure(literalLen)
             src.copyInto(out, outLen, i, i + literalLen)
@@ -49,7 +52,10 @@ object Lz4 {
             var matchLen = (token and 0x0f) + 4
             if ((token and 0x0f) == 15) {
                 var b: Int
-                do { b = src[i++].toInt() and 0xff; matchLen += b } while (b == 255)
+                do {
+                    b = src[i++].toInt() and 0xff
+                    matchLen += b
+                } while (b == 255)
             }
             ensure(matchLen)
             var matchPos = outLen - offset

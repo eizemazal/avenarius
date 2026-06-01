@@ -21,8 +21,11 @@ object Session {
         private set
 
     @Volatile var appInForeground: Boolean = false
+
     @Volatile var openChatId: Long? = null
+
     @Volatile var contacts: Map<Long, String> = emptyMap()
+
     /** chatId -> (title, isDialog), so notifications can show the chat + sender. */
     @Volatile var chatInfo: Map<Long, ChatBrief> = emptyMap()
 
@@ -33,7 +36,10 @@ object Session {
     }
 }
 
-data class ChatBrief(val title: String, val isDialog: Boolean)
+data class ChatBrief(
+    val title: String,
+    val isDialog: Boolean,
+)
 
 class AvenariusApp : Application() {
     override fun onCreate() {

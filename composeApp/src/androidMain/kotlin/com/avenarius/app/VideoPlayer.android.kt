@@ -13,15 +13,19 @@ import androidx.media3.ui.PlayerView
 
 @UnstableApi
 @Composable
-actual fun VideoPlayer(url: String, modifier: Modifier) {
+actual fun VideoPlayer(
+    url: String,
+    modifier: Modifier,
+) {
     val context = LocalContext.current
-    val player = remember(url) {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(url))
-            prepare()
-            playWhenReady = true
+    val player =
+        remember(url) {
+            ExoPlayer.Builder(context).build().apply {
+                setMediaItem(MediaItem.fromUri(url))
+                prepare()
+                playWhenReady = true
+            }
         }
-    }
     DisposableEffect(url) {
         onDispose { player.release() }
     }

@@ -1,8 +1,8 @@
 package com.avenarius.app.net
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -39,6 +39,7 @@ class MobileTransport(
     }
 
     private val socket = TlsSocket(host, port)
+
     // A stray throwable in a background coroutine must never crash the app, so the
     // scope swallows uncaught exceptions (each coroutine also handles its own).
     private val scope = CoroutineScope(SupervisorJob() + CoroutineExceptionHandler { _, _ -> })
@@ -75,25 +76,32 @@ class MobileTransport(
 
     fun startPing(intervalMs: Long = 30_000) {
         if (pingJob != null) return
-        pingJob = scope.launch {
-            while (isActive) {
-                delay(intervalMs)
-                runCatching { request(1, buildJsonObject { put("interactive", true) }) }
+        pingJob =
+            scope.launch {
+                while (isActive) {
+                    delay(intervalMs)
+                    runCatching { request(1, buildJsonObject { put("interactive", true) }) }
+                }
             }
-        }
     }
 
     fun disconnect() {
         manualClose = true
         connected = false
-        pingJob?.cancel(); pingJob = null
-        readerJob?.cancel(); readerJob = null
+        pingJob?.cancel()
+        pingJob = null
+        readerJob?.cancel()
+        readerJob = null
         socket.close()
         failAllPending(IllegalStateException("Соединение закрыто"))
     }
 
     /** Sends a request and suspends until the reply with the same seq arrives. */
-    suspend fun request(opcode: Int, payload: JsonObject, timeoutMs: Long = 30_000): JsonObject {
+    suspend fun request(
+        opcode: Int,
+        payload: JsonObject,
+        timeoutMs: Long = 30_000,
+    ): JsonObject {
         if (!connected) error("Нет соединения с сервером")
         val deferred = CompletableDeferred<JsonObject>()
         writeLock.withLock {
@@ -110,7 +118,10 @@ class MobileTransport(
         while (connected) {
             // --- read one whole frame off the wire ---
             // I/O errors here mean the socket is dead -> end the connection.
-            var packetType = 0; var frameSeq = 0; var opcode = 0; var compFlag = 0
+            var packetType = 0
+            var frameSeq = 0
+            var opcode = 0
+            var compFlag = 0
             var body = ByteArray(0)
             try {
                 socket.readFully(header)
@@ -119,8 +130,9 @@ class MobileTransport(
                 packetType = header[1].toInt() and 0xff
                 frameSeq = header[3].toInt() and 0xff
                 opcode = ((header[4].toInt() and 0xff) shl 8) or (header[5].toInt() and 0xff)
-                val packed = ((header[6].toInt() and 0xff) shl 24) or ((header[7].toInt() and 0xff) shl 16) or
-                    ((header[8].toInt() and 0xff) shl 8) or (header[9].toInt() and 0xff)
+                val packed =
+                    ((header[6].toInt() and 0xff) shl 24) or ((header[7].toInt() and 0xff) shl 16) or
+                        ((header[8].toInt() and 0xff) shl 8) or (header[9].toInt() and 0xff)
                 compFlag = packed ushr 24
                 val len = packed and 0xFFFFFF
                 if (len > 0) {
@@ -139,8 +151,12 @@ class MobileTransport(
             // already consumed its bytes, so the stream stays aligned) — skip it.
             try {
                 val raw = if (compFlag != 0 && body.isNotEmpty()) Lz4.decompressBlock(body) else body
-                val payload = if (raw.isNotEmpty()) MsgPack.decode(raw) as? JsonObject ?: JsonObject(emptyMap())
-                else JsonObject(emptyMap())
+                val payload =
+                    if (raw.isNotEmpty()) {
+                        MsgPack.decode(raw) as? JsonObject ?: JsonObject(emptyMap())
+                    } else {
+                        JsonObject(emptyMap())
+                    }
 
                 // Only RESPONSE/ERROR frames are replies to one of our requests and
                 // may be matched by seq. Pushes (request/event type) carry their OWN
@@ -150,8 +166,11 @@ class MobileTransport(
                     _events.emit(opcode to payload)
                 } else {
                     val waiter = pendingLock.withLock { pending.remove(frameSeq) }
-                    if (waiter != null && !waiter.isCompleted) waiter.complete(payload)
-                    else _events.emit(opcode to payload)
+                    if (waiter != null && !waiter.isCompleted) {
+                        waiter.complete(payload)
+                    } else {
+                        _events.emit(opcode to payload)
+                    }
                 }
             } catch (_: Throwable) {
                 // skip the unparseable frame, keep the connection alive
@@ -168,16 +187,26 @@ class MobileTransport(
         }
     }
 
-    private fun encodeFrame(ver: Int, cmd: Int, seq: Int, opcode: Int, payload: JsonObject): ByteArray {
+    private fun encodeFrame(
+        ver: Int,
+        cmd: Int,
+        seq: Int,
+        opcode: Int,
+        payload: JsonObject,
+    ): ByteArray {
         val body = MsgPack.encode(payload)
         val frame = ByteArray(10 + body.size)
         frame[0] = ver.toByte()
-        frame[1] = (cmd ushr 8).toByte(); frame[2] = cmd.toByte()
+        frame[1] = (cmd ushr 8).toByte()
+        frame[2] = cmd.toByte()
         frame[3] = seq.toByte()
-        frame[4] = (opcode ushr 8).toByte(); frame[5] = opcode.toByte()
+        frame[4] = (opcode ushr 8).toByte()
+        frame[5] = opcode.toByte()
         val len = body.size // requests are uncompressed -> top byte 0
-        frame[6] = (len ushr 24).toByte(); frame[7] = (len ushr 16).toByte()
-        frame[8] = (len ushr 8).toByte(); frame[9] = len.toByte()
+        frame[6] = (len ushr 24).toByte()
+        frame[7] = (len ushr 16).toByte()
+        frame[8] = (len ushr 8).toByte()
+        frame[9] = len.toByte()
         body.copyInto(frame, 10)
         return frame
     }

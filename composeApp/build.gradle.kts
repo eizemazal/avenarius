@@ -8,6 +8,15 @@ plugins {
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.kotlinSerialization)
+    alias(libs.plugins.ktlint)
+}
+
+// ktlint: style/format checks. `./gradlew ktlintCheck` to verify, `ktlintFormat`
+// to auto-fix. Rules are tuned in the repo-root .editorconfig.
+ktlint {
+    version.set(libs.versions.ktlintTool.get())
+    // Generated sources (e.g. Compose resources' Res.kt) are excluded via the
+    // repo-root .editorconfig (`[**/build/**] ktlint = disabled`).
 }
 
 kotlin {
@@ -47,6 +56,11 @@ kotlin {
             implementation(libs.coil.network.ktor3)
         }
 
+        commonTest.dependencies {
+            implementation(kotlin("test"))
+            implementation(libs.kotlinx.coroutines.test)
+        }
+
         androidMain.dependencies {
             implementation(compose.preview)
             implementation(libs.androidx.activity.compose)
@@ -65,12 +79,21 @@ kotlin {
 
 android {
     namespace = "com.avenarius.app"
-    compileSdk = libs.versions.android.compileSdk.get().toInt()
+    compileSdk =
+        libs.versions.android.compileSdk
+            .get()
+            .toInt()
 
     defaultConfig {
         applicationId = "com.avenarius.app"
-        minSdk = libs.versions.android.minSdk.get().toInt()
-        targetSdk = libs.versions.android.targetSdk.get().toInt()
+        minSdk =
+            libs.versions.android.minSdk
+                .get()
+                .toInt()
+        targetSdk =
+            libs.versions.android.targetSdk
+                .get()
+                .toInt()
         versionCode = 1
         versionName = "0.1.0"
     }

@@ -9,11 +9,17 @@ import kotlin.random.Random
  */
 interface AppStorage {
     fun getString(key: String): String?
-    fun putString(key: String, value: String?)
+
+    fun putString(
+        key: String,
+        value: String?,
+    )
 }
 
 /** Convenience accessors layered on top of the raw key/value store. */
-class Prefs(private val storage: AppStorage) {
+class Prefs(
+    private val storage: AppStorage,
+) {
     var token: String?
         get() = storage.getString(KEY_TOKEN)
         set(value) = storage.putString(KEY_TOKEN, value)
@@ -53,6 +59,7 @@ class Prefs(private val storage: AppStorage) {
 /** Generates a random UUID-v4-formatted string (8-4-4-4-12 hex). */
 private fun randomUuid(): String {
     val hex = "0123456789abcdef"
+
     fun block(n: Int) = buildString { repeat(n) { append(hex[Random.nextInt(16)]) } }
     return "${block(8)}-${block(4)}-4${block(3)}-${hex[8 + Random.nextInt(4)]}${block(3)}-${block(12)}"
 }

@@ -1,8 +1,8 @@
 package com.avenarius.app.model
 
-/**
+/*
  * Domain models used by the UI. These are deliberately small and decoupled from
- * the raw Max wire format (which is parsed in [com.avenarius.app.net.MaxClient]).
+ * the raw Max wire format (which is parsed in com.avenarius.app.net.MaxClient).
  *
  * Everything in this file lives in commonMain, so it is shared as-is between the
  * Android app and the desktop app.

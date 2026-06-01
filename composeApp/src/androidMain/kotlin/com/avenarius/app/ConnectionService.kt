@@ -26,7 +26,6 @@ import kotlinx.coroutines.launch
  * the permanent "Авенариус активен" entry.
  */
 class ConnectionService : Service() {
-
     private val scope = CoroutineScope(SupervisorJob())
     private var collectorJob: Job? = null
 
@@ -40,12 +39,17 @@ class ConnectionService : Service() {
         createChannels()
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    override fun onStartCommand(
+        intent: Intent?,
+        flags: Int,
+        startId: Int,
+    ): Int {
         startForeground(ONGOING_ID, buildOngoingNotification())
         if (collectorJob == null) {
-            collectorJob = scope.launch {
-                Session.client.incoming.collect { msg -> onIncoming(msg) }
-            }
+            collectorJob =
+                scope.launch {
+                    Session.client.incoming.collect { msg -> onIncoming(msg) }
+                }
         }
         // If killed, restart so the connection comes back.
         return START_STICKY
@@ -59,13 +63,14 @@ class ConnectionService : Service() {
 
         val info = Session.chatInfo[msg.chatId]
         val sender = resolveName(msg.senderId)
-        val (title, body) = if (info == null || info.isDialog) {
-            // 1:1 dialog: title is the person, body is the message.
-            (sender ?: info?.title ?: "Новое сообщение") to msg.text
-        } else {
-            // Group: title is the chat, body names the actual sender.
-            info.title to "${sender ?: "Кто-то"}: ${msg.text}"
-        }
+        val (title, body) =
+            if (info == null || info.isDialog) {
+                // 1:1 dialog: title is the person, body is the message.
+                (sender ?: info?.title ?: "Новое сообщение") to msg.text
+            } else {
+                // Group: title is the chat, body names the actual sender.
+                info.title to "${sender ?: "Кто-то"}: ${msg.text}"
+            }
         notifyMessage(msg.chatId, title, body)
     }
 
@@ -78,26 +83,34 @@ class ConnectionService : Service() {
         return name
     }
 
-    private fun notifyMessage(chatId: Long, title: String, body: String) {
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(MainActivity.EXTRA_CHAT_ID, chatId)
-        }
-        val pending = PendingIntent.getActivity(
-            this,
-            chatId.hashCode(),
-            openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
-            .setSmallIcon(R.drawable.ic_launcher)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentIntent(pending)
-            .build()
+    private fun notifyMessage(
+        chatId: Long,
+        title: String,
+        body: String,
+    ) {
+        val openIntent =
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(MainActivity.EXTRA_CHAT_ID, chatId)
+            }
+        val pending =
+            PendingIntent.getActivity(
+                this,
+                chatId.hashCode(),
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val notification =
+            NotificationCompat
+                .Builder(this, CHANNEL_MESSAGES)
+                .setSmallIcon(R.drawable.ic_launcher)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setContentIntent(pending)
+                .build()
         // One notification per chat (newer messages replace the older bubble).
         if (canNotify()) {
             NotificationManagerCompat.from(this).notify(chatId.hashCode(), notification)
@@ -105,7 +118,8 @@ class ConnectionService : Service() {
     }
 
     private fun buildOngoingNotification(): Notification =
-        NotificationCompat.Builder(this, CHANNEL_ONGOING)
+        NotificationCompat
+            .Builder(this, CHANNEL_ONGOING)
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle("Авенариус активен")
             .setContentText("Поддерживаем соединение для новых сообщений")
@@ -113,12 +127,12 @@ class ConnectionService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(
                 PendingIntent.getActivity(
-                    this, 0,
+                    this,
+                    0,
                     Intent(this, MainActivity::class.java),
                     PendingIntent.FLAG_IMMUTABLE,
                 ),
-            )
-            .build()
+            ).build()
 
     private fun createChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -131,8 +145,7 @@ class ConnectionService : Service() {
         )
     }
 
-    private fun canNotify(): Boolean =
-        NotificationManagerCompat.from(this).areNotificationsEnabled()
+    private fun canNotify(): Boolean = NotificationManagerCompat.from(this).areNotificationsEnabled()
 
     override fun onDestroy() {
         collectorJob?.cancel()

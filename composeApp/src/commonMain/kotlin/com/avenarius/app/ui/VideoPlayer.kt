@@ -8,4 +8,7 @@ import androidx.compose.ui.Modifier
  * simple bundled player) opens it in the system browser/player.
  */
 @Composable
-expect fun VideoPlayer(url: String, modifier: Modifier)
+expect fun VideoPlayer(
+    url: String,
+    modifier: Modifier,
+)

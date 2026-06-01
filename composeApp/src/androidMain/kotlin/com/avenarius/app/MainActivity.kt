@@ -20,7 +20,6 @@ import com.avenarius.app.ui.Screen
 import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
-
     // Chat id requested by a tapped notification (null = none).
     private val openChatRequests = MutableStateFlow<Long?>(null)
 
@@ -60,7 +59,10 @@ class MainActivity : ComponentActivity() {
             // Open a chat when launched/resumed from a message notification.
             val pendingChat by openChatRequests.collectAsStateWithLifecycle()
             LaunchedEffect(pendingChat) {
-                pendingChat?.let { vm.openChatById(it); openChatRequests.value = null }
+                pendingChat?.let {
+                    vm.openChatById(it)
+                    openChatRequests.value = null
+                }
             }
 
             App(vm)
@@ -90,8 +92,9 @@ class MainActivity : ComponentActivity() {
 
     private fun requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
+        val granted =
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
         if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 

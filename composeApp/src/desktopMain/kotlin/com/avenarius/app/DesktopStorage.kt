@@ -18,7 +18,10 @@ class DesktopStorage : AppStorage {
 
     override fun getString(key: String): String? = props.getProperty(key)
 
-    override fun putString(key: String, value: String?) {
+    override fun putString(
+        key: String,
+        value: String?,
+    ) {
         if (value == null) props.remove(key) else props.setProperty(key, value)
         file.parentFile?.mkdirs()
         file.outputStream().use { props.store(it, "Avenarius") }

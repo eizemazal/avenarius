@@ -127,10 +127,47 @@ composeApp/src/
 ./gradlew :composeApp:packageDistributionForCurrentOS      # собрать нативный пакет
 ```
 
+## Тесты
+
+Юнит-тесты лежат в `composeApp/src/commonTest` и покрывают чистую логику:
+кодек **MessagePack**, распаковщик **LZ4**, хранилище `Prefs` (токен/идентификаторы)
+и протокольную арифметику (id диалога = XOR). Запуск на JVM (быстро):
+```sh
+./gradlew :composeApp:desktopTest          # или ./dev.sh test
+```
+
+## Стиль кода (ktlint)
+
+Стиль проверяется через [**ktlint**](https://pinterest.github.io/ktlint/)
+(плагин `org.jlleitschuh.gradle.ktlint`). Правила настроены в `.editorconfig`
+(стиль `ktlint_official`, длина строки 140). Сгенерированный код (`build/`)
+из проверки исключён.
+```sh
+./gradlew :composeApp:ktlintCheck     # проверить (или ./dev.sh lint)
+./gradlew :composeApp:ktlintFormat    # автоисправление (или ./dev.sh format)
+```
+
+## Скрипт разработки
+
+`./dev.sh` — обёртка над частыми операциями (автоопределяет `ANDROID_HOME`):
+```sh
+./dev.sh test      # юнит-тесты
+./dev.sh lint      # проверка стиля ktlint
+./dev.sh format    # автоисправление стиля ktlint
+./dev.sh run       # собрать APK + установить + запустить на устройстве
+./dev.sh apk       # собрать debug APK
+./dev.sh check     # стиль + тесты + сборка обеих платформ (как в CI)
+./dev.sh logs      # логи приложения с устройства
+./dev.sh desktop   # запустить десктоп-версию
+./dev.sh help      # полный список
+```
+
 ## CI/CD (GitHub Actions)
 
-`.github/workflows/build.yml` собирает debug-APK на каждый push/PR и выкладывает
-его артефактом (**Actions → запуск → Artifacts → `avenarius-debug-apk`**).
+`.github/workflows/build.yml` на каждый push/PR сначала прогоняет юнит-тесты,
+затем собирает debug-APK и выкладывает его артефактом (**Actions → запуск →
+Artifacts → `avenarius-debug-apk`**). Если тесты падают — сборка не выполняется,
+а отчёт о тестах выкладывается артефактом `test-report`.
 Можно запустить вручную через **workflow_dispatch**.
 
 ### Подписанные release-сборки (опционально)

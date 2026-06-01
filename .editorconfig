@@ -1,0 +1,26 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{kt,kts}]
+# ktlint configuration (https://pinterest.github.io/ktlint/)
+ktlint_code_style = ktlint_official
+max_line_length = 140
+# Comment markers (e.g. `// ----- section -----`) are intentional separators.
+ktlint_standard_comment-wrapping = disabled
+# Jetpack Compose uses PascalCase @Composable functions, which this rule flags
+# (and it misses the @Composable exemption on `actual` declarations).
+ktlint_standard_function-naming = disabled
+
+[*.{yml,yaml,toml}]
+indent_size = 2
+
+# Never lint generated sources (e.g. Compose resources' Res.kt under build/).
+[**/build/**]
+ktlint = disabled
