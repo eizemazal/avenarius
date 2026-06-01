@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.avenarius.app.data.Prefs
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.MediaAttach
+import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
 import com.avenarius.app.net.MaxClient
@@ -18,6 +20,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT }
+
+/** Full-screen media viewer overlay state. */
+sealed interface MediaViewer {
+    data object Loading : MediaViewer
+    data class Image(val url: String) : MediaViewer
+    data class Video(val url: String) : MediaViewer
+}
 
 data class AppState(
     val screen: Screen = Screen.LOADING,
@@ -40,6 +49,8 @@ data class AppState(
     val noMoreOlder: Boolean = false,
     /** True while the app is transparently re-establishing a dropped connection. */
     val reconnecting: Boolean = false,
+    /** Non-null when a full-screen image/video viewer is open. */
+    val mediaViewer: MediaViewer? = null,
 )
 
 /**
@@ -296,6 +307,30 @@ class AppViewModel(
     fun backToChats() {
         _state.update { it.copy(screen = Screen.CHATS, currentChat = null, messages = emptyList()) }
     }
+
+    /** Opens the full-screen viewer for a tapped photo/video. */
+    fun openMedia(media: MediaAttach, messageId: String?) {
+        when (media.type) {
+            MediaType.PHOTO -> _state.update { it.copy(mediaViewer = MediaViewer.Image(media.url)) }
+            MediaType.VIDEO -> {
+                val chat = _state.value.currentChat
+                val mid = messageId?.toLongOrNull()
+                if (chat == null || mid == null || media.videoId == 0L) {
+                    _state.update { it.copy(mediaViewer = MediaViewer.Image(media.url)) } // fallback: thumbnail
+                    return
+                }
+                _state.update { it.copy(mediaViewer = MediaViewer.Loading) }
+                viewModelScope.launch {
+                    val url = runCatching { client.getVideoUrl(chat.id, mid, media.videoId) }.getOrNull()
+                    _state.update {
+                        it.copy(mediaViewer = if (url != null) MediaViewer.Video(url) else MediaViewer.Image(media.url))
+                    }
+                }
+            }
+        }
+    }
+
+    fun closeMedia() = _state.update { it.copy(mediaViewer = null) }
 
     /** Reconstructs ✓✓ on loaded history: our messages the other side has already read. */
     private fun withReadMarks(messages: List<Message>, chat: Chat): List<Message> {

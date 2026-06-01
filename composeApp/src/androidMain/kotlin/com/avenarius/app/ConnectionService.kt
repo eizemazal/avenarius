@@ -30,6 +30,9 @@ class ConnectionService : Service() {
     private val scope = CoroutineScope(SupervisorJob())
     private var collectorJob: Job? = null
 
+    /** Cache of resolved sender names (for group members not in your contacts). */
+    private val nameCache = java.util.concurrent.ConcurrentHashMap<Long, String>()
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -48,38 +51,56 @@ class ConnectionService : Service() {
         return START_STICKY
     }
 
-    private fun onIncoming(msg: Message) {
+    private suspend fun onIncoming(msg: Message) {
         val myId = Session.prefs.userId
         if (msg.senderId == myId) return // our own echo
         // Don't notify for the chat the user is actively viewing.
         if (Session.appInForeground && Session.openChatId == msg.chatId) return
-        notifyMessage(msg)
+
+        val info = Session.chatInfo[msg.chatId]
+        val sender = resolveName(msg.senderId)
+        val (title, body) = if (info == null || info.isDialog) {
+            // 1:1 dialog: title is the person, body is the message.
+            (sender ?: info?.title ?: "Новое сообщение") to msg.text
+        } else {
+            // Group: title is the chat, body names the actual sender.
+            info.title to "${sender ?: "Кто-то"}: ${msg.text}"
+        }
+        notifyMessage(msg.chatId, title, body)
     }
 
-    private fun notifyMessage(msg: Message) {
-        val title = Session.contacts[msg.senderId] ?: "Новое сообщение"
+    /** Sender display name: synced contacts -> cache -> fetched on demand (groups). */
+    private suspend fun resolveName(userId: Long): String? {
+        Session.contacts[userId]?.let { return it }
+        nameCache[userId]?.let { return it }
+        val name = runCatching { Session.client.fetchContactName(userId) }.getOrNull()
+        if (name != null) nameCache[userId] = name
+        return name
+    }
+
+    private fun notifyMessage(chatId: Long, title: String, body: String) {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(MainActivity.EXTRA_CHAT_ID, msg.chatId)
+            putExtra(MainActivity.EXTRA_CHAT_ID, chatId)
         }
         val pending = PendingIntent.getActivity(
             this,
-            msg.chatId.hashCode(),
+            chatId.hashCode(),
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle(title)
-            .setContentText(msg.text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(msg.text))
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(pending)
             .build()
         // One notification per chat (newer messages replace the older bubble).
         if (canNotify()) {
-            NotificationManagerCompat.from(this).notify(msg.chatId.hashCode(), notification)
+            NotificationManagerCompat.from(this).notify(chatId.hashCode(), notification)
         }
     }
 

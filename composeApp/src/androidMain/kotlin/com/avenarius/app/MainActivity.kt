@@ -41,6 +41,9 @@ class MainActivity : ComponentActivity() {
             // for the open chat, and to label notifications with sender names).
             LaunchedEffect(state.currentChat?.id) { Session.openChatId = state.currentChat?.id }
             LaunchedEffect(state.contacts) { Session.contacts = state.contacts }
+            LaunchedEffect(state.chats) {
+                Session.chatInfo = state.chats.associate { it.id to ChatBrief(it.title, it.isDialog) }
+            }
 
             // Run the foreground service while logged in; stop it on logout.
             LaunchedEffect(state.screen) {

@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
@@ -47,9 +49,11 @@ class MaxClient {
         private const val OP_CHECK_CODE = 18
         private const val OP_SYNC = 19
         private const val OP_REGISTER = 23
+        private const val OP_CONTACT_INFO = 32
         private const val OP_CONTACT_UPDATE = 34
         private const val OP_CONTACT_BY_PHONE = 46
         private const val OP_FETCH_HISTORY = 49
+        private const val OP_VIDEO_PLAY = 83
         private const val OP_MARK_READ = 50
         private const val OP_SEND_MESSAGE = 64
         private const val OP_CHECK_PASSWORD = 115
@@ -232,6 +236,28 @@ class MaxClient {
     /** The 1:1 dialog chat id between two users is the XOR of their ids. */
     fun dialogChatId(myId: Long, otherId: Long): Long = myId xor otherId
 
+    /** Looks up a single user's display name by id (for notifications/group senders). */
+    suspend fun fetchContactName(userId: Long): String? {
+        val payload = transport.request(OP_CONTACT_INFO, buildJsonObject {
+            put("contactIds", buildJsonArray { add(userId) })
+        })
+        val contact = payload["contacts"]?.jsonArray?.firstOrNull()?.jsonObject ?: return null
+        return contact.displayName()
+    }
+
+    /** Resolves a playable video URL (best available MP4, else HLS) for a VIDEO attach. */
+    suspend fun getVideoUrl(chatId: Long, messageId: Long, videoId: Long): String? {
+        val payload = transport.request(OP_VIDEO_PLAY, buildJsonObject {
+            put("chatId", chatId)
+            put("messageId", messageId)
+            put("videoId", videoId)
+        })
+        for (q in listOf("MP4_1080", "MP4_720", "MP4_480", "MP4_360", "HLS")) {
+            payload[q]?.jsonPrimitive?.contentOrNullSafe()?.let { return it }
+        }
+        return null
+    }
+
     // ---------------------------------------------------------------------
     // Sync (chats + contacts + profile)
     // ---------------------------------------------------------------------
@@ -376,7 +402,7 @@ class MaxClient {
                 "PHOTO" -> a["baseUrl"]?.jsonPrimitive?.contentOrNullSafe()
                     ?.let { MediaAttach(MediaType.PHOTO, it, w, h) }
                 "VIDEO" -> a["thumbnail"]?.jsonPrimitive?.contentOrNullSafe()
-                    ?.let { MediaAttach(MediaType.VIDEO, it, w, h) }
+                    ?.let { MediaAttach(MediaType.VIDEO, it, w, h, a["videoId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L) }
                 else -> null
             }
         }

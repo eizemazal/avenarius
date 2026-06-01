@@ -40,9 +40,12 @@ enum class MediaType { PHOTO, VIDEO }
 /** An image/video attachment we can show inline (by its CDN URL). */
 data class MediaAttach(
     val type: MediaType,
+    /** Image URL (PHOTO) or thumbnail URL (VIDEO). */
     val url: String,
     val width: Int,
     val height: Int,
+    /** For VIDEO: the id needed to resolve the playable stream (opcode 83). */
+    val videoId: Long = 0,
 )
 
 /** A single message inside a chat. */

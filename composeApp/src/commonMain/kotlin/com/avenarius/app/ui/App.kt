@@ -2,6 +2,7 @@ package com.avenarius.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,7 +51,10 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -86,7 +90,8 @@ fun App(viewModel: AppViewModel) {
                 viewModel.onBack()
             }
 
-            Column(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize()) {
+              Column(Modifier.fillMaxSize()) {
                 // Thin "reconnecting" strip while we transparently re-establish the
                 // connection — shown over the chat list / open chat, never a bounce.
                 if (state.reconnecting && (state.screen == Screen.CHATS || state.screen == Screen.CHAT)) {
@@ -137,9 +142,13 @@ fun App(viewModel: AppViewModel) {
                     onLoadOlder = viewModel::loadOlder,
                     onBack = viewModel::backToChats,
                     onSend = viewModel::sendMessage,
+                    onMediaClick = viewModel::openMedia,
                 )
                     }
                 }
+              }
+              // Full-screen image/video viewer, layered above everything.
+              state.mediaViewer?.let { MediaViewerOverlay(it, onClose = viewModel::closeMedia) }
             }
         }
     }
@@ -419,6 +428,7 @@ private fun ChatScreen(
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     onSend: (String) -> Unit,
+    onMediaClick: (MediaAttach, String?) -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -537,6 +547,7 @@ private fun ChatScreen(
                         senderName = contacts[msg.senderId] ?: "—",
                         showName = !isMine && !isDialog && startsRun,
                         showAvatar = !isMine && startsRun,
+                        onMediaClick = onMediaClick,
                     )
                 }
             }
@@ -551,6 +562,7 @@ private fun MessageRow(
     senderName: String,
     showName: Boolean,
     showAvatar: Boolean,
+    onMediaClick: (MediaAttach, String?) -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth(),
@@ -573,7 +585,7 @@ private fun MessageRow(
                     Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
                 msg.media.forEach { media ->
-                    MediaThumbnail(media)
+                    MediaThumbnail(media, onClick = { onMediaClick(media, msg.id) })
                     Spacer(Modifier.height(4.dp))
                 }
                 if (msg.text.isNotEmpty()) {
@@ -600,13 +612,13 @@ private fun MessageRow(
 }
 
 @Composable
-private fun MediaThumbnail(media: MediaAttach) {
+private fun MediaThumbnail(media: MediaAttach, onClick: () -> Unit) {
     val shape = RoundedCornerShape(10.dp)
     var mod = Modifier.widthIn(max = 240.dp).heightIn(max = 320.dp).clip(shape)
     if (media.width > 0 && media.height > 0) {
         mod = Modifier.width(240.dp).aspectRatio(media.width.toFloat() / media.height).clip(shape)
     }
-    Box(contentAlignment = Alignment.Center) {
+    Box(modifier = Modifier.clickable(onClick = onClick), contentAlignment = Alignment.Center) {
         AsyncImage(
             model = media.url,
             contentDescription = if (media.type == MediaType.VIDEO) "Видео" else "Фото",
@@ -622,6 +634,44 @@ private fun MediaThumbnail(media: MediaAttach) {
             }
         }
     }
+}
+
+@Composable
+private fun MediaViewerOverlay(viewer: MediaViewer, onClose: () -> Unit) {
+    PlatformBackHandler(enabled = true, onBack = onClose)
+    Box(
+        Modifier.fillMaxSize().background(Color(0xF2000000)).clickable(onClick = onClose),
+        contentAlignment = Alignment.Center,
+    ) {
+        when (viewer) {
+            is MediaViewer.Loading -> CircularProgressIndicator(color = Color.White)
+            is MediaViewer.Image -> ZoomableImage(viewer.url)
+            is MediaViewer.Video -> VideoPlayer(viewer.url, Modifier.fillMaxWidth().heightIn(max = 480.dp))
+        }
+        IconButton(onClick = onClose, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)) {
+            Text("✕", color = Color.White, style = MaterialTheme.typography.headlineSmall)
+        }
+    }
+}
+
+@Composable
+private fun ZoomableImage(url: String) {
+    var scale by remember { mutableStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    AsyncImage(
+        model = url,
+        contentDescription = null,
+        contentScale = ContentScale.Fit,
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y)
+            .pointerInput(Unit) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    scale = (scale * zoom).coerceIn(1f, 5f)
+                    offset += pan
+                }
+            },
+    )
 }
 
 @Composable

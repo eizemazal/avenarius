@@ -51,6 +51,8 @@ kotlin {
             implementation(compose.preview)
             implementation(libs.androidx.activity.compose)
             implementation(libs.ktor.client.okhttp) // Ktor engine for Android
+            implementation(libs.androidx.media3.exoplayer) // in-app video playback
+            implementation(libs.androidx.media3.ui)
         }
 
         desktopMain.dependencies {
