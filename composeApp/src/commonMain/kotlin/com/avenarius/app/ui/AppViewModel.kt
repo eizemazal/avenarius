@@ -6,6 +6,7 @@ import com.avenarius.app.data.Prefs
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.Message
+import com.avenarius.app.model.MessageStatus
 import com.avenarius.app.net.MaxClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,7 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-enum class Screen { LOADING, LOGIN, CODE, PASSWORD, CHATS, CHAT }
+enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT }
 
 data class AppState(
     val screen: Screen = Screen.LOADING,
@@ -26,6 +27,10 @@ data class AppState(
     val codeLength: Int = 6,
     /** True while a pull-to-refresh re-sync of the chat list is in flight. */
     val refreshing: Boolean = false,
+    /** userId -> display name, for avatars and sender labels. */
+    val contacts: Map<Long, String> = emptyMap(),
+    /** Unread count of the open chat at the moment it was opened (for the divider). */
+    val openUnreadCount: Int = 0,
 )
 
 /**
@@ -45,10 +50,32 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
         // Forward server-pushed messages into whichever chat is open.
         viewModelScope.launch {
             client.incoming.collect { msg ->
+                val openChatId = _state.value.currentChat?.id
                 _state.update { s ->
                     if (s.currentChat?.id == msg.chatId && s.messages.none { it.id == msg.id }) {
                         s.copy(messages = s.messages + msg)
                     } else s
+                }
+                // We're looking at this chat -> immediately mark the new message read.
+                val mid = msg.id
+                if (openChatId == msg.chatId && mid != null) {
+                    runCatching { client.markRead(msg.chatId, mid, nowMillis()) }
+                }
+            }
+        }
+        // Apply read-mark updates (op130): turn our sent messages ✓ -> ✓✓ live.
+        viewModelScope.launch {
+            client.readMarks.collect { rm ->
+                val myId = _state.value.account?.userId ?: return@collect
+                // Only the OTHER party reading our messages flips them to ✓✓.
+                if (rm.userId == myId) return@collect
+                _state.update { s ->
+                    if (s.currentChat?.id != rm.chatId) return@update s
+                    s.copy(messages = s.messages.map { m ->
+                        if (m.senderId == myId && m.time <= rm.mark && m.status != MessageStatus.READ) {
+                            m.copy(status = MessageStatus.READ)
+                        } else m
+                    })
                 }
             }
         }
@@ -88,7 +115,16 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
                 passwordTrackId = result.trackId
                 _state.update { it.copy(screen = Screen.PASSWORD) }
             }
+            MaxClient.CodeResult.NeedRegister -> {
+                _state.update { it.copy(screen = Screen.REGISTER) }
+            }
         }
+    }
+
+    fun submitRegister(firstName: String) = launchBusy {
+        val token = client.register(firstName.trim())
+        prefs.token = token
+        connectAndSync(token)
     }
 
     fun submitPassword(password: String) = launchBusy {
@@ -107,6 +143,7 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
                 screen = Screen.CHATS,
                 account = result.account,
                 chats = result.chats,
+                contacts = result.contacts,
                 busy = false,
                 error = null,
             )
@@ -114,16 +151,51 @@ class AppViewModel(private val prefs: Prefs) : ViewModel() {
     }
 
     fun openChat(chat: Chat) {
-        _state.update { it.copy(screen = Screen.CHAT, currentChat = chat, messages = emptyList()) }
+        // Snapshot the unread count now (for the "new messages" divider), since
+        // we're about to clear it by marking the chat read.
+        _state.update {
+            it.copy(
+                screen = Screen.CHAT,
+                currentChat = chat,
+                messages = emptyList(),
+                openUnreadCount = chat.unreadCount,
+            )
+        }
         launchBusy {
-            val now = nowMillis()
-            val history = client.fetchHistory(chat.id, fromTime = now, count = 50)
+            val history = client.fetchHistory(chat.id, fromTime = nowMillis(), count = 50)
             _state.update { it.copy(messages = history) }
+            // Mark read on the server and clear the local unread badge.
+            history.lastOrNull()?.id?.let { lastId ->
+                runCatching { client.markRead(chat.id, lastId, nowMillis()) }
+            }
+            _state.update { s ->
+                s.copy(chats = s.chats.map { if (it.id == chat.id) it.copy(unreadCount = 0) else it })
+            }
         }
     }
 
     fun backToChats() {
         _state.update { it.copy(screen = Screen.CHATS, currentChat = null, messages = emptyList()) }
+    }
+
+    /** Resolves a phone number to a Max user and opens a dialog with them. */
+    fun startChatByPhone(phone: String) {
+        val normalized = "+" + phone.filter { it.isDigit() }
+        val myId = _state.value.account?.userId ?: return
+        launchBusy {
+            val found = client.findByPhone(normalized)
+            runCatching { client.addContact(found.userId, found.name) }
+            _state.update { it.copy(contacts = it.contacts + (found.userId to found.name)) }
+            val chat = Chat(
+                id = client.dialogChatId(myId, found.userId),
+                title = found.name,
+                lastMessageText = null,
+                lastEventTime = nowMillis(),
+                unreadCount = 0,
+                isDialog = true,
+            )
+            openChat(chat)
+        }
     }
 
     /**

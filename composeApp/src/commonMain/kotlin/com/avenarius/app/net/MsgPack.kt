@@ -146,8 +146,24 @@ object MsgPack {
             b == 0xdf -> readMap(src, src.u32().toInt())                   // map32
             b == 0xdc -> readArray(src, src.u16())                         // array16
             b == 0xdd -> readArray(src, src.u32().toInt())                 // array32
-            else -> JsonNull // ext / unsupported -> null (matches rumax)
+            // Extension types: we don't use their values, but we MUST consume
+            // their bytes (1 type byte + data) or the stream desyncs.
+            b == 0xd4 -> readExt(src, 1)   // fixext1
+            b == 0xd5 -> readExt(src, 2)   // fixext2
+            b == 0xd6 -> readExt(src, 4)   // fixext4
+            b == 0xd7 -> readExt(src, 8)   // fixext8
+            b == 0xd8 -> readExt(src, 16)  // fixext16
+            b == 0xc7 -> readExt(src, src.u8())          // ext8
+            b == 0xc8 -> readExt(src, src.u16())         // ext16
+            b == 0xc9 -> readExt(src, src.u32().toInt()) // ext32
+            else -> JsonNull // truly unknown -> null
         }
+    }
+
+    /** Reads (and discards) an extension value: a 1-byte type tag + [dataLen] bytes. */
+    private fun readExt(src: ByteSource, dataLen: Int): JsonElement {
+        src.skip(1 + dataLen)
+        return JsonNull
     }
 
     private fun readUInt64(src: ByteSource): JsonPrimitive {
@@ -211,4 +227,5 @@ private class ByteSource(private val buf: ByteArray) {
         return s
     }
     fun binAsString(len: Int): String = str(len)
+    fun skip(n: Int) { pos += n }
 }

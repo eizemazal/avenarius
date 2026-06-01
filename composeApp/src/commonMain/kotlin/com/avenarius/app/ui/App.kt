@@ -11,14 +11,20 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,12 +46,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.Message
+import com.avenarius.app.model.MessageStatus
 
 private val AvenariusColors = darkColorScheme()
 
@@ -79,19 +88,28 @@ fun App(viewModel: AppViewModel) {
                     error = state.error,
                     onSubmit = viewModel::submitPassword,
                 )
+                Screen.REGISTER -> RegisterScreen(
+                    busy = state.busy,
+                    error = state.error,
+                    onSubmit = viewModel::submitRegister,
+                )
                 Screen.CHATS -> ChatsScreen(
                     title = state.account?.let { "Авенариус — ${it.firstName}" } ?: "Авенариус",
                     chats = state.chats,
                     isRefreshing = state.refreshing,
                     onRefresh = viewModel::refresh,
                     onOpen = viewModel::openChat,
+                    onStartChat = viewModel::startChatByPhone,
                     onLogout = viewModel::logout,
                 )
                 Screen.CHAT -> ChatScreen(
                     chat = state.currentChat,
                     messages = state.messages,
                     myId = state.account?.userId ?: -1L,
+                    contacts = state.contacts,
+                    unreadAtOpen = state.openUnreadCount,
                     busy = state.busy,
+                    error = state.error,
                     onBack = viewModel::backToChats,
                     onSend = viewModel::sendMessage,
                 )
@@ -207,6 +225,61 @@ private fun PasswordScreen(busy: Boolean, error: String?, onSubmit: (String) -> 
     }
 }
 
+@Composable
+private fun NewChatDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var phone by remember { mutableStateOf("+7") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Новый чат") },
+        text = {
+            Column {
+                Text("Введите номер телефона пользователя Max", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = phone,
+                    onValueChange = { phone = it },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(phone) }, enabled = phone.any { it.isDigit() }) {
+                Text("Открыть")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
+    )
+}
+
+@Composable
+private fun RegisterScreen(busy: Boolean, error: String?, onSubmit: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    CenteredForm {
+        Text("Регистрация", style = MaterialTheme.typography.headlineMedium)
+        Text(
+            "Этот номер ещё не зарегистрирован в Max. Введите имя, чтобы создать аккаунт.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            label = { Text("Имя") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        ErrorText(error)
+        Button(
+            onClick = { onSubmit(name) },
+            enabled = !busy && name.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (busy) SmallSpinner() else Text("Создать аккаунт")
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChatsScreen(
@@ -215,14 +288,27 @@ private fun ChatsScreen(
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
     onOpen: (Chat) -> Unit,
+    onStartChat: (String) -> Unit,
     onLogout: () -> Unit,
 ) {
+    var showNewChat by remember { mutableStateOf(false) }
+    if (showNewChat) {
+        NewChatDialog(
+            onDismiss = { showNewChat = false },
+            onConfirm = { phone -> showNewChat = false; onStartChat(phone) },
+        )
+    }
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(title) },
                 actions = { TextButton(onClick = onLogout) { Text("Выйти") } },
             )
+        },
+        floatingActionButton = {
+            FloatingActionButton(onClick = { showNewChat = true }) {
+                Text("✎", style = MaterialTheme.typography.headlineSmall)
+            }
         },
     ) { padding ->
         // Pull down anywhere on the list to force a re-sync.
@@ -269,15 +355,33 @@ private fun ChatScreen(
     chat: Chat?,
     messages: List<Message>,
     myId: Long,
+    contacts: Map<Long, String>,
+    unreadAtOpen: Int,
     busy: Boolean,
+    error: String?,
     onBack: () -> Unit,
     onSend: (String) -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val isDialog = chat?.isDialog ?: true
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    // Index of the first unread message (the divider sits just before it).
+    val firstUnread = if (unreadAtOpen in 1..messages.size) messages.size - unreadAtOpen else -1
+
+    // Position once per chat: jump INSTANTLY to the first unread (or bottom),
+    // instead of animating through the whole history.
+    var positioned by remember(chat?.id) { mutableStateOf(false) }
+    LaunchedEffect(messages.size, chat?.id) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        if (!positioned) {
+            listState.scrollToItem(if (firstUnread > 0) firstUnread else messages.lastIndex)
+            positioned = true
+        } else {
+            // A new message arrived: follow it only if already near the bottom.
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            if (lastVisible >= messages.size - 3) listState.animateScrollToItem(messages.lastIndex)
+        }
     }
 
     Scaffold(
@@ -316,13 +420,34 @@ private fun ChatScreen(
             if (busy && messages.isEmpty()) {
                 CenteredSpinner()
             }
+            if (error != null) {
+                Text(
+                    error,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(8.dp),
+                )
+            }
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                items(messages, key = { it.id ?: it.cid ?: it.time }) { msg ->
-                    MessageBubble(msg, isMine = msg.senderId == myId)
+                itemsIndexed(messages, key = { _, m -> m.id ?: m.cid ?: m.time }) { index, msg ->
+                    if (index == firstUnread && firstUnread > 0) NewMessagesDivider()
+                    val isMine = msg.senderId == myId
+                    val prev = messages.getOrNull(index - 1)
+                    // Show the avatar only on the first message of a run from one sender.
+                    val startsRun = prev == null || prev.senderId != msg.senderId
+                    MessageRow(
+                        msg = msg,
+                        isMine = isMine,
+                        senderName = contacts[msg.senderId] ?: "—",
+                        showName = !isMine && !isDialog && startsRun,
+                        showAvatar = !isMine && startsRun,
+                    )
                 }
             }
         }
@@ -330,21 +455,87 @@ private fun ChatScreen(
 }
 
 @Composable
-private fun MessageBubble(msg: Message, isMine: Boolean) {
-    val bg = if (isMine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-    val fg = if (isMine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+private fun MessageRow(
+    msg: Message,
+    isMine: Boolean,
+    senderName: String,
+    showName: Boolean,
+    showAvatar: Boolean,
+) {
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start,
     ) {
+        if (!isMine) {
+            if (showAvatar) LetterAvatar(senderName) else Spacer(Modifier.size(32.dp))
+            Spacer(Modifier.width(6.dp))
+        }
+        val bg = if (isMine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+        val fg = if (isMine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
         Box(
             Modifier
                 .widthIn(max = 280.dp)
                 .background(bg, RoundedCornerShape(14.dp))
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 6.dp),
         ) {
-            Text(msg.text, color = fg, style = MaterialTheme.typography.bodyLarge)
+            Column {
+                if (showName) {
+                    Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                }
+                Text(msg.text, color = fg, style = MaterialTheme.typography.bodyLarge)
+                Row(
+                    modifier = Modifier.align(Alignment.End),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(formatClock(msg.time), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
+                    if (isMine) {
+                        val read = msg.status == MessageStatus.READ
+                        Text(
+                            if (read) "✓✓" else "✓",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (read) Color(0xFF8AB4F8) else fg.copy(alpha = 0.7f),
+                        )
+                    }
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun LetterAvatar(name: String) {
+    val letter = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+    Box(
+        Modifier.size(32.dp).clip(CircleShape).background(avatarColor(name)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(letter, color = Color.White, style = MaterialTheme.typography.titleSmall)
+    }
+}
+
+private val AvatarColors = listOf(
+    Color(0xFFE57373), Color(0xFF64B5F6), Color(0xFF81C784), Color(0xFFFFB74D),
+    Color(0xFFBA68C8), Color(0xFF4DB6AC), Color(0xFFF06292), Color(0xFF9575CD),
+)
+
+private fun avatarColor(key: String): Color =
+    AvatarColors[(key.hashCode() and 0x7fffffff) % AvatarColors.size]
+
+@Composable
+private fun NewMessagesDivider() {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        HorizontalDivider(Modifier.weight(1f))
+        Text(
+            "новые сообщения",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(horizontal = 8.dp),
+        )
+        HorizontalDivider(Modifier.weight(1f))
     }
 }
 

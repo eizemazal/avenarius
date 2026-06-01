@@ -21,7 +21,14 @@ data class Chat(
     val title: String,
     val lastMessageText: String?,
     val lastEventTime: Long,
+    /** Number of unread (incoming) messages, from the server's `newMessages`. */
+    val unreadCount: Int = 0,
+    /** True for one-to-one dialogs (vs. groups/channels). */
+    val isDialog: Boolean = false,
 )
+
+/** Message delivery state for outgoing messages (server `status`). */
+enum class MessageStatus { UNKNOWN, SENT, READ }
 
 /** A single message inside a chat. */
 data class Message(
@@ -33,4 +40,6 @@ data class Message(
     val senderId: Long,
     val text: String,
     val time: Long,
+    /** Delivery state (meaningful for our own outgoing messages). */
+    val status: MessageStatus = MessageStatus.UNKNOWN,
 )

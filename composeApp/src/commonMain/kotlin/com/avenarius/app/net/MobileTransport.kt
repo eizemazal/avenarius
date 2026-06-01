@@ -33,7 +33,9 @@ class MobileTransport(
     private val port: Int = 443,
 ) {
     private companion object {
-        const val PACKET_EVENT = 2 // cmd value for server-pushed event frames
+        // Packet types (the high byte of the header's cmd field).
+        const val PACKET_RESPONSE = 1
+        const val PACKET_ERROR = 3
     }
 
     private val socket = TlsSocket(host, port)
@@ -100,11 +102,13 @@ class MobileTransport(
         while (connected) {
             // --- read one whole frame off the wire ---
             // I/O errors here mean the socket is dead -> end the connection.
-            var cmd = 0; var frameSeq = 0; var opcode = 0; var compFlag = 0
+            var packetType = 0; var frameSeq = 0; var opcode = 0; var compFlag = 0
             var body = ByteArray(0)
             try {
                 socket.readFully(header)
-                cmd = ((header[1].toInt() and 0xff) shl 8) or (header[2].toInt() and 0xff)
+                // header[1..2] is a big-endian packet-type field; the meaningful byte
+                // is the high one: 0=request/push, 1=response, 2=event, 3=error.
+                packetType = header[1].toInt() and 0xff
                 frameSeq = header[3].toInt() and 0xff
                 opcode = ((header[4].toInt() and 0xff) shl 8) or (header[5].toInt() and 0xff)
                 val packed = ((header[6].toInt() and 0xff) shl 24) or ((header[7].toInt() and 0xff) shl 16) or
@@ -129,11 +133,11 @@ class MobileTransport(
                 val payload = if (raw.isNotEmpty()) MsgPack.decode(raw) as? JsonObject ?: JsonObject(emptyMap())
                 else JsonObject(emptyMap())
 
-                // cmd: 0=REQUEST, 1=RESPONSE, 2=EVENT, 3=ERROR. Server push events
-                // (cmd=2) carry their OWN incrementing seq that can collide with our
-                // in-flight request seqs, so they must NEVER consume a pending slot —
-                // only responses/errors are matched back to a request by seq.
-                if (cmd == PACKET_EVENT) {
+                // Only RESPONSE/ERROR frames are replies to one of our requests and
+                // may be matched by seq. Pushes (request/event type) carry their OWN
+                // seq that can collide with ours, so they must go straight to events.
+                val isReply = packetType == PACKET_RESPONSE || packetType == PACKET_ERROR
+                if (!isReply) {
                     _events.emit(opcode to payload)
                 } else {
                     val waiter = pendingLock.withLock { pending.remove(frameSeq) }
