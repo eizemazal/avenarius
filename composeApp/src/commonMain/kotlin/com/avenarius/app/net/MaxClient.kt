@@ -6,6 +6,7 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -37,6 +38,17 @@ data class ReadMark(
 data class Presence(
     val userId: Long,
     val online: Boolean,
+)
+
+/**
+ * A live reaction-count change for a message (server push, opcode 155). The push
+ * carries only aggregate counts (no "did I react"), so [reactions] always has
+ * `mine = false`; the ViewModel re-derives our own reaction from local state.
+ */
+data class ReactionUpdate(
+    val chatId: Long,
+    val messageId: String,
+    val reactions: List<Reaction>,
 )
 
 /** Result of submitting an SMS code. */
@@ -82,6 +94,10 @@ interface MaxApi {
     val incoming: SharedFlow<Message>
     val readMarks: SharedFlow<ReadMark>
     val presence: SharedFlow<Presence>
+    val reactionUpdates: SharedFlow<ReactionUpdate>
+
+    /** A chat that was created or updated (NOTIF_CHAT) — upsert it into the list. */
+    val chatUpdates: SharedFlow<Chat>
     val drops: SharedFlow<Unit>
     val isConnected: Boolean
 
@@ -118,6 +134,7 @@ interface MaxApi {
         chatId: Long,
         text: String,
         cid: Long,
+        replyToId: String? = null,
     ): Message?
 
     suspend fun markRead(
@@ -125,6 +142,26 @@ interface MaxApi {
         messageId: String,
         mark: Long,
     )
+
+    /** Sets [emoji] as our reaction on a message, or removes our reaction when [emoji] is null. */
+    suspend fun setReaction(
+        chatId: Long,
+        messageId: String,
+        emoji: String?,
+    )
+
+    /**
+     * Deletes a chat. [forAll] = true also removes the messages for the other
+     * party (delete for everyone); [lastEventTime] is the chat's last event time.
+     */
+    suspend fun deleteChat(
+        chatId: Long,
+        lastEventTime: Long,
+        forAll: Boolean,
+    )
+
+    /** Leaves/exits a group chat. */
+    suspend fun leaveGroup(chatId: Long)
 
     suspend fun findByPhone(phone: String): FoundUser
 
@@ -187,6 +224,15 @@ class MaxClient : MaxApi {
         const val OP_NEW_MESSAGE = 128
         const val OP_MARK_UPDATE = 130 // server push: read/delivery marks changed
         const val OP_PRESENCE = 132 // server push: a contact's online state changed
+        const val OP_REACTION_UPDATE = 155 // NOTIF_MSG_REACTIONS_CHANGED push
+        const val OP_NOTIF_CHAT = 135 // NOTIF_CHAT push: a chat was created/updated (e.g. added to a group)
+
+        // Confirmed from the official client's opcode enum (ru.ok.tamtam.api.d,
+        // recovered by decompiling MAX.apk).
+        private const val OP_REACTION = 178 // MSG_REACTION: add/set a reaction
+        private const val OP_CANCEL_REACTION = 179 // MSG_CANCEL_REACTION: remove our reaction
+        private const val OP_DELETE_CHAT = 52 // CHAT_DELETE
+        private const val OP_LEAVE_CHAT = 58 // CHAT_LEAVE
     }
 
     private val transport = MobileTransport()
@@ -207,6 +253,14 @@ class MaxClient : MaxApi {
     private val _presence = MutableSharedFlow<Presence>(extraBufferCapacity = 64)
     override val presence: SharedFlow<Presence> = _presence
 
+    /** Stream of live reaction-count changes (server push, opcode 155). */
+    private val _reactionUpdates = MutableSharedFlow<ReactionUpdate>(extraBufferCapacity = 64)
+    override val reactionUpdates: SharedFlow<ReactionUpdate> = _reactionUpdates
+
+    /** Stream of created/updated chats (server push, opcode 135). */
+    private val _chatUpdates = MutableSharedFlow<Chat>(extraBufferCapacity = 64)
+    override val chatUpdates: SharedFlow<Chat> = _chatUpdates
+
     override val isConnected: Boolean get() = transport.isConnected
 
     /** Emitted when the connection drops unexpectedly (for auto-reconnect). */
@@ -214,6 +268,9 @@ class MaxClient : MaxApi {
 
     /** Preset avatar id to use when registering a new account (rumax's default). */
     private var registerPhotoId: Long = 2981369L
+
+    /** Our own user id, remembered from the last sync (for NOTIF_CHAT dialog titles). */
+    private var myId: Long = 0L
 
     // ---------------------------------------------------------------------
     // Connection
@@ -238,6 +295,11 @@ class MaxClient : MaxApi {
                         if (chatId != null && mark != null) _readMarks.emit(ReadMark(chatId, userId, mark))
                     }
                     OP_PRESENCE -> parsePresence(payload)?.let { _presence.emit(it) }
+                    OP_REACTION_UPDATE -> parseReactionUpdate(payload)?.let { _reactionUpdates.emit(it) }
+                    OP_NOTIF_CHAT -> {
+                        // {chat: {...}} — a chat was created or updated (new dialog, added to a group).
+                        payload["chat"]?.jsonObject?.let { parseChat(it, emptyMap()) }?.let { _chatUpdates.emit(it) }
+                    }
                 }
             }
         }
@@ -251,6 +313,83 @@ class MaxClient : MaxApi {
         val uid = payload["userId"]?.jsonPrimitive?.longOrNullSafe() ?: return null
         val p = payload["presence"]?.jsonObject
         return Presence(uid, p?.isOnline() == true)
+    }
+
+    /** Parses one chat object (from sync's `chats` array or a NOTIF_CHAT push). */
+    private fun parseChat(
+        c: JsonObject,
+        names: Map<Long, String>,
+    ): Chat? {
+        val id = c["id"]?.jsonPrimitive?.long ?: return null
+        val type = c["type"]?.jsonPrimitive?.contentOrNullSafe()
+        val rawTitle = c["title"]?.jsonPrimitive?.contentOrNullSafe()
+        val lastText =
+            c["lastMessage"]
+                ?.jsonObject
+                ?.get("text")
+                ?.jsonPrimitive
+                ?.contentOrNullSafe()
+                ?.let { localize(it) }
+        val lastTime = c["lastEventTime"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
+        val unread = c["newMessages"]?.jsonPrimitive?.intOrNullSafe() ?: 0
+        val isDialog = type == "DIALOG"
+        // participants = {userId: lastReadMarkMs}; the other side's mark tells us how
+        // far they've read (so our messages up to it show ✓✓).
+        val otherReadMark =
+            c["participants"]
+                ?.jsonObject
+                ?.entries
+                ?.filter { it.key.toLongOrNull() != null && it.key.toLong() != myId }
+                ?.mapNotNull { it.value.jsonPrimitive.longOrNullSafe() }
+                ?.maxOrNull() ?: 0L
+        val title =
+            when {
+                !rawTitle.isNullOrBlank() -> rawTitle
+                isDialog -> {
+                    val other =
+                        c["participants"]
+                            ?.jsonObject
+                            ?.keys
+                            ?.mapNotNull { it.toLongOrNull() }
+                            ?.firstOrNull { it != myId }
+                    when {
+                        other == null -> "Избранное" // self-chat (chatId == myId xor myId == 0)
+                        else -> names[other] ?: "Диалог $id"
+                    }
+                }
+                else -> "Чат $id"
+            }
+        return Chat(
+            id = id,
+            title = title,
+            lastMessageText = lastText,
+            lastEventTime = lastTime,
+            unreadCount = unread,
+            isDialog = isDialog,
+            // Dialogs get their avatar from the contact (resolved in the UI);
+            // groups/channels carry their own avatar on the chat object.
+            avatarUrl = if (isDialog) null else c.avatarUrl(),
+            otherReadMark = otherReadMark,
+        )
+    }
+
+    /**
+     * Parses a live reaction push: `{chatId, messageId, counters:[{reaction, count}]}`.
+     * `messageId` arrives as a number; we normalise it to a string to match [Message.id].
+     */
+    private fun parseReactionUpdate(payload: JsonObject): ReactionUpdate? {
+        val chatId = payload["chatId"]?.jsonPrimitive?.longOrNullSafe() ?: return null
+        val messageId = payload["messageId"]?.jsonPrimitive?.longOrNullSafe()?.toString() ?: return null
+        val counters =
+            payload["counters"]
+                ?.jsonArray
+                .orEmptyList()
+                .mapNotNull { el ->
+                    val c = el.jsonObject
+                    val emoji = c["reaction"]?.jsonPrimitive?.contentOrNullSafe() ?: return@mapNotNull null
+                    Reaction(emoji, c["count"]?.jsonPrimitive?.intOrNullSafe() ?: 0, mine = false)
+                }
+        return ReactionUpdate(chatId, messageId, counters)
     }
 
     /** Opens the TLS connection and performs the opcode-6 ANDROID handshake. */
@@ -481,66 +620,15 @@ class MaxClient : MaxApi {
                 .sortedBy { it.name.lowercase() }
         val names = contactsList.associate { it.id to it.name }.toMutableMap()
 
+        this.myId = myId // remembered so NOTIF_CHAT pushes can resolve dialog titles
+
         // --- chats ---
         val chats =
             payload["chats"]
                 ?.jsonArray
                 .orEmptyList()
-                .mapNotNull { el ->
-                    val c = el.jsonObject
-                    val id = c["id"]?.jsonPrimitive?.long ?: return@mapNotNull null
-                    val type = c["type"]?.jsonPrimitive?.contentOrNullSafe()
-                    val rawTitle = c["title"]?.jsonPrimitive?.contentOrNullSafe()
-                    val lastMessage = c["lastMessage"]?.jsonObject
-                    val lastText =
-                        lastMessage
-                            ?.get("text")
-                            ?.jsonPrimitive
-                            ?.contentOrNullSafe()
-                            ?.let { localize(it) }
-                    val lastTime = c["lastEventTime"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
-                    val unread = c["newMessages"]?.jsonPrimitive?.intOrNullSafe() ?: 0
-                    val isDialog = type == "DIALOG"
-                    // participants = {userId: lastReadMarkMs}; the other side's mark tells us
-                    // how far they've read (so our messages up to it show ✓✓).
-                    val otherReadMark =
-                        c["participants"]
-                            ?.jsonObject
-                            ?.entries
-                            ?.filter { it.key.toLongOrNull() != null && it.key.toLong() != myId }
-                            ?.mapNotNull { it.value.jsonPrimitive.longOrNullSafe() }
-                            ?.maxOrNull() ?: 0L
-
-                    val title =
-                        when {
-                            !rawTitle.isNullOrBlank() -> rawTitle
-                            isDialog -> {
-                                val other =
-                                    c["participants"]
-                                        ?.jsonObject
-                                        ?.keys
-                                        ?.mapNotNull { it.toLongOrNull() }
-                                        ?.firstOrNull { it != myId }
-                                when {
-                                    other == null -> "Избранное" // self-chat (chatId == myId xor myId == 0)
-                                    else -> names[other] ?: "Диалог $id"
-                                }
-                            }
-                            else -> "Чат $id"
-                        }
-                    Chat(
-                        id = id,
-                        title = title,
-                        lastMessageText = lastText,
-                        lastEventTime = lastTime,
-                        unreadCount = unread,
-                        isDialog = isDialog,
-                        // Dialogs get their avatar from the contact (resolved in the UI);
-                        // groups/channels carry their own avatar on the chat object.
-                        avatarUrl = if (isDialog) null else c.avatarUrl(),
-                        otherReadMark = otherReadMark,
-                    )
-                }.sortedByDescending { it.lastEventTime }
+                .mapNotNull { parseChat(it.jsonObject, names) }
+                .sortedByDescending { it.lastEventTime }
 
         // presence = {userId: {seen: <unixSec>, status: <int>}} — a user is online
         // when a `status` field is present (offline entries carry only `seen`).
@@ -626,11 +714,12 @@ class MaxClient : MaxApi {
             .sortedBy { it.time }
     }
 
-    /** Sends [text] to [chatId]. Returns the server-confirmed message, or null. */
+    /** Sends [text] to [chatId], optionally replying to [replyToId]. Returns the echo, or null. */
     override suspend fun sendMessage(
         chatId: Long,
         text: String,
         cid: Long,
+        replyToId: String?,
     ): Message? {
         val payload =
             transport.request(
@@ -642,13 +731,75 @@ class MaxClient : MaxApi {
                         put("cid", cid)
                         put("elements", buildJsonArrayEmpty())
                         put("attaches", buildJsonArrayEmpty())
-                        put("link", kotlinx.serialization.json.JsonNull)
+                        // A reply carries a link: {type:"REPLY", messageId} (per maxplus).
+                        if (replyToId != null) {
+                            putJsonObject("link") {
+                                put("type", "REPLY")
+                                put("messageId", replyToId)
+                            }
+                        } else {
+                            put("link", kotlinx.serialization.json.JsonNull)
+                        }
                     }
                     put("notify", true)
                 },
             )
         val msg = payload["message"]?.jsonObject ?: return null
         return parseMessage(msg, chatId)
+    }
+
+    override suspend fun setReaction(
+        chatId: Long,
+        messageId: String,
+        emoji: String?,
+    ) {
+        val mid = messageId.toLongOrNull() ?: return
+        // Add via MSG_REACTION (178) with {reactionType:"EMOJI", id}; remove via the
+        // dedicated MSG_CANCEL_REACTION (179), which just takes {chatId, messageId}.
+        if (emoji != null) {
+            transport.request(
+                OP_REACTION,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("messageId", mid)
+                    putJsonObject("reaction") {
+                        put("reactionType", "EMOJI")
+                        put("id", emoji)
+                    }
+                },
+            )
+        } else {
+            transport.request(
+                OP_CANCEL_REACTION,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("messageId", mid)
+                },
+            )
+        }
+    }
+
+    override suspend fun deleteChat(
+        chatId: Long,
+        lastEventTime: Long,
+        forAll: Boolean,
+    ) {
+        // Deletes our copy of the chat. NB: Max does not support deleting a 1:1
+        // dialog for the other party — even the official client can't (the server
+        // ignores forAll for dialogs), so this only ever removes our own container.
+        transport.request(
+            OP_DELETE_CHAT,
+            buildJsonObject {
+                put("chatId", chatId)
+                put("lastEventTime", lastEventTime)
+                put("forAll", forAll)
+            },
+        )
+    }
+
+    override suspend fun leaveGroup(chatId: Long) {
+        // CHAT_LEAVE payload is just {chatId}.
+        transport.request(OP_LEAVE_CHAT, buildJsonObject { put("chatId", chatId) })
     }
 
     // ---------------------------------------------------------------------
@@ -683,12 +834,18 @@ class MaxClient : MaxApi {
                 }
             }
         // Non-renderable attaches still get a text label so they aren't invisible.
+        // For SHARE we surface the actual URL/title so it renders as a tappable link.
         val mediaLabel =
             attaches.firstNotNullOfOrNull { el ->
-                when (el.jsonObject["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
+                val a = el.jsonObject
+                when (a["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
                     "FILE" -> "📎 Файл"
                     "AUDIO" -> "🎵 Голосовое сообщение"
-                    "SHARE" -> "🔗 Ссылка"
+                    "SHARE" -> {
+                        val url = (a["url"] ?: a["link"])?.jsonPrimitive?.contentOrNullSafe()
+                        val shareTitle = a["title"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null }
+                        listOfNotNull(shareTitle, url).joinToString("\n").ifBlank { "🔗 Ссылка" }
+                    }
                     else -> null
                 }
             }
@@ -721,6 +878,7 @@ class MaxClient : MaxApi {
                 3 -> MessageStatus.READ
                 else -> MessageStatus.SENT
             }
+        val reactions = parseReactions(obj["reactionInfo"]?.jsonObject)
         // Skip empty service messages with no text, no media and no id.
         if (text.isEmpty() && media.isEmpty() && id == null) return null
         return Message(
@@ -732,7 +890,32 @@ class MaxClient : MaxApi {
             time = time,
             status = status,
             media = media,
+            reactions = reactions,
         )
+    }
+
+    /**
+     * Parses `reactionInfo = {counters:[{reaction, count}], totalCount, yourReaction}`.
+     * `reaction`/`yourReaction` may be a bare emoji string or an object with an `id`.
+     */
+    private fun parseReactions(info: JsonObject?): List<Reaction> {
+        if (info == null) return emptyList()
+
+        fun emojiOf(node: kotlinx.serialization.json.JsonElement?): String? =
+            when (node) {
+                is JsonObject -> node["id"]?.jsonPrimitive?.contentOrNullSafe() ?: node["reaction"]?.jsonPrimitive?.contentOrNullSafe()
+                else -> node?.jsonPrimitive?.contentOrNullSafe()
+            }
+        val mine = emojiOf(info["yourReaction"])
+        return info["counters"]
+            ?.jsonArray
+            .orEmptyList()
+            .mapNotNull { el ->
+                val c = el.jsonObject
+                val emoji = emojiOf(c["reaction"]) ?: return@mapNotNull null
+                val count = c["count"]?.jsonPrimitive?.intOrNullSafe() ?: 0
+                Reaction(emoji, count, mine = emoji == mine)
+            }
     }
 
     /** Tells the server we've read everything up to [messageId] in [chatId]. */

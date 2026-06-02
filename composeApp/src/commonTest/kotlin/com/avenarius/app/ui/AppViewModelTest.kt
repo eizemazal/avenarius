@@ -6,12 +6,14 @@ import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
 import com.avenarius.app.net.Presence
+import com.avenarius.app.net.ReactionUpdate
 import com.avenarius.app.net.ReadMark
 import com.avenarius.app.net.SyncResult
 import kotlinx.coroutines.Dispatchers
@@ -52,10 +54,14 @@ private class FakeMaxClient : MaxApi {
     private val _incoming = MutableSharedFlow<Message>(extraBufferCapacity = 16)
     private val _readMarks = MutableSharedFlow<ReadMark>(extraBufferCapacity = 16)
     private val _presence = MutableSharedFlow<Presence>(extraBufferCapacity = 16)
+    private val _reactionUpdates = MutableSharedFlow<ReactionUpdate>(extraBufferCapacity = 16)
+    private val _chatUpdates = MutableSharedFlow<Chat>(extraBufferCapacity = 16)
     private val _drops = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
     override val incoming: SharedFlow<Message> get() = _incoming
     override val readMarks: SharedFlow<ReadMark> get() = _readMarks
     override val presence: SharedFlow<Presence> get() = _presence
+    override val reactionUpdates: SharedFlow<ReactionUpdate> get() = _reactionUpdates
+    override val chatUpdates: SharedFlow<Chat> get() = _chatUpdates
     override val drops: SharedFlow<Unit> get() = _drops
     override var isConnected: Boolean = false
         private set
@@ -83,6 +89,10 @@ private class FakeMaxClient : MaxApi {
     fun emitReadMark(mark: ReadMark) = _readMarks.tryEmit(mark)
 
     fun emitPresence(p: Presence) = _presence.tryEmit(p)
+
+    fun emitReactionUpdate(u: ReactionUpdate) = _reactionUpdates.tryEmit(u)
+
+    fun emitChatUpdate(c: Chat) = _chatUpdates.tryEmit(c)
 
     override suspend fun connect(
         deviceId: String,
@@ -119,12 +129,20 @@ private class FakeMaxClient : MaxApi {
         count: Int,
     ): List<Message> = history
 
+    var lastReplyToId: String? = null
+    val reactionCalls = mutableListOf<Triple<Long, String, String?>>()
+    val deletedChats = mutableListOf<Long>()
+    var lastDeleteForAll: Boolean? = null
+    val leftGroups = mutableListOf<Long>()
+
     override suspend fun sendMessage(
         chatId: Long,
         text: String,
         cid: Long,
+        replyToId: String?,
     ): Message? {
         sentMessages += chatId to text
+        lastReplyToId = replyToId
         return Message(id = "srv-$cid", cid = cid, chatId = chatId, senderId = account.userId, text = text, time = cid)
     }
 
@@ -134,6 +152,27 @@ private class FakeMaxClient : MaxApi {
         mark: Long,
     ) {
         markReadCalls += Triple(chatId, messageId, mark)
+    }
+
+    override suspend fun setReaction(
+        chatId: Long,
+        messageId: String,
+        emoji: String?,
+    ) {
+        reactionCalls += Triple(chatId, messageId, emoji)
+    }
+
+    override suspend fun deleteChat(
+        chatId: Long,
+        lastEventTime: Long,
+        forAll: Boolean,
+    ) {
+        deletedChats += chatId
+        lastDeleteForAll = forAll
+    }
+
+    override suspend fun leaveGroup(chatId: Long) {
+        leftGroups += chatId
     }
 
     override suspend fun findByPhone(phone: String): FoundUser = FoundUser(1L, "Найден")
@@ -357,6 +396,178 @@ class AppViewModelTest {
         assertTrue(200L in vm.state.value.onlineUsers)
         fake.emitPresence(Presence(userId = 200, online = false))
         assertFalse(200L in vm.state.value.onlineUsers)
+    }
+
+    @Test
+    fun replySendsReplyToIdThenClearsBanner() {
+        val chat = Chat(id = 42, title = "Диалог", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        val target = Message(id = "orig", cid = null, chatId = 42, senderId = 200, text = "вопрос", time = 5)
+        vm.startReply(target)
+        assertEquals(
+            "orig",
+            vm.state.value.replyingTo
+                ?.id,
+        )
+
+        vm.sendMessage("ответ")
+        assertEquals("orig", fake.lastReplyToId)
+        assertNull(vm.state.value.replyingTo, "reply banner should clear after sending")
+    }
+
+    @Test
+    fun toggleReactionAddsOptimisticallyAndCallsClient() {
+        val chat = Chat(id = 42, title = "Диалог", lastMessageText = null, lastEventTime = 1)
+        fake.history = listOf(Message(id = "m1", cid = null, chatId = 42, senderId = 200, text = "hi", time = 5))
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+
+        vm.toggleReaction(
+            vm.state.value.messages
+                .first(),
+            "❤️",
+        )
+
+        val r =
+            vm.state.value.messages
+                .first { it.id == "m1" }
+                .reactions
+                .first()
+        assertEquals("❤️", r.emoji)
+        assertEquals(1, r.count)
+        assertTrue(r.mine)
+        assertEquals(Triple(42L, "m1", "❤️"), fake.reactionCalls.last())
+    }
+
+    @Test
+    fun toggleReactionRemovesWhenAlreadyMine() {
+        val chat = Chat(id = 42, title = "Диалог", lastMessageText = null, lastEventTime = 1)
+        fake.history =
+            listOf(
+                Message(
+                    id = "m1",
+                    cid = null,
+                    chatId = 42,
+                    senderId = 200,
+                    text = "hi",
+                    time = 5,
+                    reactions = listOf(Reaction("❤️", 1, mine = true)),
+                ),
+            )
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+
+        vm.toggleReaction(
+            vm.state.value.messages
+                .first(),
+            "❤️",
+        )
+
+        assertTrue(
+            vm.state.value.messages
+                .first { it.id == "m1" }
+                .reactions
+                .isEmpty(),
+        )
+        // Cleared locally; the server is told via the dedicated remove (emoji = null).
+        assertEquals(Triple(42L, "m1", null), fake.reactionCalls.last())
+    }
+
+    @Test
+    fun reactionPushUpdatesCountsAndPreservesMyReaction() {
+        val chat = Chat(id = 42, title = "Диалог", lastMessageText = null, lastEventTime = 1)
+        fake.history =
+            listOf(
+                Message(
+                    id = "m1",
+                    cid = null,
+                    chatId = 42,
+                    senderId = 200,
+                    text = "hi",
+                    time = 5,
+                    reactions = listOf(Reaction("👍", 1, mine = true)),
+                ),
+            )
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+
+        // Another party also reacts 👍 → count becomes 2; my reaction must stay highlighted.
+        fake.emitReactionUpdate(ReactionUpdate(42, "m1", listOf(Reaction("👍", 2, mine = false))))
+
+        val r =
+            vm.state.value.messages
+                .first { it.id == "m1" }
+                .reactions
+                .first()
+        assertEquals(2, r.count)
+        assertTrue(r.mine, "my own reaction flag must survive a count-only push")
+    }
+
+    @Test
+    fun chatUpdatePushAddsNewChatToList() {
+        val vm = loggedIn(emptyList())
+        assertTrue(
+            vm.state.value.chats
+                .isEmpty(),
+        )
+
+        // e.g. another user starts a dialog, or we're added to a group.
+        fake.emitChatUpdate(Chat(id = 77, title = "Новый чат", lastMessageText = "привет", lastEventTime = 9))
+
+        val chats = vm.state.value.chats
+        assertEquals(1, chats.size)
+        assertEquals(77L, chats.first().id)
+    }
+
+    @Test
+    fun chatUpdatePushReplacesExistingChat() {
+        val chat = Chat(id = 5, title = "Чат", lastMessageText = "старое", lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+
+        fake.emitChatUpdate(chat.copy(lastMessageText = "новое", lastEventTime = 50))
+
+        assertEquals(1, vm.state.value.chats.size)
+        assertEquals(
+            "новое",
+            vm.state.value.chats
+                .first()
+                .lastMessageText,
+        )
+    }
+
+    @Test
+    fun deleteCurrentChatRemovesItAndReturnsToList() {
+        val chat = Chat(id = 42, title = "Диалог", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+
+        vm.deleteCurrentChat()
+
+        assertEquals(Screen.CHATS, vm.state.value.screen)
+        assertTrue(
+            vm.state.value.chats
+                .none { it.id == 42L },
+        )
+        assertEquals(listOf(42L), fake.deletedChats)
+        // Max can't delete a dialog for the other party, so we only delete our copy.
+        assertEquals(false, fake.lastDeleteForAll)
+    }
+
+    @Test
+    fun leaveCurrentGroupRemovesItAndReturnsToList() {
+        val group = Chat(id = 7, title = "Группа", lastMessageText = null, lastEventTime = 1, isDialog = false)
+        val vm = loggedIn(listOf(group))
+        vm.openChat(group)
+
+        vm.leaveCurrentGroup()
+
+        assertEquals(Screen.CHATS, vm.state.value.screen)
+        assertTrue(
+            vm.state.value.chats
+                .none { it.id == 7L },
+        )
+        assertEquals(listOf(7L), fake.leftGroups)
     }
 
     @Test

@@ -72,6 +72,13 @@ data class MediaAttach(
     val videoId: Long = 0,
 )
 
+/** One emoji reaction bucket on a message: [emoji] with [count], [mine] if we reacted with it. */
+data class Reaction(
+    val emoji: String,
+    val count: Int,
+    val mine: Boolean,
+)
+
 /** A single message inside a chat. */
 data class Message(
     /** Server message id (string in the protocol). Null for messages we just sent locally. */
@@ -86,4 +93,6 @@ data class Message(
     val status: MessageStatus = MessageStatus.UNKNOWN,
     /** Inline image/video attachments. */
     val media: List<MediaAttach> = emptyList(),
+    /** Emoji reactions on this message (aggregated per emoji). */
+    val reactions: List<Reaction> = emptyList(),
 )

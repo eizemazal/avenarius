@@ -9,6 +9,7 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.net.CodeResult
@@ -76,6 +77,8 @@ data class AppState(
     /** Live results while searching by name in the new-chat dialog. */
     val searchResults: List<SearchResult> = emptyList(),
     val searching: Boolean = false,
+    /** The message currently being replied to (shown as a banner above the input). */
+    val replyingTo: Message? = null,
 )
 
 /**
@@ -104,9 +107,16 @@ class AppViewModel(
                     _state.value.account
                         ?.userId
                         ?.let { it == msg.senderId } ?: false
+                val alreadyShown = isOpen && _state.value.messages.any { it.id != null && it.id == msg.id }
                 _state.update { s ->
+                    // Replace an existing message (picks up edits/reaction changes if
+                    // they arrive as op128) or append a genuinely new one.
                     val messages =
-                        if (isOpen && s.messages.none { it.id == msg.id }) s.messages + msg else s.messages
+                        when {
+                            !isOpen -> s.messages
+                            alreadyShown -> s.messages.map { if (it.id == msg.id) msg else it }
+                            else -> s.messages + msg
+                        }
                     val chats =
                         s.chats
                             .map { c ->
@@ -173,6 +183,51 @@ class AppViewModel(
                     it.copy(
                         onlineUsers = if (p.online) it.onlineUsers + p.userId else it.onlineUsers - p.userId,
                     )
+                }
+            }
+        }
+        // Live reaction counts (op155): the push has counts only, so we keep our own
+        // reaction flag from local state and just refresh the numbers/emojis.
+        viewModelScope.launch {
+            client.reactionUpdates.collect { u ->
+                _state.update { s ->
+                    if (s.currentChat?.id != u.chatId) {
+                        s
+                    } else {
+                        s.copy(
+                            messages =
+                                s.messages.map { m ->
+                                    if (m.id != u.messageId) {
+                                        m
+                                    } else {
+                                        val mineEmoji = m.reactions.firstOrNull { it.mine }?.emoji
+                                        m.copy(reactions = u.reactions.map { it.copy(mine = it.emoji == mineEmoji) })
+                                    }
+                                },
+                        )
+                    }
+                }
+            }
+        }
+        // Live chat-list updates (op135): a chat created/updated (added to a group,
+        // a new dialog from someone) appears immediately instead of only after sync.
+        viewModelScope.launch {
+            client.chatUpdates.collect { chat ->
+                _state.update { s ->
+                    // Resolve a dialog's title from our contacts if the push lacked one.
+                    val resolved =
+                        if (chat.isDialog && chat.title.startsWith("Диалог ") && s.account != null) {
+                            s.contacts[chat.id xor s.account.userId]?.let { chat.copy(title = it) } ?: chat
+                        } else {
+                            chat
+                        }
+                    val merged =
+                        if (s.chats.any { it.id == chat.id }) {
+                            s.chats.map { if (it.id == chat.id) resolved else it }
+                        } else {
+                            s.chats + resolved
+                        }
+                    s.copy(chats = merged.sortedByDescending { it.lastEventTime })
                 }
             }
         }
@@ -622,8 +677,10 @@ class AppViewModel(
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
         val cid = nowMillis()
+        val replyToId = _state.value.replyingTo?.id
+        _state.update { it.copy(replyingTo = null) } // clear the reply banner on send
         launchBusyless {
-            val sent = client.sendMessage(chat.id, trimmed, cid)
+            val sent = client.sendMessage(chat.id, trimmed, cid, replyToId)
             if (sent != null) {
                 _state.update { s ->
                     if (s.messages.any { it.id == sent.id }) {
@@ -632,6 +689,64 @@ class AppViewModel(
                         s.copy(messages = s.messages + sent)
                     }
                 }
+            }
+        }
+    }
+
+    /** Begins replying to [msg] (shows a banner above the input). */
+    fun startReply(msg: Message) = _state.update { it.copy(replyingTo = msg) }
+
+    fun cancelReply() = _state.update { it.copy(replyingTo = null) }
+
+    /**
+     * Toggles our [emoji] reaction on [msg]: tapping the one we already chose removes
+     * it. Updates the bubble optimistically, then tells the server.
+     */
+    fun toggleReaction(
+        msg: Message,
+        emoji: String,
+    ) {
+        val id = msg.id ?: return
+        val chatId = msg.chatId
+        // Tapping our current reaction clears it; otherwise it replaces/sets ours.
+        val had = msg.reactions.any { it.mine && it.emoji == emoji }
+        val target = if (had) null else emoji
+        _state.update { s ->
+            s.copy(messages = s.messages.map { if (it.id == id) applyMyReaction(it, target) else it })
+        }
+        launchBusyless { client.setReaction(chatId, id, target) }
+    }
+
+    /** Deletes the current 1:1 chat (removes it locally and returns to the list). */
+    fun deleteCurrentChat() {
+        val chat = _state.value.currentChat ?: return
+        launchBusy {
+            // Removes our own copy. Max doesn't allow deleting a dialog for the other
+            // party (the official client can't either), so forAll stays false.
+            client.deleteChat(chat.id, chat.lastEventTime, forAll = false)
+            _state.update {
+                it.copy(
+                    screen = Screen.CHATS,
+                    currentChat = null,
+                    messages = emptyList(),
+                    chats = it.chats.filterNot { c -> c.id == chat.id },
+                )
+            }
+        }
+    }
+
+    /** Leaves the current group chat (removes it locally and returns to the list). */
+    fun leaveCurrentGroup() {
+        val chat = _state.value.currentChat ?: return
+        launchBusy {
+            client.leaveGroup(chat.id)
+            _state.update {
+                it.copy(
+                    screen = Screen.CHATS,
+                    currentChat = null,
+                    messages = emptyList(),
+                    chats = it.chats.filterNot { c -> c.id == chat.id },
+                )
             }
         }
     }
@@ -645,6 +760,33 @@ class AppViewModel(
     }
 
     // --- helpers ---
+
+    /** Returns [msg] with our own reaction changed to [emoji] (or removed when null). */
+    private fun applyMyReaction(
+        msg: Message,
+        emoji: String?,
+    ): Message {
+        if (msg.reactions.firstOrNull { it.mine }?.emoji == emoji) return msg
+        // Drop our previous reaction (decrement, removing the bucket if it empties).
+        var list =
+            msg.reactions.mapNotNull { r ->
+                if (!r.mine) {
+                    r
+                } else {
+                    (r.count - 1).takeIf { it > 0 }?.let { r.copy(count = it, mine = false) }
+                }
+            }
+        if (emoji != null) {
+            val idx = list.indexOfFirst { it.emoji == emoji }
+            list =
+                if (idx >= 0) {
+                    list.mapIndexed { i, r -> if (i == idx) r.copy(count = r.count + 1, mine = true) else r }
+                } else {
+                    list + Reaction(emoji, 1, mine = true)
+                }
+        }
+        return msg.copy(reactions = list)
+    }
 
     private fun launchBusy(block: suspend () -> Unit) {
         _state.update { it.copy(busy = true, error = null) }

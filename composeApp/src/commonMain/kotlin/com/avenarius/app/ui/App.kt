@@ -27,6 +27,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -57,6 +59,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
@@ -159,11 +163,17 @@ fun App(viewModel: AppViewModel) {
                                     busy = state.busy,
                                     error = state.error,
                                     loadingOlder = state.loadingOlder,
+                                    replyingTo = state.replyingTo,
                                     onLoadOlder = viewModel::loadOlder,
                                     onBack = viewModel::backToChats,
                                     onSend = viewModel::sendMessage,
                                     onMediaClick = viewModel::openMedia,
                                     onOpenUser = viewModel::openUser,
+                                    onReact = viewModel::toggleReaction,
+                                    onReply = viewModel::startReply,
+                                    onCancelReply = viewModel::cancelReply,
+                                    onDeleteChat = viewModel::deleteCurrentChat,
+                                    onLeaveGroup = viewModel::leaveCurrentGroup,
                                 )
                         }
                     }
@@ -818,17 +828,25 @@ private fun ChatScreen(
     busy: Boolean,
     error: String?,
     loadingOlder: Boolean,
+    replyingTo: Message?,
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     onSend: (String) -> Unit,
     onMediaClick: (MediaAttach, String?) -> Unit,
     onOpenUser: (Long) -> Unit,
+    onReact: (Message, String) -> Unit,
+    onReply: (Message) -> Unit,
+    onCancelReply: () -> Unit,
+    onDeleteChat: () -> Unit,
+    onLeaveGroup: () -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val isDialog = chat?.isDialog ?: true
     // For a 1:1 dialog the other user's id is chatId XOR myId.
     val otherUserId = if (isDialog && chat != null && myId >= 0) chat.id xor myId else null
+    // The message whose context menu is open (overlay shown above the conversation).
+    var menuTarget by remember(chat?.id) { mutableStateOf<Message?>(null) }
 
     // Index of the first unread message (the divider sits just before it).
     val firstUnread = if (unreadAtOpen in 1..messages.size) messages.size - unreadAtOpen else -1
@@ -878,38 +896,68 @@ private fun ChatScreen(
             }
     }
 
+    var menuOpen by remember { mutableStateOf(false) }
+    var confirmAction by remember { mutableStateOf(false) }
+    // Heading avatar: a 1:1 dialog uses the contact's photo; a group uses its own.
+    val headingAvatar = if (isDialog) otherUserId?.let { senderAvatars[it] } else chat?.avatarUrl
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    val titleMod = if (otherUserId != null) Modifier.clickable { onOpenUser(otherUserId) } else Modifier
-                    Text(chat?.title ?: "Чат", modifier = titleMod)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Avatar(
+                            chat?.title ?: "Чат",
+                            headingAvatar,
+                            36.dp,
+                            // 1:1 → open the contact's profile; group details come later.
+                            onClick = otherUserId?.let { id -> { onOpenUser(id) } },
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(chat?.title ?: "Чат", maxLines = 1, style = MaterialTheme.typography.titleMedium)
+                    }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) { Text("‹", style = MaterialTheme.typography.headlineMedium) }
                 },
+                actions = {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Text("⋮", style = MaterialTheme.typography.titleLarge)
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text(if (isDialog) "Удалить чат" else "Выйти из группы") },
+                            onClick = {
+                                menuOpen = false
+                                confirmAction = true
+                            },
+                        )
+                    }
+                },
             )
         },
         bottomBar = {
-            Row(
-                Modifier.fillMaxWidth().padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = { draft = it },
-                    placeholder = { Text("Сообщение") },
-                    modifier = Modifier.weight(1f),
-                    maxLines = 4,
-                )
-                Button(
-                    onClick = {
-                        onSend(draft)
-                        draft = ""
-                    },
-                    enabled = draft.isNotBlank(),
-                ) { Text("➤") }
+            Column(Modifier.fillMaxWidth()) {
+                if (replyingTo != null) ReplyBanner(replyingTo, contacts, myId, onCancelReply)
+                Row(
+                    Modifier.fillMaxWidth().padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        placeholder = { Text("Сообщение") },
+                        modifier = Modifier.weight(1f),
+                        maxLines = 4,
+                    )
+                    Button(
+                        onClick = {
+                            onSend(draft)
+                            draft = ""
+                        },
+                        enabled = draft.isNotBlank(),
+                    ) { Text("➤") }
+                }
             }
         },
     ) { padding ->
@@ -953,10 +1001,45 @@ private fun ChatScreen(
                         startsRun = startsRun,
                         onMediaClick = onMediaClick,
                         onAvatarClick = { onOpenUser(msg.senderId) },
+                        onClick = { menuTarget = msg },
+                        onReactionClick = { emoji -> onReact(msg, emoji) },
                     )
                 }
             }
         }
+    }
+
+    // Tap-to-open context menu, floating above the conversation.
+    menuTarget?.let { target ->
+        MessageContextMenu(
+            message = target,
+            onDismiss = { menuTarget = null },
+            onReact = { emoji ->
+                onReact(target, emoji)
+                menuTarget = null
+            },
+            onReply = {
+                onReply(target)
+                menuTarget = null
+            },
+        )
+    }
+
+    // Confirmation for the destructive top-right menu action.
+    if (confirmAction) {
+        val isGroup = !isDialog
+        AlertDialog(
+            onDismissRequest = { confirmAction = false },
+            title = { Text(if (isGroup) "Выйти из группы?" else "Удалить чат?") },
+            text = { Text(if (isGroup) "Вы покинете группу «${chat?.title ?: ""}»." else "Чат будет удалён без возможности отмены.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmAction = false
+                    if (isGroup) onLeaveGroup() else onDeleteChat()
+                }) { Text(if (isGroup) "Выйти" else "Удалить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmAction = false }) { Text("Отмена") } },
+        )
     }
 }
 
@@ -970,6 +1053,8 @@ private fun MessageRow(
     startsRun: Boolean,
     onMediaClick: (MediaAttach, String?) -> Unit,
     onAvatarClick: () -> Unit,
+    onClick: () -> Unit,
+    onReactionClick: (String) -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth(),
@@ -983,40 +1068,193 @@ private fun MessageRow(
         }
         val bg = if (isMine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
         val fg = if (isMine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-        Box(
-            Modifier
-                .widthIn(max = 280.dp)
-                .background(bg, RoundedCornerShape(14.dp))
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+        Column(horizontalAlignment = if (isMine) Alignment.End else Alignment.Start) {
+            Box(
+                Modifier
+                    .widthIn(max = 280.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(bg)
+                    .clickable(onClick = onClick)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Column {
+                    if (isGroup && !isMine && startsRun) {
+                        Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    }
+                    msg.media.forEach { media ->
+                        MediaThumbnail(media, onClick = { onMediaClick(media, msg.id) })
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    if (msg.text.isNotEmpty()) {
+                        LinkedText(msg.text, MaterialTheme.typography.bodyLarge, fg)
+                    }
+                    Row(
+                        modifier = Modifier.align(Alignment.End),
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(formatClock(msg.time), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
+                        if (isMine) {
+                            val read = msg.status == MessageStatus.READ
+                            Text(
+                                if (read) "✓✓" else "✓",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (read) Color(0xFF8AB4F8) else fg.copy(alpha = 0.7f),
+                            )
+                        }
+                    }
+                }
+            }
+            if (msg.reactions.isNotEmpty()) {
+                Spacer(Modifier.height(2.dp))
+                ReactionChips(msg.reactions, onReactionClick)
+            }
+        }
+    }
+}
+
+/** Row of tappable reaction chips under a message; our own reaction is highlighted. */
+@Composable
+private fun ReactionChips(
+    reactions: List<com.avenarius.app.model.Reaction>,
+    onClick: (String) -> Unit,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        reactions.forEach { r ->
+            val chipBg = if (r.mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+            val chipFg = if (r.mine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(chipBg)
+                    .clickable { onClick(r.emoji) }
+                    .padding(horizontal = 7.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(r.emoji, style = MaterialTheme.typography.labelMedium)
+                if (r.count > 1) Text("${r.count}", style = MaterialTheme.typography.labelMedium, color = chipFg)
+            }
+        }
+    }
+}
+
+/** Banner above the input showing which message is being replied to. */
+@Composable
+private fun ReplyBanner(
+    msg: Message,
+    contacts: Map<Long, String>,
+    myId: Long,
+    onCancel: () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column {
-                if (isGroup && !isMine && startsRun) {
-                    Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            Box(Modifier.width(3.dp).height(34.dp).background(MaterialTheme.colorScheme.primary))
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (msg.senderId == myId) "Вы" else contacts[msg.senderId] ?: "Сообщение",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    msg.text.ifBlank { "Вложение" },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+            IconButton(onClick = onCancel) { Text("✕") }
+        }
+    }
+}
+
+private val QuickReactions = listOf("❤️", "🥰", "😱", "🤣", "😄", "👍", "😘")
+private val MoreReactions = listOf("🔥", "👏", "😢", "🙏", "💯", "🎉", "😡", "🤔")
+
+/**
+ * Floating context menu shown when a message is tapped: a (expandable) reactions
+ * bar on top, then Reply / Copy. Tapping the dimmed backdrop dismisses it.
+ */
+@Composable
+private fun MessageContextMenu(
+    message: Message,
+    onDismiss: () -> Unit,
+    onReact: (String) -> Unit,
+    onReply: () -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    var expanded by remember { mutableStateOf(false) }
+    PlatformBackHandler(enabled = true, onBack = onDismiss)
+    Box(
+        Modifier.fillMaxSize().background(Color(0x99000000)).clickable(onClick = onDismiss),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier.padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            // Reactions bar (expandable).
+            Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        QuickReactions.forEach { emoji ->
+                            Text(emoji, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.clickable { onReact(emoji) })
+                        }
+                        IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(32.dp)) {
+                            Text(if (expanded) "⌃" else "⌄", style = MaterialTheme.typography.titleLarge)
+                        }
+                    }
+                    if (expanded) {
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            MoreReactions.forEach { emoji ->
+                                Text(
+                                    emoji,
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    modifier = Modifier.clickable { onReact(emoji) },
+                                )
+                            }
+                        }
+                    }
                 }
-                msg.media.forEach { media ->
-                    MediaThumbnail(media, onClick = { onMediaClick(media, msg.id) })
-                    Spacer(Modifier.height(4.dp))
-                }
-                if (msg.text.isNotEmpty()) {
-                    Text(msg.text, color = fg, style = MaterialTheme.typography.bodyLarge)
-                }
-                Row(
-                    modifier = Modifier.align(Alignment.End),
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(formatClock(msg.time), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
-                    if (isMine) {
-                        val read = msg.status == MessageStatus.READ
-                        Text(
-                            if (read) "✓✓" else "✓",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (read) Color(0xFF8AB4F8) else fg.copy(alpha = 0.7f),
-                        )
+            }
+            Spacer(Modifier.height(12.dp))
+            // Action items.
+            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface) {
+                Column(Modifier.widthIn(min = 220.dp)) {
+                    ContextMenuItem("↩", "Ответить", onClick = onReply)
+                    if (message.text.isNotBlank()) {
+                        ContextMenuItem("⧉", "Копировать") {
+                            clipboard.setText(AnnotatedString(message.text))
+                            onDismiss()
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ContextMenuItem(
+    icon: String,
+    label: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        Text(icon, style = MaterialTheme.typography.titleMedium)
+        Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }
 
