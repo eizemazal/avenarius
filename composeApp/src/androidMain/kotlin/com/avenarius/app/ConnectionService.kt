@@ -58,8 +58,10 @@ class ConnectionService : Service() {
     private suspend fun onIncoming(msg: Message) {
         val myId = Session.prefs.userId
         if (msg.senderId == myId) return // our own echo
-        // Don't notify for the chat the user is actively viewing.
-        if (Session.appInForeground && Session.openChatId == msg.chatId) return
+        // Don't show system notifications while the app is on screen — the user is
+        // already here and the in-app chat list / open chat updates live. We only
+        // notify when backgrounded.
+        if (Session.appInForeground) return
 
         val info = Session.chatInfo[msg.chatId]
         val sender = resolveName(msg.senderId)

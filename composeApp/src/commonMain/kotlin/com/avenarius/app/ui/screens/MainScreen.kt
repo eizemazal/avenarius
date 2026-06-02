@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -222,13 +223,24 @@ private fun ChatsTab(
     onOpenChat: (Chat) -> Unit,
     onOpenUser: (Long) -> Unit,
 ) {
+    val listState = rememberLazyListState()
+    // When a chat jumps to the top (new message, or a deleted dialog revived by an
+    // incoming message), a keyed LazyColumn anchors to the previously-visible row,
+    // leaving the new top item just above the fold. If the user is already at/near
+    // the top, scroll up to reveal it; if they've scrolled down, leave them be.
+    val topChatId = chats.firstOrNull()?.id
+    LaunchedEffect(topChatId) {
+        if (topChatId != null && listState.firstVisibleItemIndex <= 2) {
+            listState.animateScrollToItem(0)
+        }
+    }
     PullToRefreshBox(isRefreshing = isRefreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
         if (chats.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("Чатов пока нет (потяните вниз для обновления)", style = MaterialTheme.typography.bodyMedium)
             }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                 items(chats, key = { it.id }) { chat ->
                     val otherId = if (chat.isDialog) chat.id xor myId else null
                     // Dialogs take their avatar from the contact; groups carry their own.

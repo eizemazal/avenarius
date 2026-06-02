@@ -7,6 +7,7 @@ import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
 import com.avenarius.app.model.Reaction
+import com.avenarius.app.model.ReplyInfo
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -732,10 +733,13 @@ class MaxClient : MaxApi {
                         put("elements", buildJsonArrayEmpty())
                         put("attaches", buildJsonArrayEmpty())
                         // A reply carries a link: {type:"REPLY", messageId} (per maxplus).
-                        if (replyToId != null) {
+                        // messageId MUST be a NUMBER — sending it as a string makes the
+                        // server error out and drop the connection (same as markRead).
+                        val replyMid = replyToId?.toLongOrNull()
+                        if (replyMid != null) {
                             putJsonObject("link") {
                                 put("type", "REPLY")
-                                put("messageId", replyToId)
+                                put("messageId", replyMid)
                             }
                         } else {
                             put("link", kotlinx.serialization.json.JsonNull)
@@ -744,8 +748,18 @@ class MaxClient : MaxApi {
                     put("notify", true)
                 },
             )
-        val msg = payload["message"]?.jsonObject ?: return null
-        return parseMessage(msg, chatId)
+        // A closed/forbidden chat replies with an error payload whose `message` is the
+        // error TEXT (a string), not a message object. Guard the cast (it would
+        // otherwise throw "JsonLiteral is not a JsonObject") and surface the server's
+        // message cleanly so the UI shows e.g. "Чат закрыт" instead of a raw exception.
+        val msgObj = payload["message"] as? JsonObject
+        if (msgObj == null) {
+            if (payload["error"] != null || payload["message"] != null) {
+                error(payload.serverMessage("Не удалось отправить сообщение"))
+            }
+            return null
+        }
+        return parseMessage(msgObj, chatId)
     }
 
     override suspend fun setReaction(
@@ -879,6 +893,18 @@ class MaxClient : MaxApi {
                 else -> MessageStatus.SENT
             }
         val reactions = parseReactions(obj["reactionInfo"]?.jsonObject)
+        // A reply carries the quoted message inline under link.message (type REPLY).
+        val replyTo =
+            (obj["link"] as? JsonObject)
+                ?.takeIf { it["type"]?.jsonPrimitive?.contentOrNullSafe() == "REPLY" }
+                ?.get("message")
+                ?.let { it as? JsonObject }
+                ?.let { q ->
+                    ReplyInfo(
+                        senderId = q["sender"]?.jsonPrimitive?.longOrNullSafe() ?: 0L,
+                        text = localize(q["text"]?.jsonPrimitive?.contentOrNullSafe() ?: "").ifBlank { "Вложение" },
+                    )
+                }
         // Skip empty service messages with no text, no media and no id.
         if (text.isEmpty() && media.isEmpty() && id == null) return null
         return Message(
@@ -891,6 +917,7 @@ class MaxClient : MaxApi {
             status = status,
             media = media,
             reactions = reactions,
+            replyTo = replyTo,
         )
     }
 

@@ -117,9 +117,10 @@ class AppViewModel(
                             alreadyShown -> s.messages.map { if (it.id == msg.id) msg else it }
                             else -> s.messages + msg
                         }
-                    val chats =
-                        s.chats
-                            .map { c ->
+                    val known = s.chats.any { it.id == msg.chatId }
+                    val updated =
+                        if (known) {
+                            s.chats.map { c ->
                                 if (c.id != msg.chatId) {
                                     c
                                 } else {
@@ -131,8 +132,28 @@ class AppViewModel(
                                         unreadCount = if (!isOpen && !fromMe) c.unreadCount + 1 else c.unreadCount,
                                     )
                                 }
-                            }.sortedByDescending { it.lastEventTime }
-                    s.copy(messages = messages, chats = chats)
+                            }
+                        } else {
+                            // A message for a chat not in our list: a dialog we deleted that
+                            // the other side revived, or a new dialog whose NOTIF_CHAT we
+                            // missed. Synthesize a row so it appears immediately (the title
+                            // is refined on the next sync). For a 1:1 dialog the chatId is
+                            // myId xor otherUserId, so it equals myId xor senderId here.
+                            val myId = s.account?.userId
+                            val isDialog = myId != null && msg.chatId == (myId xor msg.senderId)
+                            val title =
+                                if (isDialog) s.contacts[msg.senderId] ?: "Диалог ${msg.chatId}" else "Чат"
+                            s.chats +
+                                Chat(
+                                    id = msg.chatId,
+                                    title = title,
+                                    lastMessageText = msg.text,
+                                    lastEventTime = msg.time,
+                                    unreadCount = if (fromMe) 0 else 1,
+                                    isDialog = isDialog,
+                                )
+                        }
+                    s.copy(messages = messages, chats = updated.sortedByDescending { it.lastEventTime })
                 }
                 // We're looking at this chat -> immediately mark the new message read.
                 // Use max(now, msg.time) so device-clock skew can't make the mark

@@ -6,9 +6,11 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,8 +24,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -32,7 +34,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -50,12 +51,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.avenarius.app.model.Chat
@@ -194,25 +197,77 @@ internal fun ChatScreen(
         bottomBar = {
             Column(Modifier.fillMaxWidth()) {
                 if (replyingTo != null) ReplyBanner(replyingTo, contacts, myId, onCancelReply)
-                Row(
-                    Modifier.fillMaxWidth().padding(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                // Telegram-style rounded input pill with the send button tucked inside.
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
                 ) {
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        placeholder = { Text("Сообщение") },
-                        modifier = Modifier.weight(1f),
-                        maxLines = 4,
-                    )
-                    Button(
-                        onClick = {
-                            onSend(draft)
-                            draft = ""
-                        },
-                        enabled = draft.isNotBlank(),
-                    ) { Icon(AppIcons.Send, contentDescription = "Отправить") }
+                    val canSend = draft.isNotBlank()
+                    Row(
+                        Modifier.padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        BasicTextField(
+                            value = draft,
+                            onValueChange = { draft = it },
+                            modifier = Modifier.weight(1f).padding(vertical = 10.dp),
+                            textStyle =
+                                MaterialTheme.typography.bodyLarge.copy(
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            maxLines = 5,
+                            decorationBox = { inner ->
+                                if (draft.isEmpty()) {
+                                    Text(
+                                        "Сообщение",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                inner()
+                            },
+                        )
+                        Box(
+                            Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (canSend) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                                    },
+                                ).then(
+                                    if (canSend) {
+                                        Modifier.clickable {
+                                            onSend(draft)
+                                            draft = ""
+                                        }
+                                    } else {
+                                        Modifier
+                                    },
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                AppIcons.Send,
+                                contentDescription = "Отправить",
+                                tint =
+                                    if (canSend) {
+                                        MaterialTheme.colorScheme.onPrimary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    },
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
                 }
             }
         },
@@ -255,6 +310,8 @@ internal fun ChatScreen(
                         senderAvatar = senderAvatars[msg.senderId],
                         isGroup = !isDialog,
                         startsRun = startsRun,
+                        replyAuthor =
+                            msg.replyTo?.let { if (it.senderId == myId) "Вы" else contacts[it.senderId] ?: "—" },
                         onMediaClick = onMediaClick,
                         onAvatarClick = { onOpenUser(msg.senderId) },
                         onClick = { menuTarget = msg },
@@ -307,6 +364,7 @@ private fun MessageRow(
     senderAvatar: String?,
     isGroup: Boolean,
     startsRun: Boolean,
+    replyAuthor: String?,
     onMediaClick: (MediaAttach, String?) -> Unit,
     onAvatarClick: () -> Unit,
     onClick: () -> Unit,
@@ -337,6 +395,10 @@ private fun MessageRow(
                     if (isGroup && !isMine && startsRun) {
                         Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                     }
+                    msg.replyTo?.let { reply ->
+                        ReplyQuote(replyAuthor ?: "—", reply.text, fg)
+                        Spacer(Modifier.height(4.dp))
+                    }
                     msg.media.forEach { media ->
                         MediaThumbnail(media, onClick = { onMediaClick(media, msg.id) })
                         Spacer(Modifier.height(4.dp))
@@ -344,43 +406,93 @@ private fun MessageRow(
                     if (msg.text.isNotEmpty()) {
                         LinkedText(msg.text, MaterialTheme.typography.bodyLarge, fg)
                     }
+                    // Footer line inside the bubble: reactions then time + delivery
+                    // receipt. The row is sized to its content (not the full bubble
+                    // width) so a short message keeps a snug bubble instead of being
+                    // stretched out by the meta row.
+                    Spacer(Modifier.height(2.dp))
                     Row(
                         modifier = Modifier.align(Alignment.End),
-                        horizontalArrangement = Arrangement.spacedBy(3.dp),
                         verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text(formatClock(msg.time), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
-                        if (isMine) {
-                            val read = msg.status == MessageStatus.READ
-                            Icon(
-                                if (read) AppIcons.Read else AppIcons.Delivered,
-                                contentDescription = if (read) "Прочитано" else "Доставлено",
-                                tint = if (read) Color(0xFF8AB4F8) else fg.copy(alpha = 0.7f),
-                                modifier = Modifier.size(16.dp),
-                            )
+                        if (msg.reactions.isNotEmpty()) {
+                            ReactionChips(msg.reactions, fg, onReactionClick)
                         }
+                        MessageMeta(msg, isMine, fg)
                     }
                 }
-            }
-            if (msg.reactions.isNotEmpty()) {
-                Spacer(Modifier.height(2.dp))
-                ReactionChips(msg.reactions, onReactionClick)
             }
         }
     }
 }
 
-/** Row of tappable reaction chips under a message; our own reaction is highlighted. */
+/** Quoted-message block shown at the top of a reply bubble (author + preview). */
+@Composable
+private fun ReplyQuote(
+    author: String,
+    text: String,
+    fg: Color,
+) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(fg.copy(alpha = 0.12f))
+            .height(IntrinsicSize.Min)
+            .padding(end = 8.dp),
+    ) {
+        Box(Modifier.width(3.dp).fillMaxHeight().background(fg.copy(alpha = 0.6f)))
+        Column(Modifier.padding(start = 6.dp, top = 3.dp, bottom = 3.dp)) {
+            Text(author, style = MaterialTheme.typography.labelMedium, color = fg, maxLines = 1)
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                color = fg.copy(alpha = 0.8f),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
 
+/** Time + delivery receipt, shown at the trailing edge of a message bubble. */
+@Composable
+private fun MessageMeta(
+    msg: Message,
+    isMine: Boolean,
+    fg: Color,
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(formatClock(msg.time), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
+        if (isMine) {
+            val read = msg.status == MessageStatus.READ
+            Icon(
+                if (read) AppIcons.Read else AppIcons.Delivered,
+                contentDescription = if (read) "Прочитано" else "Доставлено",
+                tint = if (read) Color(0xFF8AB4F8) else fg.copy(alpha = 0.7f),
+                modifier = Modifier.size(16.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Row of tappable reaction chips, shown inside the message bubble. Chip
+ * backgrounds are derived from the bubble's foreground color [fg] so they read
+ * on either bubble color; our own reaction is denser.
+ */
 @Composable
 private fun ReactionChips(
     reactions: List<com.avenarius.app.model.Reaction>,
+    fg: Color,
     onClick: (String) -> Unit,
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         reactions.forEach { r ->
-            val chipBg = if (r.mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-            val chipFg = if (r.mine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+            val chipBg = if (r.mine) fg.copy(alpha = 0.30f) else fg.copy(alpha = 0.12f)
             Row(
                 Modifier
                     .clip(RoundedCornerShape(10.dp))
@@ -391,7 +503,7 @@ private fun ReactionChips(
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 Text(r.emoji, style = MaterialTheme.typography.labelMedium)
-                if (r.count > 1) Text("${r.count}", style = MaterialTheme.typography.labelMedium, color = chipFg)
+                if (r.count > 1) Text("${r.count}", style = MaterialTheme.typography.labelMedium, color = fg)
             }
         }
     }
@@ -469,7 +581,11 @@ private fun MessageContextMenu(
                             Text(emoji, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.clickable { onReact(emoji) })
                         }
                         IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(32.dp)) {
-                            Text(if (expanded) "⌃" else "⌄", style = MaterialTheme.typography.titleLarge)
+                            Icon(
+                                if (expanded) AppIcons.Collapse else AppIcons.Expand,
+                                contentDescription = if (expanded) "Свернуть" else "Больше реакций",
+                                modifier = Modifier.size(20.dp),
+                            )
                         }
                     }
                     if (expanded) {

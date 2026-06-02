@@ -79,6 +79,12 @@ data class Reaction(
     val mine: Boolean,
 )
 
+/** The quoted message a reply points at (server `link` of type REPLY). */
+data class ReplyInfo(
+    val senderId: Long,
+    val text: String,
+)
+
 /** A single message inside a chat. */
 data class Message(
     /** Server message id (string in the protocol). Null for messages we just sent locally. */
@@ -95,4 +101,6 @@ data class Message(
     val media: List<MediaAttach> = emptyList(),
     /** Emoji reactions on this message (aggregated per emoji). */
     val reactions: List<Reaction> = emptyList(),
+    /** The quoted message, if this is a reply. */
+    val replyTo: ReplyInfo? = null,
 )
