@@ -9,6 +9,7 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
@@ -79,6 +80,8 @@ data class AppState(
     val searching: Boolean = false,
     /** The message currently being replied to (shown as a banner above the input). */
     val replyingTo: Message? = null,
+    /** True while a picked photo/video is being uploaded and sent. */
+    val sendingAttachment: Boolean = false,
 )
 
 /**
@@ -710,6 +713,34 @@ class AppViewModel(
                         s.copy(messages = s.messages + sent)
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * Uploads [media] and sends it (with an optional [caption]) to the open chat.
+     * Mirrors [sendMessage]'s reply handling and shows a [AppState.sendingAttachment]
+     * spinner while the upload + send is in flight.
+     */
+    fun sendPhoto(
+        media: PickedMedia,
+        caption: String,
+    ) {
+        val chat = _state.value.currentChat ?: return
+        val cid = nowMillis()
+        val replyToId = _state.value.replyingTo?.id
+        _state.update { it.copy(replyingTo = null, sendingAttachment = true) }
+        launchBusyless {
+            try {
+                val attach = client.uploadPhoto(media.bytes, media.fileName, media.mime)
+                val sent = client.sendMessage(chat.id, caption.trim(), cid, replyToId, listOf(attach))
+                if (sent != null) {
+                    _state.update { s ->
+                        if (s.messages.any { it.id == sent.id }) s else s.copy(messages = s.messages + sent)
+                    }
+                }
+            } finally {
+                _state.update { it.copy(sendingAttachment = false) }
             }
         }
     }

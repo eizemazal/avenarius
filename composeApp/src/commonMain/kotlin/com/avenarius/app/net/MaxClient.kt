@@ -6,18 +6,27 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.OutAttach
 import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.ReplyInfo
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
+import io.ktor.client.HttpClient
+import io.ktor.client.request.forms.formData
+import io.ktor.client.request.forms.submitFormWithBinaryData
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.Headers
+import io.ktor.http.HttpHeaders
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
@@ -26,6 +35,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
 /** A read-mark update: [userId] has read everything up to [mark] (ms) in [chatId]. */
@@ -136,7 +146,15 @@ interface MaxApi {
         text: String,
         cid: Long,
         replyToId: String? = null,
+        attaches: List<OutAttach> = emptyList(),
     ): Message?
+
+    /** Uploads a photo and returns the attach descriptor to include in [sendMessage]. */
+    suspend fun uploadPhoto(
+        bytes: ByteArray,
+        fileName: String,
+        mime: String,
+    ): OutAttach.Photo
 
     suspend fun markRead(
         chatId: Long,
@@ -219,6 +237,7 @@ class MaxClient : MaxApi {
         private const val OP_FETCH_HISTORY = 49
         private const val OP_PUBLIC_SEARCH = 60
         private const val OP_VIDEO_PLAY = 83
+        private const val OP_PHOTO_UPLOAD = 80 // PHOTO_UPLOAD: request a photo upload URL
         private const val OP_MARK_READ = 50
         private const val OP_SEND_MESSAGE = 64
         private const val OP_CHECK_PASSWORD = 115
@@ -238,6 +257,10 @@ class MaxClient : MaxApi {
 
     private val transport = MobileTransport()
     private val scope = CoroutineScope(SupervisorJob() + CoroutineExceptionHandler { _, _ -> })
+
+    // Plain HTTP client for media upload/download (separate from the raw-socket
+    // protocol transport). Uses the platform Ktor engine (OkHttp on Android).
+    private val http by lazy { HttpClient() }
 
     /** Temporary token from START_AUTH / a 2FA challenge, needed for the next step. */
     private var authToken: String? = null
@@ -721,6 +744,7 @@ class MaxClient : MaxApi {
         text: String,
         cid: Long,
         replyToId: String?,
+        attaches: List<OutAttach>,
     ): Message? {
         val payload =
             transport.request(
@@ -731,7 +755,23 @@ class MaxClient : MaxApi {
                         put("text", text)
                         put("cid", cid)
                         put("elements", buildJsonArrayEmpty())
-                        put("attaches", buildJsonArrayEmpty())
+                        putJsonArray("attaches") {
+                            attaches.forEach { a ->
+                                when (a) {
+                                    is OutAttach.Photo ->
+                                        addJsonObject {
+                                            put("_type", "PHOTO")
+                                            put("photoToken", a.token)
+                                        }
+                                    is OutAttach.Video ->
+                                        addJsonObject {
+                                            put("_type", "VIDEO")
+                                            put("videoId", a.videoId)
+                                            put("token", a.token)
+                                        }
+                                }
+                            }
+                        }
                         // A reply carries a link: {type:"REPLY", messageId} (per maxplus).
                         // messageId MUST be a NUMBER — sending it as a string makes the
                         // server error out and drop the connection (same as markRead).
@@ -760,6 +800,50 @@ class MaxClient : MaxApi {
             return null
         }
         return parseMessage(msgObj, chatId)
+    }
+
+    override suspend fun uploadPhoto(
+        bytes: ByteArray,
+        fileName: String,
+        mime: String,
+    ): OutAttach.Photo {
+        // 1) Ask the server for an upload URL (it embeds the photoId in its query).
+        val data = transport.request(OP_PHOTO_UPLOAD, buildJsonObject { put("count", 1) })
+        val url =
+            data["url"]?.jsonPrimitive?.contentOrNullSafe()
+                ?: error(data.serverMessage("Не удалось получить ссылку для загрузки"))
+        // 2) Multipart-upload the bytes. Response: {photos:{<photoId>:{token}}}. We
+        // requested a single photo, so take the one entry rather than matching by id
+        // (the URL's photoId is URL-encoded but the JSON key is decoded).
+        val ext = fileName.substringAfterLast('.', "").ifBlank { if (mime.endsWith("png")) "png" else "jpg" }
+        val response =
+            http.submitFormWithBinaryData(
+                url = url,
+                formData =
+                    formData {
+                        append(
+                            "file",
+                            bytes,
+                            Headers.build {
+                                append(HttpHeaders.ContentType, mime)
+                                append(HttpHeaders.ContentDisposition, "filename=\"image.$ext\"")
+                            },
+                        )
+                    },
+            )
+        val token =
+            Json
+                .parseToJsonElement(response.bodyAsText())
+                .jsonObject["photos"]
+                ?.jsonObject
+                ?.values
+                ?.firstOrNull()
+                ?.jsonObject
+                ?.get("token")
+                ?.jsonPrimitive
+                ?.contentOrNullSafe()
+                ?: error("Сервер не вернул токен загруженного фото")
+        return OutAttach.Photo(token)
     }
 
     override suspend fun setReaction(

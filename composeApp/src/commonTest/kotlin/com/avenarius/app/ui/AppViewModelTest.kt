@@ -6,6 +6,7 @@ import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.OutAttach
 import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
@@ -140,11 +141,18 @@ private class FakeMaxClient : MaxApi {
         text: String,
         cid: Long,
         replyToId: String?,
+        attaches: List<OutAttach>,
     ): Message? {
         sentMessages += chatId to text
         lastReplyToId = replyToId
         return Message(id = "srv-$cid", cid = cid, chatId = chatId, senderId = account.userId, text = text, time = cid)
     }
+
+    override suspend fun uploadPhoto(
+        bytes: ByteArray,
+        fileName: String,
+        mime: String,
+    ): OutAttach.Photo = OutAttach.Photo(token = "fake-token")
 
     override suspend fun markRead(
         chatId: Long,

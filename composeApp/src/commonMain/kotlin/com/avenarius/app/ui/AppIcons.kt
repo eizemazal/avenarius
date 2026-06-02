@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.painter.Painter
 import com.avenarius.app.resources.Res
 import com.avenarius.app.resources.arrow_back
+import com.avenarius.app.resources.attach_file
 import com.avenarius.app.resources.chat
 import com.avenarius.app.resources.check
 import com.avenarius.app.resources.close
@@ -36,6 +37,7 @@ object AppIcons {
     val Close: Painter @Composable get() = painterResource(Res.drawable.close)
     val Edit: Painter @Composable get() = painterResource(Res.drawable.edit)
     val Play: Painter @Composable get() = painterResource(Res.drawable.play_arrow)
+    val Attach: Painter @Composable get() = painterResource(Res.drawable.attach_file)
 
     // Message context-menu actions.
     val Reply: Painter @Composable get() = painterResource(Res.drawable.reply)

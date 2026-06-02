@@ -74,6 +74,7 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.MediaViewer
 import com.avenarius.app.ui.PlatformBackHandler
@@ -82,6 +83,7 @@ import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.CenteredSpinner
 import com.avenarius.app.ui.components.LinkedText
 import com.avenarius.app.ui.formatClock
+import com.avenarius.app.ui.rememberPhotoPickLauncher
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -98,9 +100,11 @@ internal fun ChatScreen(
     error: String?,
     loadingOlder: Boolean,
     replyingTo: Message?,
+    sendingAttachment: Boolean,
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     onSend: (String) -> Unit,
+    onSendPhoto: (PickedMedia, String) -> Unit,
     onMediaClick: (MediaAttach, String?) -> Unit,
     onOpenUser: (Long) -> Unit,
     onReact: (Message, String) -> Unit,
@@ -110,6 +114,9 @@ internal fun ChatScreen(
     onLeaveGroup: () -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
+    // A photo/video picked for sending, staged with an optional caption (the draft).
+    var pending by remember(chat?.id) { mutableStateOf<PickedMedia?>(null) }
+    val pickPhoto = rememberPhotoPickLauncher { pending = it }
     val listState = rememberLazyListState()
     val isDialog = chat?.isDialog ?: true
     // For a 1:1 dialog the other user's id is chatId XOR myId.
@@ -207,7 +214,8 @@ internal fun ChatScreen(
         bottomBar = {
             Column(Modifier.fillMaxWidth()) {
                 if (replyingTo != null) ReplyBanner(replyingTo, contacts, myId, onCancelReply)
-                // Telegram-style rounded input pill with the send button tucked inside.
+                pending?.let { media -> StagedAttachment(media, onRemove = { pending = null }) }
+                // Telegram-style rounded input pill: attach + text field + send button.
                 Surface(
                     shape = RoundedCornerShape(24.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant,
@@ -216,12 +224,20 @@ internal fun ChatScreen(
                             .fillMaxWidth()
                             .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
                 ) {
-                    val canSend = draft.isNotBlank()
+                    val canSend = (draft.isNotBlank() || pending != null) && !sendingAttachment
                     Row(
-                        Modifier.padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                        Modifier.padding(start = 4.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
                         verticalAlignment = Alignment.Bottom,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
+                        IconButton(onClick = pickPhoto, modifier = Modifier.size(40.dp)) {
+                            Icon(
+                                AppIcons.Attach,
+                                contentDescription = "Прикрепить",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
                         BasicTextField(
                             value = draft,
                             onValueChange = { draft = it },
@@ -235,7 +251,7 @@ internal fun ChatScreen(
                             decorationBox = { inner ->
                                 if (draft.isEmpty()) {
                                     Text(
-                                        "Сообщение",
+                                        if (pending != null) "Подпись…" else "Сообщение",
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -256,7 +272,13 @@ internal fun ChatScreen(
                                 ).then(
                                     if (canSend) {
                                         Modifier.clickable {
-                                            onSend(draft)
+                                            val media = pending
+                                            if (media != null) {
+                                                onSendPhoto(media, draft)
+                                                pending = null
+                                            } else {
+                                                onSend(draft)
+                                            }
                                             draft = ""
                                         }
                                     } else {
@@ -265,17 +287,25 @@ internal fun ChatScreen(
                                 ),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Icon(
-                                AppIcons.Send,
-                                contentDescription = "Отправить",
-                                tint =
-                                    if (canSend) {
-                                        MaterialTheme.colorScheme.onPrimary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                    },
-                                modifier = Modifier.size(20.dp),
-                            )
+                            if (sendingAttachment) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            } else {
+                                Icon(
+                                    AppIcons.Send,
+                                    contentDescription = "Отправить",
+                                    tint =
+                                        if (canSend) {
+                                            MaterialTheme.colorScheme.onPrimary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                        },
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
                         }
                     }
                 }
@@ -488,6 +518,46 @@ private fun MessageRow(
                     }
                 }
             }
+        }
+    }
+}
+
+/** Preview of a picked photo/video staged above the input, with a remove button. */
+@Composable
+private fun StagedAttachment(
+    media: PickedMedia,
+    onRemove: () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surface),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (media.isVideo) {
+                    Icon(AppIcons.Play, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    AsyncImage(
+                        model = media.bytes,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                if (media.isVideo) "Видео" else "Фото",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            IconButton(onClick = onRemove) { Icon(AppIcons.Close, contentDescription = "Убрать") }
         }
     }
 }
