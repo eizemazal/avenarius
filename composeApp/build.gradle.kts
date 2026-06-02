@@ -128,6 +128,13 @@ android {
     }
 }
 
+// Generate the resource accessors (Res.drawable.*) under a stable, explicit
+// package so UI code imports `com.avenarius.app.resources.Res` predictably.
+compose.resources {
+    publicResClass = true
+    packageOfResClass = "com.avenarius.app.resources"
+}
+
 compose.desktop {
     application {
         mainClass = "com.avenarius.app.MainKt"

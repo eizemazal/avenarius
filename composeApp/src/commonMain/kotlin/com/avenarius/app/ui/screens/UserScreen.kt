@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -22,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.CenteredSpinner
 import com.avenarius.app.ui.components.LinkedText
@@ -40,7 +42,7 @@ internal fun UserScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Профиль") },
-                navigationIcon = { IconButton(onClick = onBack) { Text("‹", style = MaterialTheme.typography.headlineMedium) } },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.Back, contentDescription = "Назад") } },
             )
         },
     ) { padding ->

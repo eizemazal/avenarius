@@ -21,6 +21,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -44,6 +45,7 @@ import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.AppState
 import com.avenarius.app.ui.AppViewModel
 import com.avenarius.app.ui.Tab
@@ -158,19 +160,19 @@ internal fun MainScreen(
                 NavigationBarItem(
                     selected = state.tab == Tab.CHATS,
                     onClick = { vm.selectTab(Tab.CHATS) },
-                    icon = { Text("💬") },
+                    icon = { Icon(AppIcons.Chats, contentDescription = null) },
                     label = { Text("Чаты") },
                 )
                 NavigationBarItem(
                     selected = state.tab == Tab.CONTACTS,
                     onClick = { vm.selectTab(Tab.CONTACTS) },
-                    icon = { Text("👥") },
+                    icon = { Icon(AppIcons.Contacts, contentDescription = null) },
                     label = { Text("Контакты") },
                 )
                 NavigationBarItem(
                     selected = state.tab == Tab.SETTINGS,
                     onClick = { vm.selectTab(Tab.SETTINGS) },
-                    icon = { Text("⚙") },
+                    icon = { Icon(AppIcons.Settings, contentDescription = null) },
                     label = { Text("Настройки") },
                 )
             }
@@ -178,7 +180,7 @@ internal fun MainScreen(
         floatingActionButton = {
             if (state.tab == Tab.CHATS) {
                 FloatingActionButton(onClick = { showNewChat = true }) {
-                    Text("✎", style = MaterialTheme.typography.headlineSmall)
+                    Icon(AppIcons.Edit, contentDescription = "Новый чат")
                 }
             }
         },

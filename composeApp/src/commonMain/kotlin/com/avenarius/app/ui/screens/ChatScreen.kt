@@ -29,6 +29,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -50,6 +51,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -61,6 +63,7 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.MediaViewer
 import com.avenarius.app.ui.PlatformBackHandler
 import com.avenarius.app.ui.VideoPlayer
@@ -170,11 +173,11 @@ internal fun ChatScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) { Text("‹", style = MaterialTheme.typography.headlineMedium) }
+                    IconButton(onClick = onBack) { Icon(AppIcons.Back, contentDescription = "Назад") }
                 },
                 actions = {
                     IconButton(onClick = { menuOpen = true }) {
-                        Text("⋮", style = MaterialTheme.typography.titleLarge)
+                        Icon(AppIcons.More, contentDescription = "Меню")
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         DropdownMenuItem(
@@ -209,7 +212,7 @@ internal fun ChatScreen(
                             draft = ""
                         },
                         enabled = draft.isNotBlank(),
-                    ) { Text("➤") }
+                    ) { Icon(AppIcons.Send, contentDescription = "Отправить") }
                 }
             }
         },
@@ -349,10 +352,11 @@ private fun MessageRow(
                         Text(formatClock(msg.time), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
                         if (isMine) {
                             val read = msg.status == MessageStatus.READ
-                            Text(
-                                if (read) "✓✓" else "✓",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (read) Color(0xFF8AB4F8) else fg.copy(alpha = 0.7f),
+                            Icon(
+                                if (read) AppIcons.Read else AppIcons.Delivered,
+                                contentDescription = if (read) "Прочитано" else "Доставлено",
+                                tint = if (read) Color(0xFF8AB4F8) else fg.copy(alpha = 0.7f),
+                                modifier = Modifier.size(16.dp),
                             )
                         }
                     }
@@ -422,7 +426,7 @@ private fun ReplyBanner(
                     maxLines = 1,
                 )
             }
-            IconButton(onClick = onCancel) { Text("✕") }
+            IconButton(onClick = onCancel) { Icon(AppIcons.Close, contentDescription = "Отменить") }
         }
     }
 }
@@ -486,9 +490,9 @@ private fun MessageContextMenu(
             // Action items.
             Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface) {
                 Column(Modifier.widthIn(min = 220.dp)) {
-                    ContextMenuItem("↩", "Ответить", onClick = onReply)
+                    ContextMenuItem(AppIcons.Reply, "Ответить", onClick = onReply)
                     if (message.text.isNotBlank()) {
-                        ContextMenuItem("⧉", "Копировать") {
+                        ContextMenuItem(AppIcons.Copy, "Копировать") {
                             clipboard.setText(AnnotatedString(message.text))
                             onDismiss()
                         }
@@ -501,7 +505,7 @@ private fun MessageContextMenu(
 
 @Composable
 private fun ContextMenuItem(
-    icon: String,
+    icon: Painter,
     label: String,
     onClick: () -> Unit,
 ) {
@@ -510,7 +514,7 @@ private fun ContextMenuItem(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        Text(icon, style = MaterialTheme.typography.titleMedium)
+        Icon(icon, contentDescription = null, modifier = Modifier.size(22.dp))
         Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }
@@ -537,7 +541,7 @@ private fun MediaThumbnail(
                 Modifier.size(44.dp).clip(CircleShape).background(Color(0x88000000)),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("▶", color = Color.White, style = MaterialTheme.typography.titleLarge)
+                Icon(AppIcons.Play, contentDescription = "Воспроизвести", tint = Color.White, modifier = Modifier.size(28.dp))
             }
         }
     }
@@ -559,7 +563,7 @@ internal fun MediaViewerOverlay(
             is MediaViewer.Video -> VideoPlayer(viewer.url, Modifier.fillMaxWidth().heightIn(max = 480.dp))
         }
         IconButton(onClick = onClose, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)) {
-            Text("✕", color = Color.White, style = MaterialTheme.typography.headlineSmall)
+            Icon(AppIcons.Close, contentDescription = "Закрыть", tint = Color.White)
         }
     }
 }
