@@ -33,6 +33,12 @@ data class ReadMark(
     val mark: Long,
 )
 
+/** A live presence change: [userId] went [online] (server push, opcode 132). */
+data class Presence(
+    val userId: Long,
+    val online: Boolean,
+)
+
 /** Result of submitting an SMS code. */
 sealed interface CodeResult {
     data class Success(
@@ -62,6 +68,8 @@ data class SyncResult(
     val contacts: Map<Long, String>,
     /** Full contact info for the Contacts page. */
     val contactsList: List<UserInfo>,
+    /** Ids of users currently online (presence carries a `status` field). */
+    val online: Set<Long>,
     /** The server rolls the login token on each sync; persist it if present. */
     val refreshedToken: String?,
 )
@@ -73,6 +81,7 @@ data class SyncResult(
 interface MaxApi {
     val incoming: SharedFlow<Message>
     val readMarks: SharedFlow<ReadMark>
+    val presence: SharedFlow<Presence>
     val drops: SharedFlow<Unit>
     val isConnected: Boolean
 
@@ -177,6 +186,7 @@ class MaxClient : MaxApi {
         private const val OP_CHECK_PASSWORD = 115
         const val OP_NEW_MESSAGE = 128
         const val OP_MARK_UPDATE = 130 // server push: read/delivery marks changed
+        const val OP_PRESENCE = 132 // server push: a contact's online state changed
     }
 
     private val transport = MobileTransport()
@@ -192,6 +202,10 @@ class MaxClient : MaxApi {
     /** Stream of read-mark updates (server push, opcode 130) — e.g. the other side read our messages. */
     private val _readMarks = MutableSharedFlow<ReadMark>(extraBufferCapacity = 64)
     override val readMarks: SharedFlow<ReadMark> = _readMarks
+
+    /** Stream of live presence changes (server push, opcode 132). */
+    private val _presence = MutableSharedFlow<Presence>(extraBufferCapacity = 64)
+    override val presence: SharedFlow<Presence> = _presence
 
     override val isConnected: Boolean get() = transport.isConnected
 
@@ -223,9 +237,20 @@ class MaxClient : MaxApi {
                         val userId = payload["userId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
                         if (chatId != null && mark != null) _readMarks.emit(ReadMark(chatId, userId, mark))
                     }
+                    OP_PRESENCE -> parsePresence(payload)?.let { _presence.emit(it) }
                 }
             }
         }
+    }
+
+    /**
+     * Parses a live presence push: `{userId: <id>, presence: {seen, status?}}`.
+     * Online iff the nested presence carries a `status` field (see [isOnline]).
+     */
+    private fun parsePresence(payload: JsonObject): Presence? {
+        val uid = payload["userId"]?.jsonPrimitive?.longOrNullSafe() ?: return null
+        val p = payload["presence"]?.jsonObject
+        return Presence(uid, p?.isOnline() == true)
     }
 
     /** Opens the TLS connection and performs the opcode-6 ANDROID handshake. */
@@ -510,14 +535,28 @@ class MaxClient : MaxApi {
                         lastEventTime = lastTime,
                         unreadCount = unread,
                         isDialog = isDialog,
+                        // Dialogs get their avatar from the contact (resolved in the UI);
+                        // groups/channels carry their own avatar on the chat object.
+                        avatarUrl = if (isDialog) null else c.avatarUrl(),
                         otherReadMark = otherReadMark,
                     )
                 }.sortedByDescending { it.lastEventTime }
 
+        // presence = {userId: {seen: <unixSec>, status: <int>}} — a user is online
+        // when a `status` field is present (offline entries carry only `seen`).
+        val online =
+            payload["presence"]
+                ?.jsonObject
+                ?.entries
+                ?.mapNotNull { (key, value) ->
+                    val uid = key.toLongOrNull() ?: return@mapNotNull null
+                    if ((value as? JsonObject)?.isOnline() == true) uid else null
+                }?.toSet() ?: emptySet()
+
         // The server returns a (possibly rolled) login token here — persist it.
         val refreshedToken = payload["token"]?.jsonPrimitive?.contentOrNullSafe()
 
-        return SyncResult(account, chats, names, contactsList, refreshedToken)
+        return SyncResult(account, chats, names, contactsList, online, refreshedToken)
     }
 
     /** Full profile of a single user (for the user page). */
@@ -815,6 +854,9 @@ private fun JsonObject.displayName(): String? {
     val last = lastName()
     return listOfNotNull(first, last).joinToString(" ").ifBlank { null }
 }
+
+/** A presence object means "online" when it carries a [status] (offline = only `seen`). */
+private fun JsonObject.isOnline(): Boolean = (this["status"]?.jsonPrimitive?.intOrNullSafe() ?: 0) >= 1
 
 /** Best available avatar URL from a user/contact/chat object. */
 private fun JsonObject.avatarUrl(): String? =

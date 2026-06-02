@@ -103,7 +103,7 @@ class ConnectionService : Service() {
         val notification =
             NotificationCompat
                 .Builder(this, CHANNEL_MESSAGES)
-                .setSmallIcon(R.drawable.ic_launcher)
+                .setSmallIcon(R.drawable.ic_stat_notify)
                 .setContentTitle(title)
                 .setContentText(body)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(body))
@@ -120,7 +120,7 @@ class ConnectionService : Service() {
     private fun buildOngoingNotification(): Notification =
         NotificationCompat
             .Builder(this, CHANNEL_ONGOING)
-            .setSmallIcon(R.drawable.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_notify)
             .setContentTitle("Авенариус активен")
             .setContentText("Поддерживаем соединение для новых сообщений")
             .setOngoing(true)

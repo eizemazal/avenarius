@@ -499,12 +499,13 @@ private fun MainScreen(
                         chats = state.chats,
                         myId = state.account?.userId ?: -1L,
                         contacts = state.contactsList,
+                        online = state.onlineUsers,
                         isRefreshing = state.refreshing,
                         onRefresh = vm::refresh,
                         onOpenChat = vm::openChat,
                         onOpenUser = vm::openUser,
                     )
-                Tab.CONTACTS -> ContactsTab(state.contactsList, vm::openUser)
+                Tab.CONTACTS -> ContactsTab(state.contactsList, state.onlineUsers, vm::openUser)
                 Tab.SETTINGS ->
                     SettingsTab(
                         account = state.account,
@@ -522,6 +523,7 @@ private fun ChatsTab(
     chats: List<Chat>,
     myId: Long,
     contacts: List<UserInfo>,
+    online: Set<Long>,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenChat: (Chat) -> Unit,
@@ -536,7 +538,13 @@ private fun ChatsTab(
             LazyColumn(Modifier.fillMaxSize()) {
                 items(chats, key = { it.id }) { chat ->
                     val otherId = if (chat.isDialog) chat.id xor myId else null
-                    val avatarUrl = otherId?.let { id -> contacts.firstOrNull { it.id == id }?.avatarUrl }
+                    // Dialogs take their avatar from the contact; groups carry their own.
+                    val avatarUrl =
+                        if (chat.isDialog) {
+                            otherId?.let { id -> contacts.firstOrNull { it.id == id }?.avatarUrl }
+                        } else {
+                            chat.avatarUrl
+                        }
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -544,13 +552,16 @@ private fun ChatsTab(
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Avatar(chat.title, avatarUrl, 44.dp, onClick = otherId?.let { id -> { onOpenUser(id) } })
+                        Avatar(
+                            chat.title,
+                            avatarUrl,
+                            44.dp,
+                            onClick = otherId?.let { id -> { onOpenUser(id) } },
+                            online = otherId != null && otherId in online,
+                        )
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(chat.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, modifier = Modifier.weight(1f))
-                                if (chat.unreadCount > 0) UnreadBadge(chat.unreadCount)
-                            }
+                            Text(chat.title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
                             chat.lastMessageText?.let {
                                 Text(
                                     it,
@@ -559,6 +570,10 @@ private fun ChatsTab(
                                     maxLines = 1,
                                 )
                             }
+                        }
+                        if (chat.unreadCount > 0) {
+                            Spacer(Modifier.width(8.dp))
+                            UnreadBadge(chat.unreadCount)
                         }
                     }
                     HorizontalDivider()
@@ -571,6 +586,7 @@ private fun ChatsTab(
 @Composable
 private fun ContactsTab(
     contacts: List<UserInfo>,
+    online: Set<Long>,
     onOpenUser: (Long) -> Unit,
 ) {
     if (contacts.isEmpty()) {
@@ -585,7 +601,7 @@ private fun ContactsTab(
                 Modifier.fillMaxWidth().clickableRow { onOpenUser(c.id) }.padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Avatar(c.name, c.avatarUrl, 44.dp)
+                Avatar(c.name, c.avatarUrl, 44.dp, online = c.id in online)
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(c.name, style = MaterialTheme.typography.titleMedium)
@@ -751,23 +767,42 @@ private fun Avatar(
     url: String?,
     size: Dp,
     onClick: (() -> Unit)? = null,
+    online: Boolean = false,
 ) {
-    var mod = Modifier.size(size).clip(CircleShape).background(avatarColor(name))
-    if (onClick != null) mod = mod.clickable(onClick = onClick)
-    if (!url.isNullOrBlank()) {
-        AsyncImage(model = url, contentDescription = name, contentScale = ContentScale.Crop, modifier = mod)
-    } else {
-        Box(mod, contentAlignment = Alignment.Center) {
-            Text(
-                name
-                    .trim()
-                    .firstOrNull()
-                    ?.uppercaseChar()
-                    ?.toString() ?: "?",
-                color = Color.White,
-                style = MaterialTheme.typography.titleMedium,
-            )
+    Box(Modifier.size(size)) {
+        var mod = Modifier.size(size).clip(CircleShape).background(avatarColor(name))
+        if (onClick != null) mod = mod.clickable(onClick = onClick)
+        if (!url.isNullOrBlank()) {
+            AsyncImage(model = url, contentDescription = name, contentScale = ContentScale.Crop, modifier = mod)
+        } else {
+            Box(mod, contentAlignment = Alignment.Center) {
+                Text(
+                    name
+                        .trim()
+                        .firstOrNull()
+                        ?.uppercaseChar()
+                        ?.toString() ?: "?",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
         }
+        if (online) OnlineDot(size, Modifier.align(Alignment.BottomEnd))
+    }
+}
+
+/** Green presence dot, with a ring in the surface colour so it reads against the avatar. */
+@Composable
+private fun OnlineDot(
+    avatarSize: Dp,
+    modifier: Modifier = Modifier,
+) {
+    val ring = avatarSize * 0.30f
+    Box(
+        modifier.size(ring).clip(CircleShape).background(MaterialTheme.colorScheme.surface),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(ring * 0.7f).clip(CircleShape).background(Color(0xFF4CAF50)))
     }
 }
 

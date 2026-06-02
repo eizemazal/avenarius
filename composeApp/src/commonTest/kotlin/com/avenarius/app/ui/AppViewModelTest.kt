@@ -11,6 +11,7 @@ import com.avenarius.app.model.UserInfo
 import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
+import com.avenarius.app.net.Presence
 import com.avenarius.app.net.ReadMark
 import com.avenarius.app.net.SyncResult
 import kotlinx.coroutines.Dispatchers
@@ -50,9 +51,11 @@ private class FakeStorage : AppStorage {
 private class FakeMaxClient : MaxApi {
     private val _incoming = MutableSharedFlow<Message>(extraBufferCapacity = 16)
     private val _readMarks = MutableSharedFlow<ReadMark>(extraBufferCapacity = 16)
+    private val _presence = MutableSharedFlow<Presence>(extraBufferCapacity = 16)
     private val _drops = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
     override val incoming: SharedFlow<Message> get() = _incoming
     override val readMarks: SharedFlow<ReadMark> get() = _readMarks
+    override val presence: SharedFlow<Presence> get() = _presence
     override val drops: SharedFlow<Unit> get() = _drops
     override var isConnected: Boolean = false
         private set
@@ -62,6 +65,7 @@ private class FakeMaxClient : MaxApi {
     var chats: List<Chat> = emptyList()
     var contacts: Map<Long, String> = emptyMap()
     var contactsList: List<UserInfo> = emptyList()
+    var online: Set<Long> = emptySet()
     var refreshedToken: String? = null
     var codeResult: CodeResult = CodeResult.Success("login-token")
     var history: List<Message> = emptyList()
@@ -77,6 +81,8 @@ private class FakeMaxClient : MaxApi {
     fun emitIncoming(message: Message) = _incoming.tryEmit(message)
 
     fun emitReadMark(mark: ReadMark) = _readMarks.tryEmit(mark)
+
+    fun emitPresence(p: Presence) = _presence.tryEmit(p)
 
     override suspend fun connect(
         deviceId: String,
@@ -105,7 +111,7 @@ private class FakeMaxClient : MaxApi {
         trackId: String,
     ): String = "pwd-token"
 
-    override suspend fun sync(token: String): SyncResult = SyncResult(account, chats, contacts, contactsList, refreshedToken)
+    override suspend fun sync(token: String): SyncResult = SyncResult(account, chats, contacts, contactsList, online, refreshedToken)
 
     override suspend fun fetchHistory(
         chatId: Long,
@@ -197,6 +203,13 @@ class AppViewModelTest {
         assertEquals(100L, s.account?.userId)
         assertFalse(s.reconnecting)
         assertEquals(100L, prefs.userId)
+    }
+
+    @Test
+    fun onlineUsersFromSyncArePublishedToState() {
+        fake.online = setOf(200L, 300L)
+        val vm = loggedIn()
+        assertEquals(setOf(200L, 300L), vm.state.value.onlineUsers)
     }
 
     @Test
@@ -300,6 +313,50 @@ class AppViewModelTest {
             vm.state.value.messages
                 .none { it.id == "x" },
         )
+    }
+
+    @Test
+    fun incomingMessageForBackgroundChatBumpsUnreadAndReorders() {
+        val open = Chat(id = 42, title = "Открытый", lastMessageText = null, lastEventTime = 100)
+        val other = Chat(id = 99, title = "Фоновый", lastMessageText = null, lastEventTime = 50)
+        val vm = loggedIn(listOf(open, other))
+        vm.openChat(open)
+
+        fake.emitIncoming(
+            Message(id = "b1", cid = null, chatId = 99, senderId = 200, text = "новое", time = 999),
+        )
+
+        val chats = vm.state.value.chats
+        val bg = chats.first { it.id == 99L }
+        assertEquals(1, bg.unreadCount)
+        assertEquals("новое", bg.lastMessageText)
+        assertEquals(99L, chats.first().id, "the chat with the newest message should sort first")
+    }
+
+    @Test
+    fun incomingMessageForOpenChatDoesNotBumpUnread() {
+        val chat = Chat(id = 42, title = "Открытый", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+
+        fake.emitIncoming(
+            Message(id = "m1", cid = null, chatId = 42, senderId = 200, text = "привет", time = 1000),
+        )
+        assertEquals(
+            0,
+            vm.state.value.chats
+                .first { it.id == 42L }
+                .unreadCount,
+        )
+    }
+
+    @Test
+    fun livePresencePushTogglesOnlineUsers() {
+        val vm = loggedIn()
+        fake.emitPresence(Presence(userId = 200, online = true))
+        assertTrue(200L in vm.state.value.onlineUsers)
+        fake.emitPresence(Presence(userId = 200, online = false))
+        assertFalse(200L in vm.state.value.onlineUsers)
     }
 
     @Test

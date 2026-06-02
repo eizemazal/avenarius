@@ -53,7 +53,11 @@ class MobileTransport(
     private var pingJob: Job? = null
     private var connected = false
 
-    @Volatile private var manualClose = false
+    // Each connect() bumps this; the reader carries its own generation. When the
+    // two differ the reader has been superseded (by disconnect or a reconnect) and
+    // must stay silent — otherwise a stale reader unblocking after the socket was
+    // re-opened would emit a spurious drop and clobber the live connection's state.
+    @Volatile private var generation = 0
 
     /** Server-pushed frames as (opcode, payload). */
     private val _events = MutableSharedFlow<Pair<Int, JsonObject>>(extraBufferCapacity = 64)
@@ -67,11 +71,11 @@ class MobileTransport(
 
     suspend fun connect() {
         if (connected) return
-        manualClose = false
         socket.connect()
         seq = 0 // fresh connection -> fresh seq sequence
         connected = true
-        readerJob = scope.launch { readLoop() }
+        val myGeneration = ++generation
+        readerJob = scope.launch { readLoop(myGeneration) }
     }
 
     fun startPing(intervalMs: Long = 30_000) {
@@ -86,7 +90,7 @@ class MobileTransport(
     }
 
     fun disconnect() {
-        manualClose = true
+        generation++ // supersede the current reader so it won't emit a drop
         connected = false
         pingJob?.cancel()
         pingJob = null
@@ -113,9 +117,9 @@ class MobileTransport(
         return withTimeout(timeoutMs) { deferred.await() }
     }
 
-    private suspend fun readLoop() {
+    private suspend fun readLoop(myGeneration: Int) {
         val header = ByteArray(10)
-        while (connected) {
+        while (connected && myGeneration == generation) {
             // --- read one whole frame off the wire ---
             // I/O errors here mean the socket is dead -> end the connection.
             var packetType = 0
@@ -140,9 +144,12 @@ class MobileTransport(
                     socket.readFully(body)
                 }
             } catch (e: Throwable) {
+                // A superseded reader (disconnect/reconnect bumped the generation)
+                // must stay silent: the live connection owns the state now.
+                if (myGeneration != generation) break
                 connected = false
                 failAllPending(e)
-                if (!manualClose) _drops.emit(Unit) // unexpected drop -> let the app reconnect
+                _drops.emit(Unit) // unexpected drop -> let the app reconnect
                 break
             }
 

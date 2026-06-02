@@ -69,6 +69,8 @@ data class AppState(
     val tab: Tab = Tab.CHATS,
     /** Full contact list for the Contacts tab. */
     val contactsList: List<UserInfo> = emptyList(),
+    /** Ids of users currently online (for the green presence dot). */
+    val onlineUsers: Set<Long> = emptySet(),
     /** The user whose profile page is open (Screen.USER). */
     val viewingUser: UserInfo? = null,
     /** Live results while searching by name in the new-chat dialog. */
@@ -92,22 +94,41 @@ class AppViewModel(
     private var pendingPhone: String? = null
 
     init {
-        // Forward server-pushed messages into whichever chat is open.
+        // Forward server-pushed messages into whichever chat is open AND keep the
+        // chat-list row live (preview text, timestamp, unread badge, ordering).
         viewModelScope.launch {
             client.incoming.collect { msg ->
                 val openChatId = _state.value.currentChat?.id
+                val isOpen = openChatId == msg.chatId
+                val fromMe =
+                    _state.value.account
+                        ?.userId
+                        ?.let { it == msg.senderId } ?: false
                 _state.update { s ->
-                    if (s.currentChat?.id == msg.chatId && s.messages.none { it.id == msg.id }) {
-                        s.copy(messages = s.messages + msg)
-                    } else {
-                        s
-                    }
+                    val messages =
+                        if (isOpen && s.messages.none { it.id == msg.id }) s.messages + msg else s.messages
+                    val chats =
+                        s.chats
+                            .map { c ->
+                                if (c.id != msg.chatId) {
+                                    c
+                                } else {
+                                    c.copy(
+                                        lastMessageText = msg.text.ifBlank { c.lastMessageText },
+                                        lastEventTime = maxOf(c.lastEventTime, msg.time),
+                                        // Bump the badge only for chats we aren't looking at,
+                                        // and never for our own (echoed) messages.
+                                        unreadCount = if (!isOpen && !fromMe) c.unreadCount + 1 else c.unreadCount,
+                                    )
+                                }
+                            }.sortedByDescending { it.lastEventTime }
+                    s.copy(messages = messages, chats = chats)
                 }
                 // We're looking at this chat -> immediately mark the new message read.
                 // Use max(now, msg.time) so device-clock skew can't make the mark
                 // fall short of the (server-timestamped) message.
                 val mid = msg.id
-                if (openChatId == msg.chatId && mid != null) {
+                if (isOpen && mid != null) {
                     runCatching { client.markRead(msg.chatId, mid, maxOf(nowMillis(), msg.time)) }
                 }
             }
@@ -142,6 +163,16 @@ class AppViewModel(
                             s.messages
                         }
                     s.copy(chats = chats, currentChat = current, messages = messages)
+                }
+            }
+        }
+        // Live presence: flip the green dot on/off as contacts come and go.
+        viewModelScope.launch {
+            client.presence.collect { p ->
+                _state.update {
+                    it.copy(
+                        onlineUsers = if (p.online) it.onlineUsers + p.userId else it.onlineUsers - p.userId,
+                    )
                 }
             }
         }
@@ -191,6 +222,7 @@ class AppViewModel(
                                 chats = result.chats,
                                 contacts = result.contacts,
                                 contactsList = result.contactsList,
+                                onlineUsers = result.online,
                                 reconnecting = false,
                                 busy = false,
                                 error = null,
@@ -291,6 +323,7 @@ class AppViewModel(
                 chats = result.chats,
                 contacts = result.contacts,
                 contactsList = result.contactsList,
+                onlineUsers = result.online,
                 busy = false,
                 error = null,
             )
@@ -573,6 +606,7 @@ class AppViewModel(
                         account = result.account,
                         contacts = result.contacts,
                         contactsList = result.contactsList,
+                        onlineUsers = result.online,
                         refreshing = false,
                         error = null,
                     )
