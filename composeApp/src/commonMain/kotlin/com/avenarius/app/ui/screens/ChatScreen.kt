@@ -1,7 +1,9 @@
 package com.avenarius.app.ui.screens
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -44,6 +47,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -54,11 +58,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.avenarius.app.model.Chat
@@ -74,6 +82,8 @@ import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.CenteredSpinner
 import com.avenarius.app.ui.components.LinkedText
 import com.avenarius.app.ui.formatClock
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -315,6 +325,7 @@ internal fun ChatScreen(
                         onMediaClick = onMediaClick,
                         onAvatarClick = { onOpenUser(msg.senderId) },
                         onClick = { menuTarget = msg },
+                        onSwipeReply = { onReply(msg) },
                         onReactionClick = { emoji -> onReact(msg, emoji) },
                     )
                 }
@@ -368,58 +379,112 @@ private fun MessageRow(
     onMediaClick: (MediaAttach, String?) -> Unit,
     onAvatarClick: () -> Unit,
     onClick: () -> Unit,
+    onSwipeReply: () -> Unit,
     onReactionClick: (String) -> Unit,
 ) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start,
-    ) {
-        // Avatars are only meaningful in group chats; in a 1:1 dialog the only
-        // other participant is obvious, so no avatar gutter is shown.
-        if (!isMine && isGroup) {
-            if (startsRun) Avatar(senderName, senderAvatar, 32.dp, onClick = onAvatarClick) else Spacer(Modifier.size(32.dp))
-            Spacer(Modifier.width(6.dp))
-        }
-        val bg = if (isMine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-        val fg = if (isMine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-        Column(horizontalAlignment = if (isMine) Alignment.End else Alignment.Start) {
-            Box(
+    // Swipe-to-reply: drag the row left; past the threshold a reply icon is revealed
+    // (with a haptic tick) and releasing there starts a reply to this message.
+    val scope = rememberCoroutineScope()
+    val rowKey = msg.id ?: msg.cid ?: msg.time
+    val offsetX = remember(rowKey) { Animatable(0f) }
+    val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val triggerPx = with(density) { 56.dp.toPx() }
+    val maxPx = with(density) { 88.dp.toPx() }
+    var triggered by remember(rowKey) { mutableStateOf(false) }
+
+    Box(Modifier.fillMaxWidth()) {
+        val progress = (-offsetX.value / triggerPx).coerceIn(0f, 1f)
+        Icon(
+            AppIcons.Reply,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier =
                 Modifier
-                    .widthIn(max = 280.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(bg)
-                    .clickable(onClick = onClick)
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-            ) {
-                Column {
-                    if (isGroup && !isMine && startsRun) {
-                        Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                    }
-                    msg.replyTo?.let { reply ->
-                        ReplyQuote(replyAuthor ?: "—", reply.text, fg)
-                        Spacer(Modifier.height(4.dp))
-                    }
-                    msg.media.forEach { media ->
-                        MediaThumbnail(media, onClick = { onMediaClick(media, msg.id) })
-                        Spacer(Modifier.height(4.dp))
-                    }
-                    if (msg.text.isNotEmpty()) {
-                        LinkedText(msg.text, MaterialTheme.typography.bodyLarge, fg)
-                    }
-                    // Footer line inside the bubble: reactions then time + delivery
-                    // receipt. The row is sized to its content (not the full bubble
-                    // width) so a short message keeps a snug bubble instead of being
-                    // stretched out by the meta row.
-                    Spacer(Modifier.height(2.dp))
-                    Row(
-                        modifier = Modifier.align(Alignment.End),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        if (msg.reactions.isNotEmpty()) {
-                            ReactionChips(msg.reactions, fg, onReactionClick)
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 20.dp)
+                    .size(22.dp)
+                    .graphicsLayer {
+                        alpha = progress
+                        scaleX = progress
+                        scaleY = progress
+                    },
+        )
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .pointerInput(rowKey) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            if (offsetX.value <= -triggerPx) onSwipeReply()
+                            triggered = false
+                            scope.launch { offsetX.animateTo(0f) }
+                        },
+                        onDragCancel = {
+                            triggered = false
+                            scope.launch { offsetX.animateTo(0f) }
+                        },
+                    ) { _, dragAmount ->
+                        val target = (offsetX.value + dragAmount).coerceIn(-maxPx, 0f)
+                        if (!triggered && target <= -triggerPx) {
+                            triggered = true
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        } else if (triggered && target > -triggerPx) {
+                            triggered = false
                         }
-                        MessageMeta(msg, isMine, fg)
+                        scope.launch { offsetX.snapTo(target) }
+                    }
+                },
+            horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start,
+        ) {
+            // Avatars are only meaningful in group chats; in a 1:1 dialog the only
+            // other participant is obvious, so no avatar gutter is shown.
+            if (!isMine && isGroup) {
+                if (startsRun) Avatar(senderName, senderAvatar, 32.dp, onClick = onAvatarClick) else Spacer(Modifier.size(32.dp))
+                Spacer(Modifier.width(6.dp))
+            }
+            val bg = if (isMine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+            val fg = if (isMine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+            Column(horizontalAlignment = if (isMine) Alignment.End else Alignment.Start) {
+                Box(
+                    Modifier
+                        .widthIn(max = 280.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(bg)
+                        .clickable(onClick = onClick)
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    Column {
+                        if (isGroup && !isMine && startsRun) {
+                            Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        }
+                        msg.replyTo?.let { reply ->
+                            ReplyQuote(replyAuthor ?: "—", reply.text, fg)
+                            Spacer(Modifier.height(4.dp))
+                        }
+                        msg.media.forEach { media ->
+                            MediaThumbnail(media, onClick = { onMediaClick(media, msg.id) })
+                            Spacer(Modifier.height(4.dp))
+                        }
+                        if (msg.text.isNotEmpty()) {
+                            LinkedText(msg.text, MaterialTheme.typography.bodyLarge, fg)
+                        }
+                        // Footer line inside the bubble: reactions then time + delivery
+                        // receipt. The row is sized to its content (not the full bubble
+                        // width) so a short message keeps a snug bubble instead of being
+                        // stretched out by the meta row.
+                        Spacer(Modifier.height(2.dp))
+                        Row(
+                            modifier = Modifier.align(Alignment.End),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            if (msg.reactions.isNotEmpty()) {
+                                ReactionChips(msg.reactions, fg, onReactionClick)
+                            }
+                            MessageMeta(msg, isMine, fg)
+                        }
                     }
                 }
             }
