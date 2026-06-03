@@ -37,12 +37,18 @@ internal fun UserScreen(
     onBack: () -> Unit,
     onWrite: (UserInfo) -> Unit,
     onAvatarClick: (String) -> Unit,
+    onEdit: () -> Unit,
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Профиль") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.Back, contentDescription = "Назад") } },
+                actions = {
+                    if (isMe) {
+                        IconButton(onClick = onEdit) { Icon(AppIcons.Edit, contentDescription = "Редактировать") }
+                    }
+                },
             )
         },
     ) { padding ->

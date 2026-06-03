@@ -23,5 +23,9 @@ expect fun rememberCameraVideoLauncher(onPicked: (PickedMedia) -> Unit): () -> U
 @Composable
 expect fun rememberFilePickLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit
 
+/** Launcher that picks a single image (for an avatar). Desktop is a stub. */
+@Composable
+expect fun rememberSingleImagePickLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit
+
 /** True on platforms where camera capture is available (Android). */
 expect val cameraCaptureSupported: Boolean

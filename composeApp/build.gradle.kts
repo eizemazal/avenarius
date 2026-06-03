@@ -94,8 +94,10 @@ android {
             libs.versions.android.targetSdk
                 .get()
                 .toInt()
-        versionCode = 1
-        versionName = "0.1.0"
+        // Version is overridable from CI (tag-driven release): AVENARIUS_VERSION_NAME
+        // comes from the git tag, AVENARIUS_VERSION_CODE from the CI run number.
+        versionCode = System.getenv("AVENARIUS_VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("AVENARIUS_VERSION_NAME") ?: "1.0.0"
     }
 
     // Signing: in CI we inject a keystore via env vars (see .github/workflows).
@@ -115,7 +117,14 @@ android {
 
     buildTypes {
         getByName("release") {
-            isMinifyEnabled = false
+            // R8 code shrinking + obfuscation. Library consumer rules (Ktor, Coil,
+            // kotlinx-serialization, coroutines) are applied automatically; our extra
+            // keeps live in proguard-rules.pro.
+            isMinifyEnabled = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             if (storeFilePath != null) {
                 signingConfig = signingConfigs.getByName("release")
             }

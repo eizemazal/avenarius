@@ -18,3 +18,6 @@ actual fun rememberCameraVideoLauncher(onPicked: (PickedMedia) -> Unit): () -> U
 
 @Composable
 actual fun rememberFilePickLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit = {}
+
+@Composable
+actual fun rememberSingleImagePickLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit = {}

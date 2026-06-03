@@ -152,7 +152,22 @@ private class FakeMaxClient : MaxApi {
         bytes: ByteArray,
         fileName: String,
         mime: String,
+        profile: Boolean,
     ): OutAttach.Photo = OutAttach.Photo(token = "fake-token")
+
+    override suspend fun updateProfile(
+        firstName: String,
+        lastName: String?,
+        description: String?,
+        photoToken: String?,
+    ) {}
+
+    override suspend fun forwardMessage(
+        toChatId: Long,
+        messageId: String,
+        fromChatId: Long,
+        cid: Long,
+    ): Message? = Message(id = "fwd-$cid", cid = cid, chatId = toChatId, senderId = account.userId, text = "", time = cid)
 
     override suspend fun uploadVideo(
         bytes: ByteArray,

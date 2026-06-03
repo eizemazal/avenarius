@@ -66,6 +66,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -73,6 +74,7 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.FileAttach
+import com.avenarius.app.model.LinkPreview
 import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
@@ -87,6 +89,7 @@ import com.avenarius.app.ui.cameraCaptureSupported
 import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.CenteredSpinner
 import com.avenarius.app.ui.components.LinkedText
+import com.avenarius.app.ui.components.openUriSafely
 import com.avenarius.app.ui.formatClock
 import com.avenarius.app.ui.rememberCameraPhotoLauncher
 import com.avenarius.app.ui.rememberCameraVideoLauncher
@@ -119,6 +122,7 @@ internal fun ChatScreen(
     onOpenUser: (Long) -> Unit,
     onReact: (Message, String) -> Unit,
     onReply: (Message) -> Unit,
+    onForward: (Message) -> Unit,
     onDownloadFile: (Message, FileAttach) -> Unit,
     onCancelReply: () -> Unit,
     onDeleteChat: () -> Unit,
@@ -437,6 +441,10 @@ internal fun ChatScreen(
                 onReply(target)
                 menuTarget = null
             },
+            onForward = {
+                onForward(target)
+                menuTarget = null
+            },
         )
     }
 
@@ -582,6 +590,7 @@ private fun MessageRow(
                         if (msg.text.isNotEmpty()) {
                             LinkedText(msg.text, MaterialTheme.typography.bodyLarge, fg)
                         }
+                        msg.linkPreview?.let { preview -> LinkPreviewCard(preview, fg) }
                         // Footer line inside the bubble: reactions then time + delivery
                         // receipt. The row is sized to its content (not the full bubble
                         // width) so a short message keeps a snug bubble instead of being
@@ -650,6 +659,46 @@ private fun StagedAttachments(
                         Icon(AppIcons.Close, contentDescription = "Убрать", modifier = Modifier.size(12.dp))
                     }
                 }
+            }
+        }
+    }
+}
+
+/** A link-preview card (server SHARE attach): image + title + description, opens the URL. */
+@Composable
+private fun LinkPreviewCard(
+    preview: LinkPreview,
+    fg: Color,
+) {
+    val uriHandler = LocalUriHandler.current
+    Column(
+        Modifier
+            .padding(top = 4.dp)
+            .widthIn(max = 260.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(fg.copy(alpha = 0.10f))
+            .clickable { uriHandler.openUriSafely(preview.url) },
+    ) {
+        preview.imageUrl?.let { img ->
+            AsyncImage(
+                model = img,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxWidth().height(120.dp),
+            )
+        }
+        Column(Modifier.padding(8.dp)) {
+            (preview.title ?: preview.url).let {
+                Text(it, style = MaterialTheme.typography.labelLarge, color = fg, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            preview.description?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = fg.copy(alpha = 0.8f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -826,6 +875,7 @@ private fun MessageContextMenu(
     onDismiss: () -> Unit,
     onReact: (String) -> Unit,
     onReply: () -> Unit,
+    onForward: () -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
     var expanded by remember { mutableStateOf(false) }
@@ -875,6 +925,7 @@ private fun MessageContextMenu(
             Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface) {
                 Column(Modifier.widthIn(min = 220.dp)) {
                     ContextMenuItem(AppIcons.Reply, "Ответить", onClick = onReply)
+                    ContextMenuItem(AppIcons.Forward, "Переслать", onClick = onForward)
                     if (message.text.isNotBlank()) {
                         ContextMenuItem(AppIcons.Copy, "Копировать") {
                             clipboard.setText(AnnotatedString(message.text))

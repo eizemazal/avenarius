@@ -46,6 +46,24 @@ actual fun rememberPhotoPickLauncher(onPicked: (PickedMedia) -> Unit): () -> Uni
 }
 
 @Composable
+actual fun rememberSingleImagePickLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val launcher =
+        rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) {
+                scope.launch {
+                    val media = withContext(Dispatchers.IO) { readGalleryMedia(context, uri) }
+                    if (media != null) onPicked(media)
+                }
+            }
+        }
+    return {
+        launcher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+    }
+}
+
+@Composable
 actual fun rememberFilePickLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()

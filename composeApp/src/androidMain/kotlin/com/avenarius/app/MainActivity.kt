@@ -60,7 +60,7 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(state.screen) {
                 when (state.screen) {
                     Screen.CODE, Screen.PASSWORD, Screen.REGISTER, Screen.CHATS, Screen.CHAT,
-                    Screen.USER, Screen.SHARE_PICK,
+                    Screen.USER, Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE,
                     -> ConnectionService.start(this@MainActivity)
                     Screen.LOGIN, Screen.LOADING -> ConnectionService.stop(this@MainActivity)
                 }

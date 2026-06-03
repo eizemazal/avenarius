@@ -28,6 +28,11 @@ class Prefs(
         get() = storage.getString(KEY_USER_ID)?.toLongOrNull()
         set(value) = storage.putString(KEY_USER_ID, value?.toString())
 
+    /** Theme preference: "system" (default), "dark" or "light". Survives logout. */
+    var theme: String
+        get() = storage.getString(KEY_THEME) ?: "system"
+        set(value) = storage.putString(KEY_THEME, value)
+
     /** A stable per-install device id (UUID format). Generated once, then persisted. */
     val deviceId: String
         get() = getOrCreate(KEY_DEVICE_ID)
@@ -53,6 +58,7 @@ class Prefs(
         const val KEY_USER_ID = "user_id"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_MT_INSTANCE = "mt_instance"
+        const val KEY_THEME = "theme"
     }
 }
 

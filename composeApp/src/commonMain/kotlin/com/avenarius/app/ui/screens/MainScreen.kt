@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -27,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
@@ -52,6 +56,7 @@ import com.avenarius.app.ui.AppViewModel
 import com.avenarius.app.ui.Tab
 import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.clickableRow
+import com.avenarius.app.ui.theme.ThemeMode
 
 @Composable
 private fun NewChatDialog(
@@ -203,7 +208,10 @@ internal fun MainScreen(
                 Tab.SETTINGS ->
                     SettingsTab(
                         account = state.account,
+                        theme = state.theme,
+                        onSetTheme = vm::setTheme,
                         onOpenProfile = { state.account?.let { vm.openUser(it.userId) } },
+                        onOpenAbout = vm::openAbout,
                         onLogout = vm::logout,
                     )
             }
@@ -328,7 +336,10 @@ private fun ContactsTab(
 @Composable
 private fun SettingsTab(
     account: Account?,
+    theme: ThemeMode,
+    onSetTheme: (ThemeMode) -> Unit,
     onOpenProfile: () -> Unit,
+    onOpenAbout: () -> Unit,
     onLogout: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -346,8 +357,44 @@ private fun SettingsTab(
                 Text("Открыть профиль", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
             }
         }
-        HorizontalDivider()
+        Spacer(Modifier.height(8.dp))
         TextButton(onClick = onLogout) { Text("Выйти из аккаунта") }
+        HorizontalDivider()
+
+        // Settings block.
+        Text("Тема оформления", style = MaterialTheme.typography.titleMedium)
+        Column(Modifier.selectableGroup()) {
+            ThemeOption("Системная", ThemeMode.SYSTEM, theme, onSetTheme)
+            ThemeOption("Тёмная", ThemeMode.DARK, theme, onSetTheme)
+            ThemeOption("Светлая", ThemeMode.LIGHT, theme, onSetTheme)
+        }
+        HorizontalDivider()
+        Text(
+            "О программе",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.fillMaxWidth().clickableRow(onOpenAbout).padding(vertical = 8.dp),
+        )
+    }
+}
+
+@Composable
+private fun ThemeOption(
+    label: String,
+    mode: ThemeMode,
+    current: ThemeMode,
+    onSelect: (ThemeMode) -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .selectable(selected = mode == current, onClick = { onSelect(mode) }, role = Role.RadioButton)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = mode == current, onClick = null)
+        Spacer(Modifier.width(12.dp))
+        Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }
 

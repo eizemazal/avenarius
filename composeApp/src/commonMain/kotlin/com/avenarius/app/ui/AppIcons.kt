@@ -13,6 +13,7 @@ import com.avenarius.app.resources.content_copy
 import com.avenarius.app.resources.done_all
 import com.avenarius.app.resources.edit
 import com.avenarius.app.resources.expand_content
+import com.avenarius.app.resources.forward
 import com.avenarius.app.resources.group
 import com.avenarius.app.resources.more_vert
 import com.avenarius.app.resources.play_arrow
@@ -42,6 +43,7 @@ object AppIcons {
     // Message context-menu actions.
     val Reply: Painter @Composable get() = painterResource(Res.drawable.reply)
     val Copy: Painter @Composable get() = painterResource(Res.drawable.content_copy)
+    val Forward: Painter @Composable get() = painterResource(Res.drawable.forward)
 
     // Expand/collapse the extra row of reactions.
     val Expand: Painter @Composable get() = painterResource(Res.drawable.expand_content)

@@ -19,7 +19,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.LinkInteractionListener
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
@@ -52,18 +55,30 @@ internal fun LinkedText(
     color: Color,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
+    // Open links via our safe handler so an unhandled scheme (mailto: with no email
+    // app, etc.) can't crash the app.
+    val uriHandler = LocalUriHandler.current
+    val onLink =
+        LinkInteractionListener { link -> (link as? LinkAnnotation.Url)?.url?.let { uriHandler.openUriSafely(it) } }
     val annotated =
-        remember(text, linkColor) {
+        remember(text, linkColor, onLink) {
             buildAnnotatedString {
                 var last = 0
                 for (m in UrlRegex.findAll(text)) {
                     if (m.range.first > last) append(text.substring(last, m.range.first))
                     val raw = m.value
-                    val url = if (raw.startsWith("http", ignoreCase = true)) raw else "https://$raw"
+                    val url =
+                        when {
+                            raw.startsWith("http", ignoreCase = true) -> raw
+                            raw.startsWith("mailto:", ignoreCase = true) -> raw
+                            raw.contains("@") && !raw.contains("/") -> "mailto:$raw"
+                            else -> "https://$raw"
+                        }
                     withLink(
                         LinkAnnotation.Url(
                             url,
                             TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)),
+                            linkInteractionListener = onLink,
                         ),
                     ) { append(raw) }
                     last = m.range.last + 1
@@ -72,6 +87,17 @@ internal fun LinkedText(
             }
         }
     Text(annotated, style = style, color = color)
+}
+
+/** Opens [url] without crashing if nothing can handle it; bare emails go to mailto:. */
+internal fun UriHandler.openUriSafely(url: String) {
+    val target =
+        when {
+            url.contains("://") || url.startsWith("mailto:", true) || url.startsWith("tel:", true) -> url
+            url.contains("@") && !url.contains("/") -> "mailto:$url"
+            else -> url
+        }
+    runCatching { openUri(target) }
 }
 
 @Composable

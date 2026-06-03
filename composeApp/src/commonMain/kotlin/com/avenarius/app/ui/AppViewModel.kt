@@ -17,6 +17,9 @@ import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.MaxApi
+import com.avenarius.app.ui.theme.ThemeMode
+import com.avenarius.app.ui.theme.prefValue
+import com.avenarius.app.ui.theme.themeModeOf
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,7 +29,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT, USER, SHARE_PICK }
+enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT, USER, SHARE_PICK, ABOUT, EDIT_PROFILE }
 
 /** Bottom-navigation tabs on the main (CHATS) screen. */
 enum class Tab { CHATS, CONTACTS, SETTINGS }
@@ -90,6 +93,10 @@ data class AppState(
     val stagedMedia: List<PickedMedia> = emptyList(),
     /** Resolved info for group senders who aren't in our contacts (name + avatar). */
     val groupMembers: Map<Long, UserInfo> = emptyMap(),
+    /** Selected app theme (System/Dark/Light). */
+    val theme: ThemeMode = ThemeMode.SYSTEM,
+    /** A message awaiting a chat pick to forward it (Screen.SHARE_PICK). */
+    val forwarding: Message? = null,
 )
 
 /**
@@ -102,8 +109,56 @@ class AppViewModel(
     // ViewModel must NOT create or tear it down — it's injected.
     private val client: MaxApi,
 ) : ViewModel() {
-    private val _state = MutableStateFlow(AppState())
+    private val _state = MutableStateFlow(AppState(theme = themeModeOf(prefs.theme)))
     val state: StateFlow<AppState> = _state.asStateFlow()
+
+    /** Persists and applies the selected app theme. */
+    fun setTheme(mode: ThemeMode) {
+        prefs.theme = mode.prefValue()
+        _state.update { it.copy(theme = mode) }
+    }
+
+    /** Opens the "About" screen. */
+    fun openAbout() = _state.update { it.copy(screen = Screen.ABOUT) }
+
+    /** Opens the edit-profile screen (for the signed-in user). */
+    fun openEditProfile() = _state.update { it.copy(screen = Screen.EDIT_PROFILE) }
+
+    /**
+     * Saves the profile: uploads [avatar] (if any) as the new photo, then PROFILE-updates
+     * name + bio. On success refreshes our account/profile and returns to the profile.
+     */
+    fun saveProfile(
+        firstName: String,
+        lastName: String,
+        description: String,
+        avatar: PickedMedia?,
+    ) {
+        val myId = _state.value.account?.userId ?: return
+        launchBusy {
+            val token = avatar?.let { client.uploadPhoto(it.bytes, it.fileName, it.mime, profile = true).token }
+            client.updateProfile(
+                firstName.trim(),
+                lastName.trim().ifBlank { null },
+                description.trim().ifBlank { null },
+                token,
+            )
+            // Re-fetch our own profile so the new avatar/bio show immediately.
+            val me = runCatching { client.fetchUser(myId) }.getOrNull()
+            _state.update { s ->
+                s.copy(
+                    screen = Screen.USER,
+                    account =
+                        s.account?.copy(
+                            firstName = firstName.trim(),
+                            lastName = lastName.trim().ifBlank { null },
+                            avatarUrl = me?.avatarUrl ?: s.account.avatarUrl,
+                        ),
+                    viewingUser = me ?: s.viewingUser,
+                )
+            }
+        }
+    }
 
     private var pendingPhone: String? = null
 
@@ -659,6 +714,8 @@ class AppViewModel(
             Screen.USER -> closeUser()
             Screen.CHAT -> backToChats()
             Screen.SHARE_PICK -> cancelShare()
+            Screen.ABOUT -> _state.update { it.copy(screen = Screen.CHATS) }
+            Screen.EDIT_PROFILE -> _state.update { it.copy(screen = Screen.USER) }
             Screen.CODE, Screen.PASSWORD, Screen.REGISTER ->
                 _state.update { it.copy(screen = Screen.LOGIN, error = null) }
             Screen.CHATS -> if (s.tab != Tab.CHATS) _state.update { it.copy(tab = Tab.CHATS) }
@@ -672,7 +729,9 @@ class AppViewModel(
         tab: Tab,
     ): Boolean =
         when (screen) {
-            Screen.CHAT, Screen.USER, Screen.CODE, Screen.PASSWORD, Screen.REGISTER, Screen.SHARE_PICK -> true
+            Screen.CHAT, Screen.USER, Screen.CODE, Screen.PASSWORD, Screen.REGISTER,
+            Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE,
+            -> true
             Screen.CHATS -> tab != Tab.CHATS
             else -> false
         }
@@ -772,14 +831,35 @@ class AppViewModel(
         _state.update { it.copy(sharePending = items, screen = Screen.SHARE_PICK) }
     }
 
-    /** Picks the destination [chat] for a pending share: open it with the media staged. */
-    fun pickShareTarget(chat: Chat) {
-        val media = _state.value.sharePending
-        _state.update { it.copy(sharePending = emptyList(), stagedMedia = media) }
-        openChat(chat)
+    /** Begins forwarding [msg]: show the chat picker to choose where to send it. */
+    fun startForward(msg: Message) {
+        if (msg.id == null) return
+        _state.update { it.copy(forwarding = msg, screen = Screen.SHARE_PICK) }
     }
 
-    fun cancelShare() = _state.update { it.copy(sharePending = emptyList(), screen = Screen.CHATS) }
+    /**
+     * Picks the destination [chat] for a pending share or forward: open it, then stage
+     * the shared media or send the forwarded message.
+     */
+    fun pickShareTarget(chat: Chat) {
+        val media = _state.value.sharePending
+        val fwd = _state.value.forwarding
+        _state.update { it.copy(sharePending = emptyList(), forwarding = null, stagedMedia = media) }
+        openChat(chat)
+        val fwdId = fwd?.id
+        if (fwdId != null) {
+            launchBusyless {
+                val sent = client.forwardMessage(chat.id, fwdId, fwd.chatId, nowMillis())
+                if (sent != null) {
+                    _state.update { s ->
+                        if (s.messages.any { it.id == sent.id }) s else s.copy(messages = s.messages + sent)
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelShare() = _state.update { it.copy(sharePending = emptyList(), forwarding = null, screen = Screen.CHATS) }
 
     /** ChatScreen calls this once it has moved [AppState.stagedMedia] into its input. */
     fun consumeStagedMedia() = _state.update { it.copy(stagedMedia = emptyList()) }

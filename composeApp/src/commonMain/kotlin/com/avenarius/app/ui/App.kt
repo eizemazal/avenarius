@@ -1,6 +1,7 @@
 package com.avenarius.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,8 +26,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.ImageLoader
 import coil3.compose.setSingletonImageLoaderFactory
 import coil3.network.ktor3.KtorNetworkFetcherFactory
+import com.avenarius.app.ui.screens.AboutScreen
 import com.avenarius.app.ui.screens.ChatScreen
 import com.avenarius.app.ui.screens.CodeScreen
+import com.avenarius.app.ui.screens.EditProfileScreen
 import com.avenarius.app.ui.screens.LoginScreen
 import com.avenarius.app.ui.screens.MainScreen
 import com.avenarius.app.ui.screens.MediaViewerOverlay
@@ -34,7 +37,9 @@ import com.avenarius.app.ui.screens.PasswordScreen
 import com.avenarius.app.ui.screens.RegisterScreen
 import com.avenarius.app.ui.screens.SharePickScreen
 import com.avenarius.app.ui.screens.UserScreen
-import com.avenarius.app.ui.theme.AvenariusColors
+import com.avenarius.app.ui.theme.AvenariusColorsDark
+import com.avenarius.app.ui.theme.AvenariusColorsLight
+import com.avenarius.app.ui.theme.ThemeMode
 
 @Composable
 fun App(viewModel: AppViewModel) {
@@ -45,10 +50,15 @@ fun App(viewModel: AppViewModel) {
             .components { add(KtorNetworkFetcherFactory()) }
             .build()
     }
-    MaterialTheme(colorScheme = AvenariusColors) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val dark =
+        when (state.theme) {
+            ThemeMode.SYSTEM -> isSystemInDarkTheme()
+            ThemeMode.DARK -> true
+            ThemeMode.LIGHT -> false
+        }
+    MaterialTheme(colorScheme = if (dark) AvenariusColorsDark else AvenariusColorsLight) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            val state by viewModel.state.collectAsStateWithLifecycle()
-
             // Intercept the Android system back so leaving a chat returns to the
             // list (and code/password screens return to login) instead of exiting.
             PlatformBackHandler(enabled = viewModel.canGoBack(state.screen, state.tab)) {
@@ -99,6 +109,17 @@ fun App(viewModel: AppViewModel) {
                                     onBack = viewModel::closeUser,
                                     onWrite = viewModel::openDialogWith,
                                     onAvatarClick = viewModel::openImage,
+                                    onEdit = viewModel::openEditProfile,
+                                )
+                            Screen.EDIT_PROFILE ->
+                                EditProfileScreen(
+                                    initialFirstName = state.account?.firstName ?: "",
+                                    initialLastName = state.account?.lastName ?: "",
+                                    initialDescription = state.viewingUser?.description ?: "",
+                                    currentAvatarUrl = state.account?.avatarUrl,
+                                    busy = state.busy,
+                                    onBack = viewModel::onBack,
+                                    onSave = viewModel::saveProfile,
                                 )
                             Screen.CHAT ->
                                 ChatScreen(
@@ -127,6 +148,7 @@ fun App(viewModel: AppViewModel) {
                                     onOpenUser = viewModel::openUser,
                                     onReact = viewModel::toggleReaction,
                                     onReply = viewModel::startReply,
+                                    onForward = viewModel::startForward,
                                     onDownloadFile = viewModel::downloadFile,
                                     onCancelReply = viewModel::cancelReply,
                                     onDeleteChat = viewModel::deleteCurrentChat,
@@ -141,6 +163,7 @@ fun App(viewModel: AppViewModel) {
                                     onPick = viewModel::pickShareTarget,
                                     onCancel = viewModel::cancelShare,
                                 )
+                            Screen.ABOUT -> AboutScreen(onBack = viewModel::onBack)
                         }
                     }
                 }

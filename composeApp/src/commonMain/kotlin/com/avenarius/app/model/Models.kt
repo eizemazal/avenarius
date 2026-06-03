@@ -92,6 +92,14 @@ data class FileAttach(
     val size: Long,
 )
 
+/** A link/URL preview (server SHARE attach): title, description and an optional image. */
+data class LinkPreview(
+    val url: String,
+    val title: String?,
+    val description: String?,
+    val imageUrl: String?,
+)
+
 /** A single message inside a chat. */
 data class Message(
     /** Server message id (string in the protocol). Null for messages we just sent locally. */
@@ -114,4 +122,6 @@ data class Message(
     val files: List<FileAttach> = emptyList(),
     /** If this is a forwarded message, the original author's user id. */
     val forwardedFrom: Long? = null,
+    /** Link/URL preview (from a SHARE attach), if any. */
+    val linkPreview: LinkPreview? = null,
 )

@@ -3,6 +3,7 @@ package com.avenarius.app.net
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.FileAttach
+import com.avenarius.app.model.LinkPreview
 import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
@@ -156,12 +157,29 @@ interface MaxApi {
         attaches: List<OutAttach> = emptyList(),
     ): Message?
 
-    /** Uploads a photo and returns the attach descriptor to include in [sendMessage]. */
+    /** Uploads a photo and returns the attach descriptor. [profile] = an avatar upload. */
     suspend fun uploadPhoto(
         bytes: ByteArray,
         fileName: String,
         mime: String,
+        profile: Boolean = false,
     ): OutAttach.Photo
+
+    /** Forwards message [messageId] (from chat [fromChatId]) into chat [toChatId]. */
+    suspend fun forwardMessage(
+        toChatId: Long,
+        messageId: String,
+        fromChatId: Long,
+        cid: Long,
+    ): Message?
+
+    /** Updates the signed-in user's profile (name, bio, and optionally a new avatar). */
+    suspend fun updateProfile(
+        firstName: String,
+        lastName: String?,
+        description: String?,
+        photoToken: String?,
+    )
 
     /** Uploads a video (waits for server processing) and returns its attach descriptor. */
     suspend fun uploadVideo(
@@ -255,6 +273,7 @@ class MaxClient : MaxApi {
 
         // Opcodes (verified against PyMax protocol enums and rumax).
         private const val OP_HANDSHAKE = 6
+        private const val OP_PROFILE = 16 // PROFILE: update own profile (name/bio/avatar)
         private const val OP_START_AUTH = 17
         private const val OP_CHECK_CODE = 18
         private const val OP_SYNC = 19
@@ -869,13 +888,58 @@ class MaxClient : MaxApi {
         return parseMessage(msgObj, chatId)
     }
 
+    override suspend fun forwardMessage(
+        toChatId: Long,
+        messageId: String,
+        fromChatId: Long,
+        cid: Long,
+    ): Message? {
+        val mid = messageId.toLongOrNull() ?: return null
+        val payload =
+            transport.request(
+                OP_SEND_MESSAGE,
+                buildJsonObject {
+                    put("chatId", toChatId)
+                    putJsonObject("message") {
+                        put("text", "")
+                        put("cid", cid)
+                        put("elements", buildJsonArrayEmpty())
+                        put("attaches", buildJsonArrayEmpty())
+                        // A forward references the source message: {type:"FORWARD", messageId, chatId}.
+                        putJsonObject("link") {
+                            put("type", "FORWARD")
+                            put("messageId", mid)
+                            put("chatId", fromChatId)
+                        }
+                    }
+                    put("notify", true)
+                },
+            )
+        val msgObj = payload["message"] as? JsonObject
+        if (msgObj == null) {
+            if (payload["error"] != null || payload["message"] != null) {
+                error(payload.serverMessage("Не удалось переслать сообщение"))
+            }
+            return null
+        }
+        return parseMessage(msgObj, toChatId)
+    }
+
     override suspend fun uploadPhoto(
         bytes: ByteArray,
         fileName: String,
         mime: String,
+        profile: Boolean,
     ): OutAttach.Photo {
         // 1) Ask the server for an upload URL (it embeds the photoId in its query).
-        val data = transport.request(OP_PHOTO_UPLOAD, buildJsonObject { put("count", 1) })
+        val data =
+            transport.request(
+                OP_PHOTO_UPLOAD,
+                buildJsonObject {
+                    put("count", 1)
+                    if (profile) put("profile", true)
+                },
+            )
         val url =
             data["url"]?.jsonPrimitive?.contentOrNullSafe()
                 ?: error(data.serverMessage("Не удалось получить ссылку для загрузки"))
@@ -911,6 +975,30 @@ class MaxClient : MaxApi {
                 ?.contentOrNullSafe()
                 ?: error("Сервер не вернул токен загруженного фото")
         return OutAttach.Photo(token)
+    }
+
+    override suspend fun updateProfile(
+        firstName: String,
+        lastName: String?,
+        description: String?,
+        photoToken: String?,
+    ) {
+        val payload =
+            transport.request(
+                OP_PROFILE,
+                buildJsonObject {
+                    put("firstName", firstName)
+                    put("lastName", lastName ?: "")
+                    put("description", description ?: "")
+                    if (photoToken != null) {
+                        put("photoToken", photoToken)
+                        put("avatarType", "USER_AVATAR")
+                    }
+                },
+            )
+        if (payload["profile"] == null && payload["error"] != null) {
+            error(payload.serverMessage("Не удалось обновить профиль"))
+        }
     }
 
     override suspend fun uploadVideo(
@@ -1041,6 +1129,31 @@ class MaxClient : MaxApi {
 
         val baseText = localize(content["text"]?.jsonPrimitive?.contentOrNullSafe() ?: "")
         val attaches = content["attaches"]?.jsonArray.orEmptyList()
+        // A SHARE attach is a link preview: {url, title, description, image:{url}}.
+        val linkPreview =
+            attaches.firstNotNullOfOrNull { el ->
+                val a = el.jsonObject
+                if (a["_type"]?.jsonPrimitive?.contentOrNullSafe() != "SHARE") {
+                    null
+                } else {
+                    val u = (a["url"] ?: a["link"])?.jsonPrimitive?.contentOrNullSafe()
+                    if (u.isNullOrBlank()) {
+                        null
+                    } else {
+                        LinkPreview(
+                            url = u,
+                            title = a["title"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null },
+                            description = a["description"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null },
+                            imageUrl =
+                                a["image"]
+                                    ?.jsonObject
+                                    ?.get("url")
+                                    ?.jsonPrimitive
+                                    ?.contentOrNullSafe(),
+                        )
+                    }
+                }
+            }
 
         // Images/videos we render inline (PHOTO baseUrl, VIDEO thumbnail).
         val media =
@@ -1084,11 +1197,6 @@ class MaxClient : MaxApi {
                 val a = el.jsonObject
                 when (a["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
                     "AUDIO" -> "🎵 Голосовое сообщение"
-                    "SHARE" -> {
-                        val url = (a["url"] ?: a["link"])?.jsonPrimitive?.contentOrNullSafe()
-                        val shareTitle = a["title"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null }
-                        listOfNotNull(shareTitle, url).joinToString("\n").ifBlank { "🔗 Ссылка" }
-                    }
                     else -> null
                 }
             }
@@ -1135,7 +1243,7 @@ class MaxClient : MaxApi {
                     )
                 }
         // Skip empty service messages with no text, no media and no id.
-        if (text.isEmpty() && media.isEmpty() && files.isEmpty() && id == null) return null
+        if (text.isEmpty() && media.isEmpty() && files.isEmpty() && linkPreview == null && id == null) return null
         return Message(
             id = id,
             cid = cid,
@@ -1149,6 +1257,7 @@ class MaxClient : MaxApi {
             replyTo = replyTo,
             files = files,
             forwardedFrom = forwardedFrom,
+            linkPreview = linkPreview,
         )
     }
 
