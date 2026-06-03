@@ -10,3 +10,18 @@ import com.avenarius.app.model.PickedMedia
  */
 @Composable
 expect fun rememberPhotoPickLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit
+
+/** Launcher that captures a photo with the system camera. Desktop is a stub. */
+@Composable
+expect fun rememberCameraPhotoLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit
+
+/** Launcher that records a video with the system camera. Desktop is a stub. */
+@Composable
+expect fun rememberCameraVideoLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit
+
+/** Launcher that picks an arbitrary file (any MIME type). Desktop is a stub. */
+@Composable
+expect fun rememberFilePickLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit
+
+/** True on platforms where camera capture is available (Android). */
+expect val cameraCaptureSupported: Boolean

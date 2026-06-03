@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -74,15 +76,20 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.MediaViewer
 import com.avenarius.app.ui.PlatformBackHandler
 import com.avenarius.app.ui.VideoPlayer
+import com.avenarius.app.ui.cameraCaptureSupported
 import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.CenteredSpinner
 import com.avenarius.app.ui.components.LinkedText
 import com.avenarius.app.ui.formatClock
+import com.avenarius.app.ui.rememberCameraPhotoLauncher
+import com.avenarius.app.ui.rememberCameraVideoLauncher
+import com.avenarius.app.ui.rememberFilePickLauncher
 import com.avenarius.app.ui.rememberPhotoPickLauncher
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -101,10 +108,12 @@ internal fun ChatScreen(
     loadingOlder: Boolean,
     replyingTo: Message?,
     sendingAttachment: Boolean,
+    stagedMedia: List<PickedMedia>,
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     onSend: (String) -> Unit,
-    onSendPhoto: (PickedMedia, String) -> Unit,
+    onSendMedia: (List<PickedMedia>, String) -> Unit,
+    onStagedConsumed: () -> Unit,
     onMediaClick: (MediaAttach, String?) -> Unit,
     onOpenUser: (Long) -> Unit,
     onReact: (Message, String) -> Unit,
@@ -114,9 +123,20 @@ internal fun ChatScreen(
     onLeaveGroup: () -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
-    // A photo/video picked for sending, staged with an optional caption (the draft).
-    var pending by remember(chat?.id) { mutableStateOf<PickedMedia?>(null) }
-    val pickPhoto = rememberPhotoPickLauncher { pending = it }
+    // Photos/videos/files staged for sending, with an optional caption (the draft).
+    var pending by remember(chat?.id) { mutableStateOf<List<PickedMedia>>(emptyList()) }
+    val pickFromGallery = rememberPhotoPickLauncher { pending = pending + it }
+    val takePhoto = rememberCameraPhotoLauncher { pending = pending + it }
+    val takeVideo = rememberCameraVideoLauncher { pending = pending + it }
+    val pickFile = rememberFilePickLauncher { pending = pending + it }
+    var attachMenu by remember { mutableStateOf(false) }
+    // Media shared in from another app (Screen.SHARE_PICK) lands here once the chat opens.
+    LaunchedEffect(stagedMedia) {
+        if (stagedMedia.isNotEmpty()) {
+            pending = pending + stagedMedia
+            onStagedConsumed()
+        }
+    }
     val listState = rememberLazyListState()
     val isDialog = chat?.isDialog ?: true
     // For a 1:1 dialog the other user's id is chatId XOR myId.
@@ -214,7 +234,9 @@ internal fun ChatScreen(
         bottomBar = {
             Column(Modifier.fillMaxWidth()) {
                 if (replyingTo != null) ReplyBanner(replyingTo, contacts, myId, onCancelReply)
-                pending?.let { media -> StagedAttachment(media, onRemove = { pending = null }) }
+                if (pending.isNotEmpty()) {
+                    StagedAttachments(pending, onRemove = { item -> pending = pending - item })
+                }
                 // Telegram-style rounded input pill: attach + text field + send button.
                 Surface(
                     shape = RoundedCornerShape(24.dp),
@@ -224,19 +246,53 @@ internal fun ChatScreen(
                             .fillMaxWidth()
                             .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
                 ) {
-                    val canSend = (draft.isNotBlank() || pending != null) && !sendingAttachment
+                    val canSend = (draft.isNotBlank() || pending.isNotEmpty()) && !sendingAttachment
                     Row(
                         Modifier.padding(start = 4.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
                         verticalAlignment = Alignment.Bottom,
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        IconButton(onClick = pickPhoto, modifier = Modifier.size(40.dp)) {
-                            Icon(
-                                AppIcons.Attach,
-                                contentDescription = "Прикрепить",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(22.dp),
-                            )
+                        Box {
+                            IconButton(onClick = { attachMenu = true }, modifier = Modifier.size(40.dp)) {
+                                Icon(
+                                    AppIcons.Attach,
+                                    contentDescription = "Прикрепить",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                            DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Галерея") },
+                                    onClick = {
+                                        attachMenu = false
+                                        pickFromGallery()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Файл") },
+                                    onClick = {
+                                        attachMenu = false
+                                        pickFile()
+                                    },
+                                )
+                                if (cameraCaptureSupported) {
+                                    DropdownMenuItem(
+                                        text = { Text("Сделать фото") },
+                                        onClick = {
+                                            attachMenu = false
+                                            takePhoto()
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Снять видео") },
+                                        onClick = {
+                                            attachMenu = false
+                                            takeVideo()
+                                        },
+                                    )
+                                }
+                            }
                         }
                         BasicTextField(
                             value = draft,
@@ -251,7 +307,7 @@ internal fun ChatScreen(
                             decorationBox = { inner ->
                                 if (draft.isEmpty()) {
                                     Text(
-                                        if (pending != null) "Подпись…" else "Сообщение",
+                                        if (pending.isNotEmpty()) "Подпись…" else "Сообщение",
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -272,10 +328,9 @@ internal fun ChatScreen(
                                 ).then(
                                     if (canSend) {
                                         Modifier.clickable {
-                                            val media = pending
-                                            if (media != null) {
-                                                onSendPhoto(media, draft)
-                                                pending = null
+                                            if (pending.isNotEmpty()) {
+                                                onSendMedia(pending, draft)
+                                                pending = emptyList()
                                             } else {
                                                 onSend(draft)
                                             }
@@ -522,42 +577,53 @@ private fun MessageRow(
     }
 }
 
-/** Preview of a picked photo/video staged above the input, with a remove button. */
+/** Horizontal strip of picked photos/videos/files staged above the input. */
 @Composable
-private fun StagedAttachment(
-    media: PickedMedia,
-    onRemove: () -> Unit,
+private fun StagedAttachments(
+    items: List<PickedMedia>,
+    onRemove: (PickedMedia) -> Unit,
 ) {
     Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        LazyRow(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(
-                Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surface),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (media.isVideo) {
-                    Icon(AppIcons.Play, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    AsyncImage(
-                        model = media.bytes,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+            items(items) { media ->
+                Box(Modifier.size(56.dp)) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surface),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        when (media.kind) {
+                            PickedKind.PHOTO ->
+                                AsyncImage(
+                                    model = media.bytes,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            PickedKind.VIDEO ->
+                                Icon(AppIcons.Play, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            PickedKind.FILE ->
+                                Icon(AppIcons.Attach, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    Box(
+                        Modifier
+                            .align(Alignment.TopEnd)
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surface)
+                            .clickable { onRemove(media) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(AppIcons.Close, contentDescription = "Убрать", modifier = Modifier.size(12.dp))
+                    }
                 }
             }
-            Spacer(Modifier.width(10.dp))
-            Text(
-                if (media.isVideo) "Видео" else "Фото",
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            IconButton(onClick = onRemove) { Icon(AppIcons.Close, contentDescription = "Убрать") }
         }
     }
 }

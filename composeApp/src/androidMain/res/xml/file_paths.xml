@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Temp files for camera capture live in the app cache (see MediaPicker). -->
+    <cache-path name="capture" path="." />
+</paths>

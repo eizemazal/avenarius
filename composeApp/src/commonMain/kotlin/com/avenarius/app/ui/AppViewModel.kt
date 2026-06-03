@@ -9,6 +9,7 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.SearchResult
@@ -24,7 +25,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT, USER }
+enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT, USER, SHARE_PICK }
 
 /** Bottom-navigation tabs on the main (CHATS) screen. */
 enum class Tab { CHATS, CONTACTS, SETTINGS }
@@ -82,6 +83,10 @@ data class AppState(
     val replyingTo: Message? = null,
     /** True while a picked photo/video is being uploaded and sent. */
     val sendingAttachment: Boolean = false,
+    /** Media shared in from another app, awaiting a chat pick (Screen.SHARE_PICK). */
+    val sharePending: List<PickedMedia> = emptyList(),
+    /** Media to pre-stage in the chat that's just been opened (e.g. from a share). */
+    val stagedMedia: List<PickedMedia> = emptyList(),
 )
 
 /**
@@ -648,6 +653,7 @@ class AppViewModel(
         when (s.screen) {
             Screen.USER -> closeUser()
             Screen.CHAT -> backToChats()
+            Screen.SHARE_PICK -> cancelShare()
             Screen.CODE, Screen.PASSWORD, Screen.REGISTER ->
                 _state.update { it.copy(screen = Screen.LOGIN, error = null) }
             Screen.CHATS -> if (s.tab != Tab.CHATS) _state.update { it.copy(tab = Tab.CHATS) }
@@ -661,7 +667,7 @@ class AppViewModel(
         tab: Tab,
     ): Boolean =
         when (screen) {
-            Screen.CHAT, Screen.USER, Screen.CODE, Screen.PASSWORD, Screen.REGISTER -> true
+            Screen.CHAT, Screen.USER, Screen.CODE, Screen.PASSWORD, Screen.REGISTER, Screen.SHARE_PICK -> true
             Screen.CHATS -> tab != Tab.CHATS
             else -> false
         }
@@ -718,22 +724,29 @@ class AppViewModel(
     }
 
     /**
-     * Uploads [media] and sends it (with an optional [caption]) to the open chat.
-     * Mirrors [sendMessage]'s reply handling and shows a [AppState.sendingAttachment]
-     * spinner while the upload + send is in flight.
+     * Uploads [items] (photos, videos and/or files) and sends them as a SINGLE message
+     * carrying all attaches, with an optional [caption]. Shows a
+     * [AppState.sendingAttachment] spinner while the uploads + send are in flight.
      */
-    fun sendPhoto(
-        media: PickedMedia,
+    fun sendMedia(
+        items: List<PickedMedia>,
         caption: String,
     ) {
         val chat = _state.value.currentChat ?: return
-        val cid = nowMillis()
+        if (items.isEmpty()) return
         val replyToId = _state.value.replyingTo?.id
         _state.update { it.copy(replyingTo = null, sendingAttachment = true) }
         launchBusyless {
             try {
-                val attach = client.uploadPhoto(media.bytes, media.fileName, media.mime)
-                val sent = client.sendMessage(chat.id, caption.trim(), cid, replyToId, listOf(attach))
+                val attaches =
+                    items.map { media ->
+                        when (media.kind) {
+                            PickedKind.PHOTO -> client.uploadPhoto(media.bytes, media.fileName, media.mime)
+                            PickedKind.VIDEO -> client.uploadVideo(media.bytes, media.fileName, media.mime)
+                            PickedKind.FILE -> client.uploadFile(media.bytes, media.fileName, media.mime)
+                        }
+                    }
+                val sent = client.sendMessage(chat.id, caption.trim(), nowMillis(), replyToId, attaches)
                 if (sent != null) {
                     _state.update { s ->
                         if (s.messages.any { it.id == sent.id }) s else s.copy(messages = s.messages + sent)
@@ -744,6 +757,27 @@ class AppViewModel(
             }
         }
     }
+
+    /**
+     * Entry point for media shared in from another app: show the chat picker so the
+     * user can choose a destination. Ignored if we aren't signed in yet.
+     */
+    fun beginShare(items: List<PickedMedia>) {
+        if (items.isEmpty() || prefs.token == null) return
+        _state.update { it.copy(sharePending = items, screen = Screen.SHARE_PICK) }
+    }
+
+    /** Picks the destination [chat] for a pending share: open it with the media staged. */
+    fun pickShareTarget(chat: Chat) {
+        val media = _state.value.sharePending
+        _state.update { it.copy(sharePending = emptyList(), stagedMedia = media) }
+        openChat(chat)
+    }
+
+    fun cancelShare() = _state.update { it.copy(sharePending = emptyList(), screen = Screen.CHATS) }
+
+    /** ChatScreen calls this once it has moved [AppState.stagedMedia] into its input. */
+    fun consumeStagedMedia() = _state.update { it.copy(stagedMedia = emptyList()) }
 
     /** Begins replying to [msg] (shows a banner above the input). */
     fun startReply(msg: Message) = _state.update { it.copy(replyingTo = msg) }

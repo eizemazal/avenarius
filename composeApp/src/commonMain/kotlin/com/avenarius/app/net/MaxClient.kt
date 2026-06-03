@@ -14,15 +14,21 @@ import com.avenarius.app.model.UserInfo
 import io.ktor.client.HttpClient
 import io.ktor.client.request.forms.formData
 import io.ktor.client.request.forms.submitFormWithBinaryData
+import io.ktor.client.request.headers
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
+import io.ktor.http.isSuccess
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
@@ -156,6 +162,20 @@ interface MaxApi {
         mime: String,
     ): OutAttach.Photo
 
+    /** Uploads a video (waits for server processing) and returns its attach descriptor. */
+    suspend fun uploadVideo(
+        bytes: ByteArray,
+        fileName: String,
+        mime: String,
+    ): OutAttach.Video
+
+    /** Uploads an arbitrary file (waits for server processing) and returns its attach. */
+    suspend fun uploadFile(
+        bytes: ByteArray,
+        fileName: String,
+        mime: String,
+    ): OutAttach.File
+
     suspend fun markRead(
         chatId: Long,
         messageId: String,
@@ -238,6 +258,8 @@ class MaxClient : MaxApi {
         private const val OP_PUBLIC_SEARCH = 60
         private const val OP_VIDEO_PLAY = 83
         private const val OP_PHOTO_UPLOAD = 80 // PHOTO_UPLOAD: request a photo upload URL
+        private const val OP_VIDEO_UPLOAD = 82 // VIDEO_UPLOAD: request a video upload URL
+        private const val OP_FILE_UPLOAD = 87 // FILE_UPLOAD: request a file upload URL
         private const val OP_MARK_READ = 50
         private const val OP_SEND_MESSAGE = 64
         private const val OP_CHECK_PASSWORD = 115
@@ -246,6 +268,7 @@ class MaxClient : MaxApi {
         const val OP_PRESENCE = 132 // server push: a contact's online state changed
         const val OP_REACTION_UPDATE = 155 // NOTIF_MSG_REACTIONS_CHANGED push
         const val OP_NOTIF_CHAT = 135 // NOTIF_CHAT push: a chat was created/updated (e.g. added to a group)
+        const val OP_NOTIF_ATTACH = 136 // NOTIF_ATTACH push: an uploaded video/file finished processing
 
         // Confirmed from the official client's opcode enum (ru.ok.tamtam.api.d,
         // recovered by decompiling MAX.apk).
@@ -280,6 +303,14 @@ class MaxClient : MaxApi {
     /** Stream of live reaction-count changes (server push, opcode 155). */
     private val _reactionUpdates = MutableSharedFlow<ReactionUpdate>(extraBufferCapacity = 64)
     override val reactionUpdates: SharedFlow<ReactionUpdate> = _reactionUpdates
+
+    // Video-processing-ready signals (NOTIF_ATTACH, op 136), keyed by videoId. A
+    // small replay buffer covers the race where the push lands before the uploader
+    // starts awaiting it. (Internal only — no public counterpart.)
+    private val videoReadyFlow = MutableSharedFlow<Long>(replay = 8, extraBufferCapacity = 16)
+
+    // File-processing-ready signals (NOTIF_ATTACH, op 136), keyed by fileId.
+    private val fileReadyFlow = MutableSharedFlow<Long>(replay = 8, extraBufferCapacity = 16)
 
     /** Stream of created/updated chats (server push, opcode 135). */
     private val _chatUpdates = MutableSharedFlow<Chat>(extraBufferCapacity = 64)
@@ -323,6 +354,11 @@ class MaxClient : MaxApi {
                     OP_NOTIF_CHAT -> {
                         // {chat: {...}} — a chat was created or updated (new dialog, added to a group).
                         payload["chat"]?.jsonObject?.let { parseChat(it, emptyMap()) }?.let { _chatUpdates.emit(it) }
+                    }
+                    OP_NOTIF_ATTACH -> {
+                        // {videoId} or {fileId} — an uploaded media finished processing.
+                        payload["videoId"]?.jsonPrimitive?.longOrNullSafe()?.let { videoReadyFlow.emit(it) }
+                        payload["fileId"]?.jsonPrimitive?.longOrNullSafe()?.let { fileReadyFlow.emit(it) }
                     }
                 }
             }
@@ -769,6 +805,11 @@ class MaxClient : MaxApi {
                                             put("videoId", a.videoId)
                                             put("token", a.token)
                                         }
+                                    is OutAttach.File ->
+                                        addJsonObject {
+                                            put("_type", "FILE")
+                                            put("fileId", a.fileId)
+                                        }
                                 }
                             }
                         }
@@ -844,6 +885,61 @@ class MaxClient : MaxApi {
                 ?.contentOrNullSafe()
                 ?: error("Сервер не вернул токен загруженного фото")
         return OutAttach.Photo(token)
+    }
+
+    override suspend fun uploadVideo(
+        bytes: ByteArray,
+        fileName: String,
+        mime: String,
+    ): OutAttach.Video {
+        // 1) Request an upload slot: {info:[{url, videoId, token}]}.
+        val data = transport.request(OP_VIDEO_UPLOAD, buildJsonObject { put("count", 1) })
+        val info =
+            data["info"]?.jsonArray?.firstOrNull()?.jsonObject
+                ?: error(data.serverMessage("Не удалось начать загрузку видео"))
+        val url = info["url"]?.jsonPrimitive?.contentOrNullSafe() ?: error("Нет ссылки для загрузки видео")
+        val videoId = info["videoId"]?.jsonPrimitive?.longOrNullSafe() ?: error("Сервер не вернул videoId")
+        val token = info["token"]?.jsonPrimitive?.contentOrNullSafe() ?: error("Сервер не вернул токен видео")
+        // 2) Upload the bytes (single range covering the whole file).
+        val response =
+            http.post(url) {
+                headers {
+                    append(HttpHeaders.ContentDisposition, "attachment; filename=\"$fileName\"")
+                    append(HttpHeaders.ContentRange, "0-${bytes.size - 1}/${bytes.size}")
+                }
+                setBody(bytes)
+            }
+        if (!response.status.isSuccess()) error("Загрузка видео не удалась (${response.status.value})")
+        // 3) Wait for the server to finish processing (NOTIF_ATTACH with our videoId).
+        withTimeoutOrNull(60_000) { videoReadyFlow.first { it == videoId } }
+            ?: error("Видео не было обработано сервером вовремя")
+        return OutAttach.Video(videoId, token)
+    }
+
+    override suspend fun uploadFile(
+        bytes: ByteArray,
+        fileName: String,
+        mime: String,
+    ): OutAttach.File {
+        // Mirrors uploadVideo: {info:[{url, fileId, token}]} -> POST bytes -> await ready.
+        val data = transport.request(OP_FILE_UPLOAD, buildJsonObject { put("count", 1) })
+        val info =
+            data["info"]?.jsonArray?.firstOrNull()?.jsonObject
+                ?: error(data.serverMessage("Не удалось начать загрузку файла"))
+        val url = info["url"]?.jsonPrimitive?.contentOrNullSafe() ?: error("Нет ссылки для загрузки файла")
+        val fileId = info["fileId"]?.jsonPrimitive?.longOrNullSafe() ?: error("Сервер не вернул fileId")
+        val response =
+            http.post(url) {
+                headers {
+                    append(HttpHeaders.ContentDisposition, "attachment; filename=\"$fileName\"")
+                    append(HttpHeaders.ContentRange, "0-${bytes.size - 1}/${bytes.size}")
+                }
+                setBody(bytes)
+            }
+        if (!response.status.isSuccess()) error("Загрузка файла не удалась (${response.status.value})")
+        withTimeoutOrNull(60_000) { fileReadyFlow.first { it == fileId } }
+            ?: error("Файл не был обработан сервером вовремя")
+        return OutAttach.File(fileId)
     }
 
     override suspend fun setReaction(

@@ -32,6 +32,7 @@ import com.avenarius.app.ui.screens.MainScreen
 import com.avenarius.app.ui.screens.MediaViewerOverlay
 import com.avenarius.app.ui.screens.PasswordScreen
 import com.avenarius.app.ui.screens.RegisterScreen
+import com.avenarius.app.ui.screens.SharePickScreen
 import com.avenarius.app.ui.screens.UserScreen
 import com.avenarius.app.ui.theme.AvenariusColors
 
@@ -112,10 +113,12 @@ fun App(viewModel: AppViewModel) {
                                     loadingOlder = state.loadingOlder,
                                     replyingTo = state.replyingTo,
                                     sendingAttachment = state.sendingAttachment,
+                                    stagedMedia = state.stagedMedia,
                                     onLoadOlder = viewModel::loadOlder,
                                     onBack = viewModel::backToChats,
                                     onSend = viewModel::sendMessage,
-                                    onSendPhoto = viewModel::sendPhoto,
+                                    onSendMedia = viewModel::sendMedia,
+                                    onStagedConsumed = viewModel::consumeStagedMedia,
                                     onMediaClick = viewModel::openMedia,
                                     onOpenUser = viewModel::openUser,
                                     onReact = viewModel::toggleReaction,
@@ -123,6 +126,15 @@ fun App(viewModel: AppViewModel) {
                                     onCancelReply = viewModel::cancelReply,
                                     onDeleteChat = viewModel::deleteCurrentChat,
                                     onLeaveGroup = viewModel::leaveCurrentGroup,
+                                )
+                            Screen.SHARE_PICK ->
+                                SharePickScreen(
+                                    chats = state.chats,
+                                    contacts = state.contactsList,
+                                    myId = state.account?.userId ?: -1L,
+                                    count = state.sharePending.size,
+                                    onPick = viewModel::pickShareTarget,
+                                    onCancel = viewModel::cancelShare,
                                 )
                         }
                     }
