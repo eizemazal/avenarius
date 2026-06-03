@@ -2,6 +2,7 @@ package com.avenarius.app.net
 
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.FileAttach
 import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
@@ -225,6 +226,13 @@ interface MaxApi {
         messageId: Long,
         videoId: Long,
     ): String?
+
+    /** Resolves a temporary download URL for a file attachment (FILE_DOWNLOAD). */
+    suspend fun getFileUrl(
+        chatId: Long,
+        messageId: Long,
+        fileId: Long,
+    ): String?
 }
 
 /**
@@ -260,6 +268,7 @@ class MaxClient : MaxApi {
         private const val OP_PHOTO_UPLOAD = 80 // PHOTO_UPLOAD: request a photo upload URL
         private const val OP_VIDEO_UPLOAD = 82 // VIDEO_UPLOAD: request a video upload URL
         private const val OP_FILE_UPLOAD = 87 // FILE_UPLOAD: request a file upload URL
+        private const val OP_FILE_DOWNLOAD = 88 // FILE_DOWNLOAD: get a file's download URL
         private const val OP_MARK_READ = 50
         private const val OP_SEND_MESSAGE = 64
         private const val OP_CHECK_PASSWORD = 115
@@ -638,6 +647,23 @@ class MaxClient : MaxApi {
         return null
     }
 
+    override suspend fun getFileUrl(
+        chatId: Long,
+        messageId: Long,
+        fileId: Long,
+    ): String? {
+        val payload =
+            transport.request(
+                OP_FILE_DOWNLOAD,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("messageId", messageId)
+                    put("fileId", fileId)
+                },
+            )
+        return payload["url"]?.jsonPrimitive?.contentOrNullSafe()
+    }
+
     // ---------------------------------------------------------------------
     // Sync (chats + contacts + profile)
     // ---------------------------------------------------------------------
@@ -1004,8 +1030,17 @@ class MaxClient : MaxApi {
         obj: JsonObject,
         chatId: Long,
     ): Message? {
-        val baseText = localize(obj["text"]?.jsonPrimitive?.contentOrNullSafe() ?: "")
-        val attaches = obj["attaches"]?.jsonArray.orEmptyList()
+        // A forwarded message carries its real content (text + attaches) inside
+        // link.message; the outer object is empty. Parse content from there, but keep
+        // the outer id/sender/time/status (sender = who forwarded it).
+        val link = obj["link"] as? JsonObject
+        val linkType = link?.get("type")?.jsonPrimitive?.contentOrNullSafe()
+        val forwardObj = if (linkType == "FORWARD") link?.get("message") as? JsonObject else null
+        val content = forwardObj ?: obj
+        val forwardedFrom = forwardObj?.get("sender")?.jsonPrimitive?.longOrNullSafe()
+
+        val baseText = localize(content["text"]?.jsonPrimitive?.contentOrNullSafe() ?: "")
+        val attaches = content["attaches"]?.jsonArray.orEmptyList()
 
         // Images/videos we render inline (PHOTO baseUrl, VIDEO thumbnail).
         val media =
@@ -1027,13 +1062,27 @@ class MaxClient : MaxApi {
                     else -> null
                 }
             }
+        // Downloadable file attachments (rendered as tappable rows, not text).
+        val files =
+            attaches.mapNotNull { el ->
+                val a = el.jsonObject
+                if (a["_type"]?.jsonPrimitive?.contentOrNullSafe() != "FILE") {
+                    null
+                } else {
+                    val fileId = a["fileId"]?.jsonPrimitive?.longOrNullSafe() ?: return@mapNotNull null
+                    FileAttach(
+                        fileId = fileId,
+                        name = a["name"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null } ?: "Файл",
+                        size = a["size"]?.jsonPrimitive?.longOrNullSafe() ?: 0L,
+                    )
+                }
+            }
         // Non-renderable attaches still get a text label so they aren't invisible.
         // For SHARE we surface the actual URL/title so it renders as a tappable link.
         val mediaLabel =
             attaches.firstNotNullOfOrNull { el ->
                 val a = el.jsonObject
                 when (a["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
-                    "FILE" -> "📎 Файл"
                     "AUDIO" -> "🎵 Голосовое сообщение"
                     "SHARE" -> {
                         val url = (a["url"] ?: a["link"])?.jsonPrimitive?.contentOrNullSafe()
@@ -1086,7 +1135,7 @@ class MaxClient : MaxApi {
                     )
                 }
         // Skip empty service messages with no text, no media and no id.
-        if (text.isEmpty() && media.isEmpty() && id == null) return null
+        if (text.isEmpty() && media.isEmpty() && files.isEmpty() && id == null) return null
         return Message(
             id = id,
             cid = cid,
@@ -1098,6 +1147,8 @@ class MaxClient : MaxApi {
             media = media,
             reactions = reactions,
             replyTo = replyTo,
+            files = files,
+            forwardedFrom = forwardedFrom,
         )
     }
 

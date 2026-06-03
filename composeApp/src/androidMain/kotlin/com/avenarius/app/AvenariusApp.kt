@@ -20,6 +20,10 @@ object Session {
     lateinit var prefs: Prefs
         private set
 
+    /** Application context, for work needing one outside an Activity (e.g. downloads). */
+    lateinit var appContext: Context
+        private set
+
     @Volatile var appInForeground: Boolean = false
 
     @Volatile var openChatId: Long? = null
@@ -31,6 +35,7 @@ object Session {
 
     fun init(context: Context) {
         if (::client.isInitialized) return
+        appContext = context.applicationContext
         prefs = Prefs(AndroidStorage(context.applicationContext))
         client = MaxClient()
     }

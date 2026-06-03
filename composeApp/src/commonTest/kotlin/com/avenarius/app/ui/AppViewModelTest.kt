@@ -218,6 +218,12 @@ private class FakeMaxClient : MaxApi {
         messageId: Long,
         videoId: Long,
     ): String? = null
+
+    override suspend fun getFileUrl(
+        chatId: Long,
+        messageId: Long,
+        fileId: Long,
+    ): String? = null
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)

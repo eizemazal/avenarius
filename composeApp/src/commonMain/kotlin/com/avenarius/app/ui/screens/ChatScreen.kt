@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.FileAttach
 import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
@@ -118,6 +119,7 @@ internal fun ChatScreen(
     onOpenUser: (Long) -> Unit,
     onReact: (Message, String) -> Unit,
     onReply: (Message) -> Unit,
+    onDownloadFile: (Message, FileAttach) -> Unit,
     onCancelReply: () -> Unit,
     onDeleteChat: () -> Unit,
     onLeaveGroup: () -> Unit,
@@ -407,11 +409,15 @@ internal fun ChatScreen(
                         startsRun = startsRun,
                         replyAuthor =
                             msg.replyTo?.let { if (it.senderId == myId) "Вы" else contacts[it.senderId] ?: "—" },
+                        forwardAuthor =
+                            msg.forwardedFrom?.let { if (it == myId) "Вы" else contacts[it] ?: "—" },
+                        onForwardClick = msg.forwardedFrom?.let { id -> { onOpenUser(id) } },
                         onMediaClick = onMediaClick,
                         onAvatarClick = { onOpenUser(msg.senderId) },
                         onClick = { menuTarget = msg },
                         onSwipeReply = { onReply(msg) },
                         onReactionClick = { emoji -> onReact(msg, emoji) },
+                        onDownloadFile = { file -> onDownloadFile(msg, file) },
                     )
                 }
             }
@@ -461,11 +467,14 @@ private fun MessageRow(
     isGroup: Boolean,
     startsRun: Boolean,
     replyAuthor: String?,
+    forwardAuthor: String?,
+    onForwardClick: (() -> Unit)?,
     onMediaClick: (MediaAttach, String?) -> Unit,
     onAvatarClick: () -> Unit,
     onClick: () -> Unit,
     onSwipeReply: () -> Unit,
     onReactionClick: (String) -> Unit,
+    onDownloadFile: (FileAttach) -> Unit,
 ) {
     // Swipe-to-reply: drag the row left; past the threshold a reply icon is revealed
     // (with a haptic tick) and releasing there starts a reply to this message.
@@ -544,12 +553,30 @@ private fun MessageRow(
                         if (isGroup && !isMine && startsRun) {
                             Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                         }
+                        if (forwardAuthor != null) {
+                            Text(
+                                "Переслано от $forwardAuthor",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = fg.copy(alpha = if (onForwardClick != null) 0.95f else 0.75f),
+                                modifier =
+                                    if (onForwardClick != null) {
+                                        Modifier.clickable(onClick = onForwardClick)
+                                    } else {
+                                        Modifier
+                                    },
+                            )
+                            Spacer(Modifier.height(2.dp))
+                        }
                         msg.replyTo?.let { reply ->
                             ReplyQuote(replyAuthor ?: "—", reply.text, fg)
                             Spacer(Modifier.height(4.dp))
                         }
                         msg.media.forEach { media ->
                             MediaThumbnail(media, onClick = { onMediaClick(media, msg.id) })
+                            Spacer(Modifier.height(4.dp))
+                        }
+                        msg.files.forEach { file ->
+                            FileAttachView(file, fg, onClick = { onDownloadFile(file) })
                             Spacer(Modifier.height(4.dp))
                         }
                         if (msg.text.isNotEmpty()) {
@@ -627,6 +654,46 @@ private fun StagedAttachments(
         }
     }
 }
+
+/** A downloadable file attachment row inside a message bubble (tap to download). */
+@Composable
+private fun FileAttachView(
+    file: FileAttach,
+    fg: Color,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp, horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            Modifier.size(36.dp).clip(CircleShape).background(fg.copy(alpha = 0.15f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(AppIcons.Attach, contentDescription = null, tint = fg, modifier = Modifier.size(20.dp))
+        }
+        Column {
+            Text(file.name, style = MaterialTheme.typography.bodyMedium, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                "${formatFileSize(file.size)} · Скачать",
+                style = MaterialTheme.typography.labelSmall,
+                color = fg.copy(alpha = 0.7f),
+            )
+        }
+    }
+}
+
+/** Human-readable byte size, e.g. "2.4 МБ". */
+private fun formatFileSize(bytes: Long): String =
+    when {
+        bytes >= 1_000_000 -> "${(bytes / 100_000) / 10.0} МБ"
+        bytes >= 1_000 -> "${bytes / 1_000} КБ"
+        else -> "$bytes Б"
+    }
 
 /** Quoted-message block shown at the top of a reply bubble (author + preview). */
 @Composable

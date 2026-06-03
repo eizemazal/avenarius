@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.avenarius.app.data.Prefs
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.FileAttach
 import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
@@ -87,6 +88,8 @@ data class AppState(
     val sharePending: List<PickedMedia> = emptyList(),
     /** Media to pre-stage in the chat that's just been opened (e.g. from a share). */
     val stagedMedia: List<PickedMedia> = emptyList(),
+    /** Resolved info for group senders who aren't in our contacts (name + avatar). */
+    val groupMembers: Map<Long, UserInfo> = emptyMap(),
 )
 
 /**
@@ -170,6 +173,7 @@ class AppViewModel(
                 if (isOpen && mid != null) {
                     runCatching { client.markRead(msg.chatId, mid, maxOf(nowMillis(), msg.time)) }
                 }
+                if (isOpen && !fromMe) resolveUnknownSenders(listOf(msg))
             }
         }
         // Apply read-mark updates (op130): turn our sent messages ✓ -> ✓✓ live.
@@ -448,6 +452,7 @@ class AppViewModel(
                     chat,
                 )
             _state.update { it.copy(messages = history) }
+            resolveUnknownSenders(history)
             // Mark read on the server and clear the local unread badge.
             history.lastOrNull()?.let { last ->
                 val lastId = last.id
@@ -778,6 +783,46 @@ class AppViewModel(
 
     /** ChatScreen calls this once it has moved [AppState.stagedMedia] into its input. */
     fun consumeStagedMedia() = _state.update { it.copy(stagedMedia = emptyList()) }
+
+    /**
+     * For group chats, fetches display info for senders not in our contacts so their
+     * name + avatar show instead of a "—" placeholder. Results are cached in state.
+     */
+    private fun resolveUnknownSenders(messages: List<Message>) {
+        val s = _state.value
+        val chat = s.currentChat ?: return
+        val myId = s.account?.userId
+        val ids =
+            buildSet {
+                // Group message senders (a dialog has one obvious peer).
+                if (!chat.isDialog) messages.forEach { add(it.senderId) }
+                // Original authors of forwarded messages (relevant in any chat type).
+                messages.forEach { m -> m.forwardedFrom?.let { add(it) } }
+            }
+        val unknown =
+            ids.filter { it != 0L && it != myId && !s.contacts.containsKey(it) && !s.groupMembers.containsKey(it) }
+        if (unknown.isEmpty()) return
+        viewModelScope.launch {
+            val fetched = unknown.mapNotNull { id -> runCatching { client.fetchUser(id) }.getOrNull() }
+            if (fetched.isNotEmpty()) {
+                _state.update { st -> st.copy(groupMembers = st.groupMembers + fetched.associateBy { it.id }) }
+            }
+        }
+    }
+
+    /** Downloads a file attachment via the system DownloadManager. */
+    fun downloadFile(
+        message: Message,
+        file: FileAttach,
+    ) {
+        val msgId = message.id?.toLongOrNull() ?: return
+        launchBusyless {
+            val url =
+                client.getFileUrl(message.chatId, msgId, file.fileId)
+                    ?: error("Не удалось получить ссылку на файл")
+            downloadToDevice(url, file.name, "application/octet-stream")
+        }
+    }
 
     /** Begins replying to [msg] (shows a banner above the input). */
     fun startReply(msg: Message) = _state.update { it.copy(replyingTo = msg) }

@@ -85,6 +85,13 @@ data class ReplyInfo(
     val text: String,
 )
 
+/** A file attachment on a received message (downloadable via FILE_DOWNLOAD). */
+data class FileAttach(
+    val fileId: Long,
+    val name: String,
+    val size: Long,
+)
+
 /** A single message inside a chat. */
 data class Message(
     /** Server message id (string in the protocol). Null for messages we just sent locally. */
@@ -103,4 +110,8 @@ data class Message(
     val reactions: List<Reaction> = emptyList(),
     /** The quoted message, if this is a reply. */
     val replyTo: ReplyInfo? = null,
+    /** Downloadable file attachments on this message. */
+    val files: List<FileAttach> = emptyList(),
+    /** If this is a forwarded message, the original author's user id. */
+    val forwardedFrom: Long? = null,
 )

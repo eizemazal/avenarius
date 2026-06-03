@@ -105,8 +105,12 @@ fun App(viewModel: AppViewModel) {
                                     chat = state.currentChat,
                                     messages = state.messages,
                                     myId = state.account?.userId ?: -1L,
-                                    contacts = state.contacts,
-                                    senderAvatars = state.contactsList.associate { it.id to it.avatarUrl },
+                                    // Merge resolved non-contact group members so their
+                                    // name + avatar show instead of a "—" placeholder.
+                                    contacts = state.contacts + state.groupMembers.mapValues { it.value.name },
+                                    senderAvatars =
+                                        state.contactsList.associate { it.id to it.avatarUrl } +
+                                            state.groupMembers.mapValues { it.value.avatarUrl },
                                     unreadAtOpen = state.openUnreadCount,
                                     busy = state.busy,
                                     error = state.error,
@@ -123,6 +127,7 @@ fun App(viewModel: AppViewModel) {
                                     onOpenUser = viewModel::openUser,
                                     onReact = viewModel::toggleReaction,
                                     onReply = viewModel::startReply,
+                                    onDownloadFile = viewModel::downloadFile,
                                     onCancelReply = viewModel::cancelReply,
                                     onDeleteChat = viewModel::deleteCurrentChat,
                                     onLeaveGroup = viewModel::leaveCurrentGroup,
