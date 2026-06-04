@@ -57,7 +57,12 @@ class MainActivity : ComponentActivity() {
             // from the moment an auth session exists (CODE screen) through the chat
             // screens — NOT just after login. Otherwise backgrounding while waiting
             // for the SMS suspends the connection and the auth session is lost.
-            LaunchedEffect(state.screen) {
+            LaunchedEffect(state.screen, state.demoMode) {
+                // The offline demo session has no real connection to keep alive.
+                if (state.demoMode) {
+                    ConnectionService.stop(this@MainActivity)
+                    return@LaunchedEffect
+                }
                 when (state.screen) {
                     Screen.CODE, Screen.PASSWORD, Screen.REGISTER, Screen.CHATS, Screen.CHAT,
                     Screen.USER, Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE,

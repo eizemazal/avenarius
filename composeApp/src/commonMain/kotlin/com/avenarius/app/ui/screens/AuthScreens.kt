@@ -50,7 +50,7 @@ internal fun LoginScreen(
     CenteredForm {
         Text("Авенариус", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "Введите номер телефона, привязанный к Max",
+            "Введите номер телефона для входа или регистрации в Max",
             style = MaterialTheme.typography.bodyMedium,
         )
         OutlinedTextField(

@@ -16,6 +16,7 @@ import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.net.CodeResult
+import com.avenarius.app.net.DemoMaxApi
 import com.avenarius.app.net.MaxApi
 import com.avenarius.app.ui.theme.ThemeMode
 import com.avenarius.app.ui.theme.prefValue
@@ -97,6 +98,8 @@ data class AppState(
     val theme: ThemeMode = ThemeMode.SYSTEM,
     /** A message awaiting a chat pick to forward it (Screen.SHARE_PICK). */
     val forwarding: Message? = null,
+    /** True in the offline Google Play review "demo account" session. */
+    val demoMode: Boolean = false,
 )
 
 /**
@@ -107,8 +110,14 @@ class AppViewModel(
     private val prefs: Prefs,
     // The client is app-scoped (shared with the background service), so the
     // ViewModel must NOT create or tear it down — it's injected.
-    private val client: MaxApi,
+    realClient: MaxApi,
 ) : ViewModel() {
+    // Swappable: the demo login (Google Play review account) replaces this with an
+    // offline [DemoMaxApi] so it never touches the real servers. [originalClient] is
+    // the real one, restored on logout.
+    private val originalClient: MaxApi = realClient
+    private var client: MaxApi = realClient
+
     private val _state = MutableStateFlow(AppState(theme = themeModeOf(prefs.theme)))
     val state: StateFlow<AppState> = _state.asStateFlow()
 
@@ -161,6 +170,9 @@ class AppViewModel(
     }
 
     private var pendingPhone: String? = null
+
+    // Google Play review "demo account": this phone + code starts an offline session.
+    private var demoPending = false
 
     init {
         // Forward server-pushed messages into whichever chat is open AND keep the
@@ -408,6 +420,13 @@ class AppViewModel(
         run {
             // Server expects clean international format, e.g. +79991234567.
             val normalized = "+" + phone.filter { it.isDigit() }
+            // Demo account (Play review): skip the network entirely.
+            if (normalized == DEMO_PHONE) {
+                demoPending = true
+                _state.update { it.copy(screen = Screen.CODE, codeLength = DEMO_CODE.length, busy = false, error = null) }
+                return@run
+            }
+            demoPending = false
             pendingPhone = normalized
             launchBusy {
                 client.connect(prefs.deviceId, prefs.mtInstance)
@@ -416,7 +435,15 @@ class AppViewModel(
             }
         }
 
-    fun submitCode(code: String) =
+    fun submitCode(code: String) {
+        if (demoPending) {
+            if (code.trim() == DEMO_CODE) {
+                startDemo()
+            } else {
+                _state.update { it.copy(error = "Неверный код") }
+            }
+            return
+        }
         launchBusy {
             when (val result = client.checkCode(code)) {
                 is CodeResult.Success -> {
@@ -432,6 +459,30 @@ class AppViewModel(
                 }
             }
         }
+    }
+
+    /** Starts the offline demo session against [DemoMaxApi] (no network). */
+    private fun startDemo() {
+        demoPending = false
+        client = DemoMaxApi()
+        viewModelScope.launch {
+            val result = client.sync("demo")
+            _state.update {
+                it.copy(
+                    screen = Screen.CHATS,
+                    demoMode = true,
+                    account = result.account,
+                    chats = result.chats,
+                    contacts = result.contacts,
+                    contactsList = result.contactsList,
+                    onlineUsers = result.online,
+                    busy = false,
+                    error = null,
+                    reconnecting = false,
+                )
+            }
+        }
+    }
 
     fun submitRegister(firstName: String) =
         launchBusy {
@@ -965,8 +1016,10 @@ class AppViewModel(
     fun logout() {
         prefs.clear()
         client.disconnect()
+        client = originalClient // leave demo mode if we were in it
+        demoPending = false
         _state.update {
-            AppState(screen = Screen.LOGIN)
+            AppState(screen = Screen.LOGIN, theme = it.theme)
         }
     }
 
@@ -1025,4 +1078,10 @@ class AppViewModel(
 
     // NOTE: we intentionally do NOT disconnect in onCleared — the client is
     // app-scoped and kept alive by the background service. Only logout disconnects.
+
+    private companion object {
+        // Offline demo account for Google Play review (no real server access).
+        const val DEMO_PHONE = "+79990000000"
+        const val DEMO_CODE = "00000"
+    }
 }
