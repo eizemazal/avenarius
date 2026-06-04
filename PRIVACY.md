@@ -85,5 +85,5 @@ an updated date above.
 
 ## Contact
 
-Questions about this policy: **[ADD YOUR CONTACT EMAIL HERE]**
+Questions about this policy: **58160303+eizemazal@users.noreply.github.com**
 (or open an issue at <https://github.com/eizemazal/avenarius/issues>).
