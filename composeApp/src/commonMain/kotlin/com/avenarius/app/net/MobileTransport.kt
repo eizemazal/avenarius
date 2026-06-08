@@ -29,7 +29,7 @@ import kotlinx.serialization.json.put
  * Lives in commonMain — the only platform-specific dependency is [TlsSocket].
  */
 class MobileTransport(
-    private val host: String = "api.oneme.ru",
+    val host: String = "api.oneme.ru",
     private val port: Int = 443,
 ) {
     private companion object {
@@ -115,6 +115,23 @@ class MobileTransport(
             socket.write(encodeFrame(ver = 11, cmd = 0, seq = mySeq, opcode = opcode, payload = payload))
         }
         return withTimeout(timeoutMs) { deferred.await() }
+    }
+
+    /**
+     * Sends a one-way frame and does NOT wait for a reply. Used for fire-and-forget
+     * telemetry (e.g. the opcode-5 LOG event) that the server doesn't meaningfully
+     * answer: registering a pending waiter for it would only leak until timeout.
+     * If the server does echo a reply, the read loop routes it to [events] (unconsumed).
+     */
+    suspend fun notify(
+        opcode: Int,
+        payload: JsonObject,
+    ) {
+        if (!connected) return
+        writeLock.withLock {
+            seq = (seq + 1) and 0xff
+            socket.write(encodeFrame(ver = 11, cmd = 0, seq = seq, opcode = opcode, payload = payload))
+        }
     }
 
     private suspend fun readLoop(myGeneration: Int) {

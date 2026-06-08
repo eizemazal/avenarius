@@ -13,6 +13,7 @@ import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.ReplyInfo
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.ui.nowMillis
 import io.ktor.client.HttpClient
 import io.ktor.client.request.forms.formData
 import io.ktor.client.request.forms.submitFormWithBinaryData
@@ -201,6 +202,17 @@ interface MaxApi {
         mark: Long,
     )
 
+    /**
+     * Sends the `HOST_REACHABILITY` analytics event the official client emits when it
+     * comes to the foreground. The official app probes a set of hosts (DNS + TCP),
+     * the cellular operator, the connection type, the public IP and the VPN state and
+     * reports all of it. Avenarius answers the command — so the server sees the same
+     * signal real clients send and is less likely to flag us — but, being a privacy
+     * client, it does NOT actually probe anything and NEVER includes the public IP or
+     * VPN state (both are optional in the official payload). Fire-and-forget.
+     */
+    suspend fun reportHostReachability()
+
     /** Sets [emoji] as our reaction on a message, or removes our reaction when [emoji] is null. */
     suspend fun setReaction(
         chatId: Long,
@@ -273,6 +285,7 @@ class MaxClient : MaxApi {
 
         // Opcodes (verified against PyMax protocol enums and rumax).
         private const val OP_HANDSHAKE = 6
+        private const val OP_LOG = 5 // LOG: batched analytics events (ru.ok.tamtam.api.d.LOG)
         private const val OP_PROFILE = 16 // PROFILE: update own profile (name/bio/avatar)
         private const val OP_START_AUTH = 17
         private const val OP_CHECK_CODE = 18
@@ -748,6 +761,12 @@ class MaxClient : MaxApi {
 
         // The server returns a (possibly rolled) login token here — persist it.
         val refreshedToken = payload["token"]?.jsonPrimitive?.contentOrNullSafe()
+
+        // Answer the server's host-reachability expectation once the session is live.
+        // Sync runs on every (re)connect and pull-to-refresh, which is a good proxy
+        // for the "came to foreground" moment the official client uses. Fire-and-forget
+        // on our own scope so it never delays the sync result.
+        scope.launch { runCatching { reportHostReachability() } }
 
         return SyncResult(account, chats, names, contactsList, online, refreshedToken)
     }
@@ -1303,6 +1322,47 @@ class MaxClient : MaxApi {
                 put("mark", mark)
             },
         )
+    }
+
+    /**
+     * Emits a single `HOST_REACHABILITY` / `GET_HOST_REACHABILITY` analytics event,
+     * matching the official client's opcode-5 LOG wire format:
+     *   { events: [ { time, userId, type, event, params } ] }
+     * (mirrors `defpackage.dv.g()` + `defpackage.p9a` in the decompiled APK).
+     *
+     * The `params` deliberately carry only a plausible, fabricated reachability
+     * snapshot — we do NOT open any sockets, resolve DNS, read the cellular operator,
+     * fetch the public IP, or inspect the VPN state. The official app reports the API
+     * host plus gstatic.com, calls.okcdn.ru, gosuslugi.ru and mtalk.google.com with a
+     * per-host status (0=unreachable, 1=DNS-only, 2=timeout, 3=fully reachable). We
+     * report the hosts we'd genuinely expect to reach as 3, and mtalk.google.com as 1
+     * (DNS resolves but no socket) — honest for a client without Google push, and a
+     * less anomalous signal than claiming a Google connection we never make.
+     * `operator` is "undefined" (what the official app sends without telephony) and
+     * `ip`/`vpn` are omitted entirely (both optional in the official payload).
+     */
+    override suspend fun reportHostReachability() {
+        if (!transport.isConnected) return
+        val event =
+            buildJsonObject {
+                put("time", nowMillis())
+                put("userId", myId)
+                put("type", "HOST_REACHABILITY")
+                put("event", "GET_HOST_REACHABILITY")
+                putJsonObject("params") {
+                    putJsonObject("hosts") {
+                        put(transport.host, 3) // the API host we actually have a live TLS session to
+                        put("gstatic.com", 3)
+                        put("calls.okcdn.ru", 3)
+                        put("gosuslugi.ru", 3)
+                        put("mtalk.google.com", 1) // DNS-only: no Google push connection on this client
+                    }
+                    put("operator", "undefined")
+                    put("connection_type", 2) // WIFI; generic, leaks nothing real
+                }
+            }
+        val payload = buildJsonObject { putJsonArray("events") { add(event) } }
+        runCatching { transport.notify(OP_LOG, payload) }
     }
 }
 

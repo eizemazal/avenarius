@@ -160,6 +160,8 @@ class DemoMaxApi : MaxApi {
         mark: Long,
     ) = Unit
 
+    override suspend fun reportHostReachability() = Unit
+
     override suspend fun setReaction(
         chatId: Long,
         messageId: String,

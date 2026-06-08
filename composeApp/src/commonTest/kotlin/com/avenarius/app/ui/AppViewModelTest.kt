@@ -189,6 +189,8 @@ private class FakeMaxClient : MaxApi {
         markReadCalls += Triple(chatId, messageId, mark)
     }
 
+    override suspend fun reportHostReachability() = Unit
+
     override suspend fun setReaction(
         chatId: Long,
         messageId: String,
