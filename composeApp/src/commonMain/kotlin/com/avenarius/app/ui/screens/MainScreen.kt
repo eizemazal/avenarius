@@ -413,6 +413,23 @@ private fun SettingsTab(
     onOpenAbout: () -> Unit,
     onLogout: () -> Unit,
 ) {
+    var confirmLogout by remember { mutableStateOf(false) }
+    if (confirmLogout) {
+        AlertDialog(
+            onDismissRequest = { confirmLogout = false },
+            title = { Text("Выйти из аккаунта?") },
+            text = { Text("Вы выйдете из аккаунта на этом устройстве.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmLogout = false
+                    onLogout()
+                }) { Text("Выйти") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmLogout = false }) { Text("Отмена") }
+            },
+        )
+    }
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Row(
             Modifier.fillMaxWidth().clickableRow(onOpenProfile).padding(vertical = 8.dp),
@@ -429,7 +446,7 @@ private fun SettingsTab(
             }
         }
         Spacer(Modifier.height(8.dp))
-        TextButton(onClick = onLogout) { Text("Выйти из аккаунта") }
+        TextButton(onClick = { confirmLogout = true }) { Text("Выйти из аккаунта") }
         HorizontalDivider()
 
         // Settings block.

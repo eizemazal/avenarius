@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -993,9 +994,14 @@ private fun MediaThumbnail(
 @Composable
 internal fun MediaViewerOverlay(
     viewer: MediaViewer,
+    canForward: Boolean,
+    onDownload: () -> Unit,
+    onForward: () -> Unit,
+    onShare: () -> Unit,
     onClose: () -> Unit,
 ) {
     PlatformBackHandler(enabled = true, onBack = onClose)
+    var menuOpen by remember { mutableStateOf(false) }
     Box(
         Modifier.fillMaxSize().background(Color(0xF2000000)).clickable(onClick = onClose),
         contentAlignment = Alignment.Center,
@@ -1005,8 +1011,43 @@ internal fun MediaViewerOverlay(
             is MediaViewer.Image -> ZoomableImage(viewer.url)
             is MediaViewer.Video -> VideoPlayer(viewer.url, Modifier.fillMaxWidth().heightIn(max = 480.dp))
         }
-        IconButton(onClick = onClose, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)) {
-            Icon(AppIcons.Close, contentDescription = "Закрыть", tint = Color.White)
+        Row(Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 8.dp, end = 4.dp)) {
+            // The action menu needs a loaded URL (download/share/forward target).
+            if (viewer.url != null) {
+                Box {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(AppIcons.More, contentDescription = "Действия", tint = Color.White)
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Сохранить") },
+                            onClick = {
+                                menuOpen = false
+                                onDownload()
+                            },
+                        )
+                        if (canForward) {
+                            DropdownMenuItem(
+                                text = { Text("Переслать") },
+                                onClick = {
+                                    menuOpen = false
+                                    onForward()
+                                },
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Поделиться") },
+                            onClick = {
+                                menuOpen = false
+                                onShare()
+                            },
+                        )
+                    }
+                }
+            }
+            IconButton(onClick = onClose) {
+                Icon(AppIcons.Close, contentDescription = "Закрыть", tint = Color.White)
+            }
         }
     }
 }

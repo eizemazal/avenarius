@@ -168,7 +168,16 @@ fun App(viewModel: AppViewModel) {
                     }
                 }
                 // Full-screen image/video viewer, layered above everything.
-                state.mediaViewer?.let { MediaViewerOverlay(it, onClose = viewModel::closeMedia) }
+                state.mediaViewer?.let {
+                    MediaViewerOverlay(
+                        viewer = it,
+                        canForward = it.source != null,
+                        onDownload = viewModel::downloadCurrentMedia,
+                        onForward = viewModel::forwardCurrentMedia,
+                        onShare = viewModel::shareCurrentMedia,
+                        onClose = viewModel::closeMedia,
+                    )
+                }
             }
         }
     }

@@ -37,15 +37,31 @@ enum class Tab { CHATS, CONTACTS, SETTINGS }
 
 /** Full-screen media viewer overlay state. */
 sealed interface MediaViewer {
+    /** The downloadable/shareable URL of the currently shown media (null while loading). */
+    val url: String?
+        get() = null
+
+    /** The message this media came from, if any (enables "forward"); null for avatars. */
+    val source: Message?
+        get() = null
+
+    /** True for video (affects the suggested filename/mime on download/share). */
+    val isVideo: Boolean
+        get() = false
+
     data object Loading : MediaViewer
 
     data class Image(
-        val url: String,
+        override val url: String,
+        override val source: Message? = null,
     ) : MediaViewer
 
     data class Video(
-        val url: String,
-    ) : MediaViewer
+        override val url: String,
+        override val source: Message? = null,
+    ) : MediaViewer {
+        override val isVideo = true
+    }
 }
 
 data class AppState(
@@ -664,24 +680,54 @@ class AppViewModel(
         media: MediaAttach,
         messageId: String?,
     ) {
+        val source = messageId?.let { id -> _state.value.messages.firstOrNull { it.id == id } }
         when (media.type) {
-            MediaType.PHOTO -> _state.update { it.copy(mediaViewer = MediaViewer.Image(media.url)) }
+            MediaType.PHOTO -> _state.update { it.copy(mediaViewer = MediaViewer.Image(media.url, source)) }
             MediaType.VIDEO -> {
                 val chat = _state.value.currentChat
                 val mid = messageId?.toLongOrNull()
                 if (chat == null || mid == null || media.videoId == 0L) {
-                    _state.update { it.copy(mediaViewer = MediaViewer.Image(media.url)) } // fallback: thumbnail
+                    _state.update { it.copy(mediaViewer = MediaViewer.Image(media.url, source)) } // fallback: thumbnail
                     return
                 }
                 _state.update { it.copy(mediaViewer = MediaViewer.Loading) }
                 viewModelScope.launch {
                     val url = runCatching { client.getVideoUrl(chat.id, mid, media.videoId) }.getOrNull()
                     _state.update {
-                        it.copy(mediaViewer = if (url != null) MediaViewer.Video(url) else MediaViewer.Image(media.url))
+                        it.copy(
+                            mediaViewer =
+                                if (url != null) MediaViewer.Video(url, source) else MediaViewer.Image(media.url, source),
+                        )
                     }
                 }
             }
         }
+    }
+
+    /** Saves the media currently shown in the viewer to the device's Downloads. */
+    fun downloadCurrentMedia() {
+        val v = _state.value.mediaViewer ?: return
+        val url = v.url ?: return
+        downloadToDevice(url, suggestedMediaName(v), if (v.isVideo) "video/mp4" else "image/jpeg")
+    }
+
+    /** Shares the media currently shown in the viewer to other apps (Android share sheet). */
+    fun shareCurrentMedia() {
+        val v = _state.value.mediaViewer ?: return
+        val url = v.url ?: return
+        shareMediaToOtherApps(url, suggestedMediaName(v), if (v.isVideo) "video/mp4" else "image/jpeg")
+    }
+
+    /** Forwards the source message of the media currently shown to a chat (picker). */
+    fun forwardCurrentMedia() {
+        val source = _state.value.mediaViewer?.source ?: return
+        closeMedia()
+        startForward(source)
+    }
+
+    private fun suggestedMediaName(v: MediaViewer): String {
+        val ts = nowMillis()
+        return if (v.isVideo) "video_$ts.mp4" else "photo_$ts.jpg"
     }
 
     /** Opens an arbitrary image URL (e.g. a profile avatar) in the full-screen viewer. */
