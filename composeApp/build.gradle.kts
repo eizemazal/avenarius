@@ -98,6 +98,8 @@ android {
         // comes from the git tag, AVENARIUS_VERSION_CODE from the CI run number.
         versionCode = System.getenv("AVENARIUS_VERSION_CODE")?.toIntOrNull() ?: 1
         versionName = System.getenv("AVENARIUS_VERSION_NAME") ?: "1.0.0"
+        // Launcher label; the debug build overrides it to distinguish the dev copy.
+        manifestPlaceholders["appLabel"] = "@string/app_name"
     }
 
     // Signing: in CI we inject a keystore via env vars (see .github/workflows).
@@ -116,6 +118,15 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            // Distinct package id so the dev build installs ALONGSIDE the Play
+            // release (com.avenarius.app) instead of conflicting with it. Gives
+            // a separate icon, separate data, and avoids the signature-mismatch
+            // install failure. Label override (see AndroidManifest) tells them apart.
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+            manifestPlaceholders["appLabel"] = "Avenarius Dev"
+        }
         getByName("release") {
             // R8 code shrinking + obfuscation. Library consumer rules (Ktor, Coil,
             // kotlinx-serialization, coroutines) are applied automatically; our extra
