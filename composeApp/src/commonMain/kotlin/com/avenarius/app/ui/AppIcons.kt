@@ -18,6 +18,7 @@ import com.avenarius.app.resources.group
 import com.avenarius.app.resources.more_vert
 import com.avenarius.app.resources.play_arrow
 import com.avenarius.app.resources.reply
+import com.avenarius.app.resources.search
 import com.avenarius.app.resources.send
 import com.avenarius.app.resources.settings
 import org.jetbrains.compose.resources.painterResource
@@ -39,6 +40,7 @@ object AppIcons {
     val Edit: Painter @Composable get() = painterResource(Res.drawable.edit)
     val Play: Painter @Composable get() = painterResource(Res.drawable.play_arrow)
     val Attach: Painter @Composable get() = painterResource(Res.drawable.attach_file)
+    val Search: Painter @Composable get() = painterResource(Res.drawable.search)
 
     // Message context-menu actions.
     val Reply: Painter @Composable get() = painterResource(Res.drawable.reply)

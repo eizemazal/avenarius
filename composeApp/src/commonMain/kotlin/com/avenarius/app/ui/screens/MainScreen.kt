@@ -25,6 +25,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -33,6 +34,8 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -44,6 +47,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.Account
@@ -128,6 +134,10 @@ internal fun MainScreen(
     vm: AppViewModel,
 ) {
     var showNewChat by remember { mutableStateOf(false) }
+    // Telegram-style search: a top-bar icon expands an inline search field; the
+    // typed query filters the chat list (handled in ChatsTab).
+    var searchActive by remember { mutableStateOf(false) }
+    var chatQuery by remember { mutableStateOf("") }
     if (showNewChat) {
         NewChatDialog(
             searchResults = state.searchResults,
@@ -151,15 +161,55 @@ internal fun MainScreen(
     }
     Scaffold(
         topBar = {
-            TopAppBar(title = {
-                Text(
-                    when (state.tab) {
-                        Tab.CHATS -> "Чаты"
-                        Tab.CONTACTS -> "Контакты"
-                        Tab.SETTINGS -> "Настройки"
+            if (state.tab == Tab.CHATS && searchActive) {
+                val focusRequester = remember { FocusRequester() }
+                LaunchedEffect(Unit) { focusRequester.requestFocus() }
+                TopAppBar(
+                    navigationIcon = {
+                        IconButton(onClick = {
+                            searchActive = false
+                            chatQuery = ""
+                        }) {
+                            Icon(AppIcons.Back, contentDescription = "Закрыть поиск")
+                        }
+                    },
+                    title = {
+                        TextField(
+                            value = chatQuery,
+                            onValueChange = { chatQuery = it },
+                            singleLine = true,
+                            placeholder = { Text("Поиск") },
+                            colors =
+                                TextFieldDefaults.colors(
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent,
+                                    focusedIndicatorColor = Color.Transparent,
+                                    unfocusedIndicatorColor = Color.Transparent,
+                                ),
+                            modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                        )
                     },
                 )
-            })
+            } else {
+                TopAppBar(
+                    title = {
+                        Text(
+                            when (state.tab) {
+                                Tab.CHATS -> "Чаты"
+                                Tab.CONTACTS -> "Контакты"
+                                Tab.SETTINGS -> "Настройки"
+                            },
+                        )
+                    },
+                    actions = {
+                        if (state.tab == Tab.CHATS) {
+                            IconButton(onClick = { searchActive = true }) {
+                                Icon(AppIcons.Search, contentDescription = "Поиск")
+                            }
+                        }
+                    },
+                )
+            }
         },
         bottomBar = {
             NavigationBar {
@@ -198,7 +248,9 @@ internal fun MainScreen(
                         chats = state.chats,
                         myId = state.account?.userId ?: -1L,
                         contacts = state.contactsList,
+                        peers = state.groupMembers,
                         online = state.onlineUsers,
+                        query = if (searchActive) chatQuery else "",
                         isRefreshing = state.refreshing,
                         onRefresh = vm::refresh,
                         onOpenChat = vm::openChat,
@@ -225,12 +277,21 @@ private fun ChatsTab(
     chats: List<Chat>,
     myId: Long,
     contacts: List<UserInfo>,
+    peers: Map<Long, UserInfo>,
     online: Set<Long>,
+    query: String,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenChat: (Chat) -> Unit,
     onOpenUser: (Long) -> Unit,
 ) {
+    // Filter the already-loaded chat list by title (= the other party's name for
+    // dialogs); the search box that drives [query] lives in the top app bar.
+    val visibleChats =
+        remember(chats, query) {
+            val q = query.trim()
+            if (q.isBlank()) chats else chats.filter { it.title.contains(q, ignoreCase = true) }
+        }
     val listState = rememberLazyListState()
     // When a chat jumps to the top (new message, or a deleted dialog revived by an
     // incoming message), a keyed LazyColumn anchors to the previously-visible row,
@@ -243,18 +304,28 @@ private fun ChatsTab(
         }
     }
     PullToRefreshBox(isRefreshing = isRefreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
-        if (chats.isEmpty()) {
+        if (visibleChats.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Чатов пока нет (потяните вниз для обновления)", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (query.isBlank()) {
+                        "Чатов пока нет (потяните вниз для обновления)"
+                    } else {
+                        "Ничего не найдено"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
         } else {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                items(chats, key = { it.id }) { chat ->
+                items(visibleChats, key = { it.id }) { chat ->
                     val otherId = if (chat.isDialog) chat.id xor myId else null
-                    // Dialogs take their avatar from the contact; groups carry their own.
+                    // Dialogs take their avatar from the contact (or a resolved
+                    // non-contact peer); groups carry their own.
                     val avatarUrl =
                         if (chat.isDialog) {
-                            otherId?.let { id -> contacts.firstOrNull { it.id == id }?.avatarUrl }
+                            otherId?.let { id ->
+                                contacts.firstOrNull { it.id == id }?.avatarUrl ?: peers[id]?.avatarUrl
+                            }
                         } else {
                             chat.avatarUrl
                         }

@@ -329,6 +329,8 @@ class AppViewModel(
                         }
                     s.copy(chats = merged.sortedByDescending { it.lastEventTime })
                 }
+                // A pushed dialog from a non-contact still reads "Диалог <id>" — resolve it.
+                resolveDialogTitles()
             }
         }
         // Auto-reconnect transparently whenever the connection drops.
@@ -383,6 +385,7 @@ class AppViewModel(
                                 error = null,
                             )
                         }
+                        resolveDialogTitles()
                         _state.value.currentChat?.let { reloadOpenChat(it) } // catch up missed messages
                         return@launch
                     } catch (e: Throwable) {
@@ -522,6 +525,7 @@ class AppViewModel(
                 error = null,
             )
         }
+        resolveDialogTitles()
         // If a notification asked us to open a specific chat, do it now.
         val pending = pendingOpenChatId
         if (pending != null) {
@@ -811,6 +815,7 @@ class AppViewModel(
                         error = null,
                     )
                 }
+                resolveDialogTitles()
             } catch (e: Throwable) {
                 _state.update { it.copy(refreshing = false, error = e.message ?: "Ошибка обновления") }
             }
@@ -937,6 +942,40 @@ class AppViewModel(
             val fetched = unknown.mapNotNull { id -> runCatching { client.fetchUser(id) }.getOrNull() }
             if (fetched.isNotEmpty()) {
                 _state.update { st -> st.copy(groupMembers = st.groupMembers + fetched.associateBy { it.id }) }
+            }
+        }
+    }
+
+    /**
+     * Dialogs whose peer isn't in our contacts arrive titled "Диалог <id>" (the
+     * server sends no title and we have no contact name). Fetch each such peer's
+     * profile, patch the chat title with their real name, and cache the profile so
+     * the list avatar resolves too.
+     */
+    private fun resolveDialogTitles() {
+        val s = _state.value
+        val myId = s.account?.userId ?: return
+        val unresolved = s.chats.filter { it.isDialog && it.title.startsWith("Диалог ") }
+        if (unresolved.isEmpty()) return
+        viewModelScope.launch {
+            val fetched =
+                unresolved.mapNotNull { chat ->
+                    runCatching { client.fetchUser(chat.id xor myId) }.getOrNull()
+                }
+            if (fetched.isEmpty()) return@launch
+            val byId = fetched.associateBy { it.id }
+            _state.update { st ->
+                st.copy(
+                    chats =
+                        st.chats.map { c ->
+                            if (c.isDialog && c.title.startsWith("Диалог ")) {
+                                byId[c.id xor myId]?.let { c.copy(title = it.name) } ?: c
+                            } else {
+                                c
+                            }
+                        },
+                    groupMembers = st.groupMembers + byId,
+                )
             }
         }
     }

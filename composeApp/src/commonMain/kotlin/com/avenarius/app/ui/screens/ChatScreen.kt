@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -238,7 +240,13 @@ internal fun ChatScreen(
             )
         },
         bottomBar = {
-            Column(Modifier.fillMaxWidth()) {
+            // With enableEdgeToEdge + adjustResize (see AndroidManifest) the keyboard
+            // arrives purely as the `ime` inset (no legacy window resize, which once
+            // double-counted into a huge gap). On this device the `ime` inset is
+            // measured to the top of the nav bar, i.e. it EXCLUDES the nav-bar strip —
+            // so we sum the two paddings: ime + navigationBars = full keyboard height
+            // while typing, and just the nav bar when the keyboard is hidden (ime = 0).
+            Column(Modifier.fillMaxWidth().imePadding().navigationBarsPadding()) {
                 if (replyingTo != null) ReplyBanner(replyingTo, contacts, myId, onCancelReply)
                 if (pending.isNotEmpty()) {
                     StagedAttachments(pending, onRemove = { item -> pending = pending - item })
