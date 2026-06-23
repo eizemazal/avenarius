@@ -3,6 +3,7 @@
 
 Авенариус - альтернативный неофициальный мессенджер для MAX без функций слежки.
 
+Скачать через [Google Play](https://play.google.com/store/apps/details?id=com.avenarius.app&hl=ru)
 
 Скачать .apk - в разделе [Релизы](https://github.com/eizemazal/avenarius/releases).
 
