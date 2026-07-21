@@ -136,6 +136,10 @@ private class FakeMaxClient : MaxApi {
     var lastDeleteForAll: Boolean? = null
     val leftGroups = mutableListOf<Long>()
     val approvedQrLinks = mutableListOf<String>()
+    val addedMembers = mutableListOf<Pair<Long, List<Long>>>()
+    val removedMembers = mutableListOf<Pair<Long, Long>>()
+    val adminChanges = mutableListOf<Triple<Long, Long, Boolean>>()
+    val createdGroups = mutableListOf<Pair<String, List<Long>>>()
 
     override suspend fun sendMessage(
         chatId: Long,
@@ -215,6 +219,39 @@ private class FakeMaxClient : MaxApi {
 
     override suspend fun approveQrLogin(qrLink: String) {
         approvedQrLinks += qrLink
+    }
+
+    override suspend fun getChatMembers(chatId: Long): List<UserInfo> = emptyList()
+
+    override suspend fun addMembers(
+        chatId: Long,
+        userIds: List<Long>,
+    ) {
+        addedMembers += chatId to userIds
+    }
+
+    override suspend fun removeMember(
+        chatId: Long,
+        userId: Long,
+    ) {
+        removedMembers += chatId to userId
+    }
+
+    override suspend fun setAdmin(
+        chatId: Long,
+        userId: Long,
+        admin: Boolean,
+    ) {
+        adminChanges += Triple(chatId, userId, admin)
+    }
+
+    override suspend fun createGroup(
+        title: String,
+        memberIds: List<Long>,
+        photoToken: String?,
+    ): Long {
+        createdGroups += title to memberIds
+        return 999L
     }
 
     override suspend fun findByPhone(phone: String): FoundUser = FoundUser(1L, "Найден")

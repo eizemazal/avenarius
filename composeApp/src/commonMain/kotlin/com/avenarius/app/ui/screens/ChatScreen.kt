@@ -71,6 +71,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -84,6 +85,7 @@ import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
 import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
+import com.avenarius.app.model.ServiceEvent
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.MediaViewer
 import com.avenarius.app.ui.PlatformBackHandler
@@ -130,6 +132,7 @@ internal fun ChatScreen(
     onCancelReply: () -> Unit,
     onDeleteChat: () -> Unit,
     onLeaveGroup: () -> Unit,
+    onOpenGroup: () -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
     // Photos/videos/files staged for sending, with an optional caption (the draft).
@@ -209,14 +212,20 @@ internal fun ChatScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Avatar(
-                            chat?.title ?: "Чат",
-                            headingAvatar,
-                            36.dp,
-                            // 1:1 → open the contact's profile; group details come later.
-                            onClick = otherUserId?.let { id -> { onOpenUser(id) } },
-                        )
+                    // 1:1 → open the contact's profile; group/channel → open the group page.
+                    val onHeaderClick: (() -> Unit)? =
+                        when {
+                            !isDialog && chat != null -> onOpenGroup
+                            otherUserId != null -> {
+                                { onOpenUser(otherUserId) }
+                            }
+                            else -> null
+                        }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = if (onHeaderClick != null) Modifier.clickable(onClick = onHeaderClick) else Modifier,
+                    ) {
+                        Avatar(chat?.title ?: "Чат", headingAvatar, 36.dp)
                         Spacer(Modifier.width(10.dp))
                         Text(chat?.title ?: "Чат", maxLines = 1, style = MaterialTheme.typography.titleMedium)
                     }
@@ -248,6 +257,17 @@ internal fun ChatScreen(
             // so we sum the two paddings: ime + navigationBars = full keyboard height
             // while typing, and just the nav bar when the keyboard is hidden (ime = 0).
             Column(Modifier.fillMaxWidth().imePadding().navigationBarsPadding()) {
+                // Read-only chats (channels we don't run): no composer, just a note.
+                if (chat != null && !chat.canWrite) {
+                    Text(
+                        "У вас нет прав писать в этот чат",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp),
+                    )
+                    return@Column
+                }
                 if (replyingTo != null) ReplyBanner(replyingTo, contacts, myId, onCancelReply)
                 if (pending.isNotEmpty()) {
                     StagedAttachments(pending, onRemove = { item -> pending = pending - item })
@@ -409,6 +429,12 @@ internal fun ChatScreen(
             ) {
                 itemsIndexed(messages, key = { _, m -> m.id ?: m.cid ?: m.time }) { index, msg ->
                     if (index == firstUnread && firstUnread > 0) NewMessagesDivider()
+                    // Group service events ("X joined", "X added Y") render as a centered chip.
+                    val service = msg.service
+                    if (service != null) {
+                        ServiceMessageChip(serviceMessageText(service, contacts, myId))
+                        return@itemsIndexed
+                    }
                     val isMine = msg.senderId == myId
                     val prev = messages.getOrNull(index - 1)
                     // Show the avatar only on the first message of a run from one sender.
@@ -1071,6 +1097,47 @@ private fun ZoomableImage(url: String) {
                     }
                 },
     )
+}
+
+/** A centered, muted chip for a group service/system event. */
+@Composable
+private fun ServiceMessageChip(text: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier =
+                Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+        )
+    }
+}
+
+/** Builds a human-readable Russian label for a group service event. */
+private fun serviceMessageText(
+    service: ServiceEvent,
+    contacts: Map<Long, String>,
+    myId: Long,
+): String {
+    fun name(id: Long) = if (id == myId) "Вы" else contacts[id] ?: "Пользователь"
+    val actor = name(service.actorId)
+    val targets = service.userIds.joinToString(", ") { name(it) }
+    return when (service.event) {
+        "new" -> "$actor создал(а) группу"
+        "add" -> if (targets.isNotBlank()) "$actor добавил(а): $targets" else "$actor добавил(а) участника"
+        "remove" -> if (targets.isNotBlank()) "$actor исключил(а): $targets" else "$actor исключил(а) участника"
+        "join" -> "$actor присоединил(ся/ась) к группе"
+        "leave" -> "$actor покинул(а) группу"
+        "title" -> if (service.title != null) "$actor изменил(а) название на «${service.title}»" else "$actor изменил(а) название"
+        "icon" -> "$actor изменил(а) фото группы"
+        "pin" -> "$actor закрепил(а) сообщение"
+        "unpin" -> "$actor открепил(а) сообщение"
+        "call" -> "Звонок"
+        else -> "$actor обновил(а) чат"
+    }
 }
 
 @Composable

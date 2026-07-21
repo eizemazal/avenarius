@@ -30,7 +30,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT, USER, SHARE_PICK, ABOUT, EDIT_PROFILE }
+enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT, USER, SHARE_PICK, ABOUT, EDIT_PROFILE, GROUP }
 
 /** Bottom-navigation tabs on the main (CHATS) screen. */
 enum class Tab { CHATS, CONTACTS, SETTINGS }
@@ -97,6 +97,12 @@ data class AppState(
     val onlineUsers: Set<Long> = emptySet(),
     /** The user whose profile page is open (Screen.USER). */
     val viewingUser: UserInfo? = null,
+    /** The group whose info page is open (Screen.GROUP). */
+    val viewingGroup: Chat? = null,
+    /** Members of [viewingGroup], resolved with names/avatars. */
+    val groupMemberList: List<UserInfo> = emptyList(),
+    /** True while [groupMemberList] is loading. */
+    val groupMembersLoading: Boolean = false,
     /** Live results while searching by name in the new-chat dialog. */
     val searchResults: List<SearchResult> = emptyList(),
     val searching: Boolean = false,
@@ -621,6 +627,114 @@ class AppViewModel(
         }
     }
 
+    /** Opens the group info page for [chat] and loads its member list. */
+    fun openGroup(chat: Chat) {
+        _state.update {
+            it.copy(screen = Screen.GROUP, viewingGroup = chat, groupMemberList = emptyList(), groupMembersLoading = true)
+        }
+        viewModelScope.launch {
+            val members = runCatching { client.getChatMembers(chat.id) }.getOrDefault(emptyList())
+            // Owner + admins first, then the rest, each alphabetical.
+            val sorted =
+                members.sortedWith(
+                    compareByDescending<UserInfo> { it.id == chat.ownerId }
+                        .thenByDescending { it.id in chat.adminIds }
+                        .thenBy { it.name.lowercase() },
+                )
+            _state.update {
+                if (it.screen == Screen.GROUP && it.viewingGroup?.id == chat.id) {
+                    it.copy(groupMemberList = sorted, groupMembersLoading = false)
+                } else {
+                    it
+                }
+            }
+        }
+    }
+
+    fun closeGroup() {
+        _state.update {
+            it.copy(screen = if (it.currentChat != null) Screen.CHAT else Screen.CHATS, viewingGroup = null)
+        }
+    }
+
+    /** Adds [userIds] to the currently-open group, then refreshes the member list. */
+    fun addMembersToGroup(userIds: List<Long>) {
+        val group = _state.value.viewingGroup ?: return
+        if (userIds.isEmpty()) return
+        launchBusyless {
+            client.addMembers(group.id, userIds)
+            val members = runCatching { client.getChatMembers(group.id) }.getOrDefault(_state.value.groupMemberList)
+            val sorted =
+                members.sortedWith(
+                    compareByDescending<UserInfo> { it.id == group.ownerId }
+                        .thenByDescending { it.id in group.adminIds }
+                        .thenBy { it.name.lowercase() },
+                )
+            _state.update { it.copy(groupMemberList = sorted) }
+        }
+    }
+
+    /** Removes [userId] from the currently-open group. */
+    fun removeGroupMember(userId: Long) {
+        val group = _state.value.viewingGroup ?: return
+        launchBusyless {
+            client.removeMember(group.id, userId)
+            _state.update {
+                it.copy(
+                    groupMemberList = it.groupMemberList.filterNot { m -> m.id == userId },
+                    viewingGroup = it.viewingGroup?.let { g -> g.copy(memberIds = g.memberIds - userId) },
+                )
+            }
+        }
+    }
+
+    /** Grants ([admin] = true) or revokes admin rights for [userId] in the open group. */
+    fun setGroupAdmin(
+        userId: Long,
+        admin: Boolean,
+    ) {
+        val group = _state.value.viewingGroup ?: return
+        launchBusyless {
+            client.setAdmin(group.id, userId, admin)
+            // Reflect the role change immediately (the badge reads viewingGroup.adminIds).
+            _state.update {
+                val g = it.viewingGroup ?: return@update it
+                it.copy(viewingGroup = g.copy(adminIds = if (admin) g.adminIds + userId else g.adminIds - userId))
+            }
+        }
+    }
+
+    /**
+     * Creates a group with [name], [memberIds] and an optional [avatar], then opens it.
+     */
+    fun createGroup(
+        name: String,
+        memberIds: List<Long>,
+        avatar: PickedMedia?,
+    ) {
+        val title = name.trim()
+        if (title.isEmpty()) return
+        launchBusy {
+            val token = avatar?.let { client.uploadPhoto(it.bytes, it.fileName, it.mime).token }
+            val newId = client.createGroup(title, memberIds, token)
+            // Re-sync so the new group appears, then open it if we learned its id.
+            val syncToken = prefs.token
+            if (syncToken != null) {
+                runCatching {
+                    client.disconnect()
+                    client.connect(prefs.deviceId, prefs.mtInstance)
+                    val result = client.sync(syncToken)
+                    result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
+                    _state.update {
+                        it.copy(chats = result.chats, contacts = result.contacts, contactsList = result.contactsList)
+                    }
+                }
+            }
+            val chat = newId?.let { id -> _state.value.chats.firstOrNull { it.id == id } }
+            if (chat != null) openChat(chat) else _state.update { it.copy(screen = Screen.CHATS, busy = false) }
+        }
+    }
+
     /** Searches by name for the new-chat dialog: your contacts (instant) + public chats. */
     fun searchUsers(query: String) {
         val q = query.trim()
@@ -815,6 +929,7 @@ class AppViewModel(
         val s = _state.value
         when (s.screen) {
             Screen.USER -> closeUser()
+            Screen.GROUP -> closeGroup()
             Screen.CHAT -> backToChats()
             Screen.SHARE_PICK -> cancelShare()
             Screen.ABOUT -> _state.update { it.copy(screen = Screen.CHATS) }
@@ -832,7 +947,7 @@ class AppViewModel(
         tab: Tab,
     ): Boolean =
         when (screen) {
-            Screen.CHAT, Screen.USER, Screen.CODE, Screen.PASSWORD, Screen.REGISTER,
+            Screen.CHAT, Screen.USER, Screen.GROUP, Screen.CODE, Screen.PASSWORD, Screen.REGISTER,
             Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE,
             -> true
             Screen.CHATS -> tab != Tab.CHATS
@@ -982,6 +1097,13 @@ class AppViewModel(
                 if (!chat.isDialog) messages.forEach { add(it.senderId) }
                 // Original authors of forwarded messages (relevant in any chat type).
                 messages.forEach { m -> m.forwardedFrom?.let { add(it) } }
+                // Actors + affected members of group service events ("X added Y").
+                messages.forEach { m ->
+                    m.service?.let { s ->
+                        add(s.actorId)
+                        addAll(s.userIds)
+                    }
+                }
             }
         val unknown =
             ids.filter { it != 0L && it != myId && !s.contacts.containsKey(it) && !s.groupMembers.containsKey(it) }

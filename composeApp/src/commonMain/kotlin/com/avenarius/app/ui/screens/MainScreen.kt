@@ -18,8 +18,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -34,6 +36,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -56,6 +59,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.ui.AppIcons
@@ -66,69 +70,175 @@ import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.clickableRow
 import com.avenarius.app.ui.qrScanSupported
 import com.avenarius.app.ui.rememberQrScanLauncher
+import com.avenarius.app.ui.rememberSingleImagePickLauncher
 import com.avenarius.app.ui.theme.ThemeMode
+import androidx.compose.material3.Tab as MdTab
 
 @Composable
 private fun NewChatDialog(
     searchResults: List<SearchResult>,
     searching: Boolean,
+    contacts: List<UserInfo>,
+    myId: Long,
     onSearch: (String) -> Unit,
     onPickResult: (SearchResult) -> Unit,
     onPhone: (String) -> Unit,
+    onCreateGroup: (String, List<Long>, PickedMedia?) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    var tab by remember { mutableStateOf(0) } // 0 = new chat, 1 = new group
+    // --- New chat state ---
     var query by remember { mutableStateOf("") }
-    // A query that's basically a phone number is opened by number; otherwise we
-    // search users by name.
     val looksLikePhone = query.isNotBlank() && query.all { it.isDigit() || it == '+' || it == ' ' }
-
-    LaunchedEffect(query) {
-        if (!looksLikePhone && query.trim().length >= 2) onSearch(query) else onSearch("")
+    LaunchedEffect(query, tab) {
+        if (tab == 0 && !looksLikePhone && query.trim().length >= 2) onSearch(query) else onSearch("")
     }
+    // --- New group state ---
+    var groupName by remember { mutableStateOf("") }
+    var avatar by remember { mutableStateOf<PickedMedia?>(null) }
+    var selected by remember { mutableStateOf(setOf<Long>()) }
+    val pickAvatar = rememberSingleImagePickLauncher { avatar = it }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Новый чат") },
+        title = { Text(if (tab == 0) "Новый чат" else "Новая группа") },
         text = {
             Column {
-                Text("Имя пользователя или номер телефона", style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    singleLine = true,
-                    placeholder = { Text("Например: Алиса или +7…") },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                if (!looksLikePhone) {
-                    if (searching) {
-                        Box(Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(Modifier.size(20.dp))
-                        }
-                    }
-                    LazyColumn(Modifier.heightIn(max = 280.dp)) {
-                        items(searchResults, key = { it.chatId }) { result ->
-                            Row(
-                                Modifier.fillMaxWidth().clickableRow { onPickResult(result) }.padding(vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Avatar(result.title, result.avatarUrl, 36.dp)
-                                Spacer(Modifier.width(10.dp))
-                                Text(result.title, style = MaterialTheme.typography.bodyLarge)
-                            }
-                        }
-                    }
+                TabRow(selectedTabIndex = tab) {
+                    MdTab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Чат") })
+                    MdTab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Группа") })
+                }
+                Spacer(Modifier.height(12.dp))
+                if (tab == 0) {
+                    NewChatTab(query, searching, searchResults, looksLikePhone, { query = it }, onPickResult)
+                } else {
+                    NewGroupTab(
+                        groupName = groupName,
+                        onName = { groupName = it },
+                        avatarPicked = avatar != null,
+                        onPickAvatar = pickAvatar,
+                        contacts = contacts.filter { it.id != myId },
+                        selected = selected,
+                        onToggle = { id, on -> selected = if (on) selected + id else selected - id },
+                    )
                 }
             }
         },
         confirmButton = {
-            if (looksLikePhone) {
-                TextButton(onClick = { onPhone(query) }) { Text("Открыть по номеру") }
+            if (tab == 0) {
+                if (looksLikePhone) {
+                    TextButton(onClick = { onPhone(query) }) { Text("Открыть по номеру") }
+                }
+            } else {
+                TextButton(
+                    onClick = { onCreateGroup(groupName, selected.toList(), avatar) },
+                    enabled = groupName.isNotBlank() && selected.isNotEmpty(),
+                ) { Text("Создать") }
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
     )
+}
+
+@Composable
+private fun NewChatTab(
+    query: String,
+    searching: Boolean,
+    searchResults: List<SearchResult>,
+    looksLikePhone: Boolean,
+    onQuery: (String) -> Unit,
+    onPickResult: (SearchResult) -> Unit,
+) {
+    Column {
+        Text("Имя пользователя или номер телефона", style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQuery,
+            singleLine = true,
+            placeholder = { Text("Например: Алиса или +7…") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(8.dp))
+        if (!looksLikePhone) {
+            if (searching) {
+                Box(Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(Modifier.size(20.dp))
+                }
+            }
+            LazyColumn(Modifier.heightIn(max = 280.dp)) {
+                items(searchResults, key = { it.chatId }) { result ->
+                    Row(
+                        Modifier.fillMaxWidth().clickableRow { onPickResult(result) }.padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Avatar(result.title, result.avatarUrl, 36.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text(result.title, style = MaterialTheme.typography.bodyLarge)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NewGroupTab(
+    groupName: String,
+    onName: (String) -> Unit,
+    avatarPicked: Boolean,
+    onPickAvatar: () -> Unit,
+    contacts: List<UserInfo>,
+    selected: Set<Long>,
+    onToggle: (Long, Boolean) -> Unit,
+) {
+    var filter by remember { mutableStateOf("") }
+    val shown =
+        remember(contacts, filter) {
+            val q = filter.trim()
+            if (q.isBlank()) contacts else contacts.filter { it.name.contains(q, ignoreCase = true) }
+        }
+    Column {
+        OutlinedTextField(
+            value = groupName,
+            onValueChange = onName,
+            singleLine = true,
+            label = { Text("Название группы") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(8.dp))
+        TextButton(onClick = onPickAvatar) {
+            Text(if (avatarPicked) "Фото выбрано ✓" else "Добавить фото")
+        }
+        Spacer(Modifier.height(4.dp))
+        Text("Участники (${selected.size})", style = MaterialTheme.typography.bodyMedium)
+        OutlinedTextField(
+            value = filter,
+            onValueChange = { filter = it },
+            singleLine = true,
+            leadingIcon = { Icon(AppIcons.Search, contentDescription = null) },
+            placeholder = { Text("Поиск по имени") },
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        )
+        LazyColumn(Modifier.heightIn(max = 240.dp)) {
+            items(shown, key = { it.id }) { c ->
+                val checked = c.id in selected
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .toggleable(value = checked, onValueChange = { onToggle(c.id, it) })
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = checked, onCheckedChange = null)
+                    Spacer(Modifier.width(8.dp))
+                    Avatar(c.name, c.avatarUrl, 36.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text(c.name, style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -154,6 +264,8 @@ internal fun MainScreen(
         NewChatDialog(
             searchResults = state.searchResults,
             searching = state.searching,
+            contacts = state.contactsList,
+            myId = state.account?.userId ?: -1L,
             onSearch = vm::searchUsers,
             onPickResult = { r ->
                 showNewChat = false
@@ -164,6 +276,11 @@ internal fun MainScreen(
                 showNewChat = false
                 vm.clearSearch()
                 vm.startChatByPhone(phone)
+            },
+            onCreateGroup = { name, memberIds, avatar ->
+                showNewChat = false
+                vm.clearSearch()
+                vm.createGroup(name, memberIds, avatar)
             },
             onDismiss = {
                 showNewChat = false

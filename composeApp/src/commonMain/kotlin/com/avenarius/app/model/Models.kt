@@ -54,6 +54,22 @@ data class Chat(
      * chat's `participants` map. Our messages with time <= this are read (✓✓).
      */
     val otherReadMark: Long = 0,
+    /** True for a CHANNEL (broadcast) vs. a regular CHAT group. Dialogs are neither. */
+    val isChannel: Boolean = false,
+    /** Group/channel owner's user id (0 if unknown/not applicable). */
+    val ownerId: Long = 0,
+    /** User ids with admin rights (owner is implicitly an admin). */
+    val adminIds: Set<Long> = emptySet(),
+    /** Ids of all participants (from the chat's `participants` map). */
+    val memberIds: Set<Long> = emptySet(),
+    /** Total participant count (may exceed [memberIds] for large chats). */
+    val participantsCount: Int = 0,
+    /** Public join link (`https://…`), if the chat has one. */
+    val link: String? = null,
+    /** Whether the signed-in user may post here (false for channels we don't run). */
+    val canWrite: Boolean = true,
+    /** Whether the signed-in user may add members (admins-only in some groups/channels). */
+    val canAddMembers: Boolean = false,
 )
 
 /** Message delivery state for outgoing messages (server `status`). */
@@ -100,6 +116,18 @@ data class LinkPreview(
     val imageUrl: String?,
 )
 
+/**
+ * A group service/system event (a CONTROL attach): "created the group", "joined",
+ * "added X", "left", "changed the title", etc. [actorId] is who did it, [userIds]
+ * the affected members (for add/remove), [title] the new title (for a title change).
+ */
+data class ServiceEvent(
+    val event: String,
+    val actorId: Long,
+    val userIds: List<Long> = emptyList(),
+    val title: String? = null,
+)
+
 /** A single message inside a chat. */
 data class Message(
     /** Server message id (string in the protocol). Null for messages we just sent locally. */
@@ -124,4 +152,6 @@ data class Message(
     val forwardedFrom: Long? = null,
     /** Link/URL preview (from a SHARE attach), if any. */
     val linkPreview: LinkPreview? = null,
+    /** Set when this is a group service/system message (rendered as a centered chip). */
+    val service: ServiceEvent? = null,
 )

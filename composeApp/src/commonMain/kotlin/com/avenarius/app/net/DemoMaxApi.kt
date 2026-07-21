@@ -178,6 +178,30 @@ class DemoMaxApi : MaxApi {
 
     override suspend fun approveQrLogin(qrLink: String) = Unit
 
+    override suspend fun getChatMembers(chatId: Long): List<UserInfo> = contactsList
+
+    override suspend fun addMembers(
+        chatId: Long,
+        userIds: List<Long>,
+    ) = Unit
+
+    override suspend fun removeMember(
+        chatId: Long,
+        userId: Long,
+    ) = Unit
+
+    override suspend fun setAdmin(
+        chatId: Long,
+        userId: Long,
+        admin: Boolean,
+    ) = Unit
+
+    override suspend fun createGroup(
+        title: String,
+        memberIds: List<Long>,
+        photoToken: String?,
+    ): Long? = null
+
     override suspend fun findByPhone(phone: String): FoundUser = FoundUser(ALICE, "Алиса Демидова")
 
     override suspend fun addContact(

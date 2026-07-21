@@ -65,7 +65,7 @@ class MainActivity : ComponentActivity() {
                 }
                 when (state.screen) {
                     Screen.CODE, Screen.PASSWORD, Screen.REGISTER, Screen.CHATS, Screen.CHAT,
-                    Screen.USER, Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE,
+                    Screen.USER, Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE, Screen.GROUP,
                     -> ConnectionService.start(this@MainActivity)
                     Screen.LOGIN, Screen.LOADING -> ConnectionService.stop(this@MainActivity)
                 }

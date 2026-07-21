@@ -30,6 +30,7 @@ import com.avenarius.app.ui.screens.AboutScreen
 import com.avenarius.app.ui.screens.ChatScreen
 import com.avenarius.app.ui.screens.CodeScreen
 import com.avenarius.app.ui.screens.EditProfileScreen
+import com.avenarius.app.ui.screens.GroupScreen
 import com.avenarius.app.ui.screens.LoginScreen
 import com.avenarius.app.ui.screens.MainScreen
 import com.avenarius.app.ui.screens.MediaViewerOverlay
@@ -153,6 +154,20 @@ fun App(viewModel: AppViewModel) {
                                     onCancelReply = viewModel::cancelReply,
                                     onDeleteChat = viewModel::deleteCurrentChat,
                                     onLeaveGroup = viewModel::leaveCurrentGroup,
+                                    onOpenGroup = { state.currentChat?.let { viewModel.openGroup(it) } },
+                                )
+                            Screen.GROUP ->
+                                GroupScreen(
+                                    group = state.viewingGroup,
+                                    members = state.groupMemberList,
+                                    loading = state.groupMembersLoading,
+                                    myId = state.account?.userId ?: -1L,
+                                    contacts = state.contactsList,
+                                    onBack = viewModel::closeGroup,
+                                    onOpenUser = viewModel::openUser,
+                                    onAddMembers = viewModel::addMembersToGroup,
+                                    onRemoveMember = viewModel::removeGroupMember,
+                                    onSetAdmin = viewModel::setGroupAdmin,
                                 )
                             Screen.SHARE_PICK ->
                                 SharePickScreen(

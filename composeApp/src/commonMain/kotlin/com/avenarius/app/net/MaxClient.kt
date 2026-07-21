@@ -12,6 +12,7 @@ import com.avenarius.app.model.OutAttach
 import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.ReplyInfo
 import com.avenarius.app.model.SearchResult
+import com.avenarius.app.model.ServiceEvent
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.ui.nowMillis
 import io.ktor.client.HttpClient
@@ -33,6 +34,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
@@ -236,6 +238,38 @@ interface MaxApi {
     /** Approves a web/desktop login by the token scanned from its QR code. */
     suspend fun approveQrLogin(qrLink: String)
 
+    /** Returns the members of a group/channel chat (with names + avatars). */
+    suspend fun getChatMembers(chatId: Long): List<UserInfo>
+
+    /** Adds [userIds] to a group/channel chat as regular members. */
+    suspend fun addMembers(
+        chatId: Long,
+        userIds: List<Long>,
+    )
+
+    /** Removes [userId] from a group/channel chat. */
+    suspend fun removeMember(
+        chatId: Long,
+        userId: Long,
+    )
+
+    /** Grants or revokes admin rights for [userId] in a group/channel chat. */
+    suspend fun setAdmin(
+        chatId: Long,
+        userId: Long,
+        admin: Boolean,
+    )
+
+    /**
+     * Creates a new group with [title] and [memberIds] (optionally a [photoToken]
+     * from [uploadPhoto]). Returns the new chat's id if the server provided it.
+     */
+    suspend fun createGroup(
+        title: String,
+        memberIds: List<Long>,
+        photoToken: String?,
+    ): Long?
+
     suspend fun findByPhone(phone: String): FoundUser
 
     suspend fun addContact(
@@ -321,6 +355,8 @@ class MaxClient : MaxApi {
         private const val OP_CANCEL_REACTION = 179 // MSG_CANCEL_REACTION: remove our reaction
         private const val OP_DELETE_CHAT = 52 // CHAT_DELETE
         private const val OP_LEAVE_CHAT = 58 // CHAT_LEAVE
+        private const val OP_CHAT_MEMBERS = 59 // CHAT_MEMBERS: paginated member list
+        private const val OP_CHAT_MEMBERS_UPDATE = 77 // CHAT_MEMBERS_UPDATE: add/remove members
     }
 
     private val transport = MobileTransport()
@@ -464,6 +500,47 @@ class MaxClient : MaxApi {
                 }
                 else -> "Чат $id"
             }
+        val isChannel = type == "CHANNEL"
+        val ownerId = c["ownerId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
+        // adminParticipants = {adminUserId: adminInfo}; we only need the ids.
+        val adminIds =
+            c["adminParticipants"]
+                ?.jsonObject
+                ?.keys
+                ?.mapNotNull { it.toLongOrNull() }
+                ?.toSet() ?: emptySet()
+        val memberIds =
+            c["participants"]
+                ?.jsonObject
+                ?.keys
+                ?.mapNotNull { it.toLongOrNull() }
+                ?.toSet() ?: emptySet()
+        val participantsCount = c["participantsCount"]?.jsonPrimitive?.intOrNullSafe() ?: memberIds.size
+        val link = c["link"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null }
+        // `options` is a set of flag strings (e.g. ONLY_ADMIN_CAN_ADD_MEMBER); accept
+        // either an array or an object whose truthy keys are the flags.
+        val options =
+            when (val o = c["options"]) {
+                is JsonArray -> o.mapNotNull { it.jsonPrimitive.contentOrNullSafe() }.toSet()
+                is JsonObject -> o.keys
+                else -> emptySet()
+            }
+        val amAdmin = myId == ownerId || myId in adminIds
+        // In a CHANNEL only the owner/admins post; regular groups (CHAT) allow any
+        // member; dialogs are always writable.
+        val canWrite =
+            when {
+                isDialog -> true
+                isChannel -> amAdmin
+                else -> true
+            }
+        val canAddMembers =
+            when {
+                isDialog -> false
+                isChannel -> amAdmin
+                options.contains("ONLY_ADMIN_CAN_ADD_MEMBER") -> amAdmin
+                else -> true
+            }
         return Chat(
             id = id,
             title = title,
@@ -475,6 +552,14 @@ class MaxClient : MaxApi {
             // groups/channels carry their own avatar on the chat object.
             avatarUrl = if (isDialog) null else c.avatarUrl(),
             otherReadMark = otherReadMark,
+            isChannel = isChannel,
+            ownerId = ownerId,
+            adminIds = adminIds,
+            memberIds = memberIds,
+            participantsCount = participantsCount,
+            link = link,
+            canWrite = canWrite,
+            canAddMembers = canAddMembers,
         )
     }
 
@@ -1139,6 +1224,113 @@ class MaxClient : MaxApi {
         transport.request(OP_AUTH_QR_APPROVE, buildJsonObject { put("qrLink", qrLink) })
     }
 
+    override suspend fun getChatMembers(chatId: Long): List<UserInfo> {
+        // CHAT_MEMBERS (op 59): {chatId, count} -> {members:[{contact:{…}, presence, …}], marker}.
+        val payload =
+            transport.request(
+                OP_CHAT_MEMBERS,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("count", 200)
+                },
+            )
+        return payload["members"]
+            ?.jsonArray
+            .orEmptyList()
+            .mapNotNull { el ->
+                val member = el.jsonObject
+                // Each member wraps a `contact` object with the user's id/name/avatar.
+                (member["contact"]?.jsonObject ?: member)
+                    .let { parseUser(it) }
+            }
+    }
+
+    override suspend fun addMembers(
+        chatId: Long,
+        userIds: List<Long>,
+    ) = membersUpdate(chatId, operation = "add", type = "MEMBER", userIds = userIds, showHistory = true)
+
+    override suspend fun removeMember(
+        chatId: Long,
+        userId: Long,
+    ) = membersUpdate(chatId, operation = "remove", type = "MEMBER", userIds = listOf(userId))
+
+    override suspend fun setAdmin(
+        chatId: Long,
+        userId: Long,
+        admin: Boolean,
+    ) = membersUpdate(chatId, operation = if (admin) "add" else "remove", type = "ADMIN", userIds = listOf(userId))
+
+    /**
+     * CHAT_MEMBERS_UPDATE (op 77, official app: rd3). [operation] is "add"/"remove",
+     * [type] is "MEMBER"/"ADMIN". Promoting to admin omits an explicit permission
+     * bitmask, so the server assigns its default admin rights.
+     */
+    private suspend fun membersUpdate(
+        chatId: Long,
+        operation: String,
+        type: String,
+        userIds: List<Long>,
+        showHistory: Boolean = false,
+    ) {
+        transport.request(
+            OP_CHAT_MEMBERS_UPDATE,
+            buildJsonObject {
+                put("chatId", chatId)
+                put("operation", operation)
+                put("type", type)
+                putJsonArray("userIds") { userIds.forEach { add(it) } }
+                if (showHistory) put("showHistory", true)
+            },
+        )
+    }
+
+    override suspend fun createGroup(
+        title: String,
+        memberIds: List<Long>,
+        photoToken: String?,
+    ): Long? {
+        // A new group is a MSG_SEND (op 64) with chatId=0 and a CONTROL attach whose
+        // event is "new" (official app: vw4). The server creates the chat and echoes
+        // the first (service) message; we read the new chatId off it.
+        val payload =
+            transport.request(
+                OP_SEND_MESSAGE,
+                buildJsonObject {
+                    // NB: no chatId — the official client omits it entirely when creating
+                    // (qjc only writes chatId when non-zero). Sending chatId:0 is rejected.
+                    putJsonObject("message") {
+                        put("text", "")
+                        put("cid", nowMillis())
+                        put("elements", buildJsonArrayEmpty())
+                        putJsonArray("attaches") {
+                            addJsonObject {
+                                put("_type", "CONTROL")
+                                put("event", "new")
+                                put("chatType", "CHAT")
+                                put("title", title)
+                                putJsonArray("userIds") { memberIds.forEach { add(it) } }
+                                if (photoToken != null) put("photoToken", photoToken)
+                            }
+                        }
+                        put("link", kotlinx.serialization.json.JsonNull)
+                    }
+                    put("notify", true)
+                },
+            )
+        val msgObj = payload["message"] as? JsonObject
+        if (msgObj == null && (payload["error"] != null || payload["message"] != null)) {
+            error(payload.serverMessage("Не удалось создать группу"))
+        }
+        // The new chatId may arrive on the echoed message or a `chat` object.
+        return payload["chat"]
+            ?.jsonObject
+            ?.get("id")
+            ?.jsonPrimitive
+            ?.longOrNullSafe()
+            ?: msgObj?.get("chatId")?.jsonPrimitive?.longOrNullSafe()
+    }
+
     // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
@@ -1229,15 +1421,29 @@ class MaxClient : MaxApi {
                     else -> null
                 }
             }
-        // System/service messages carry their text in a CONTROL attach.
-        val controlText =
+        // System/service messages carry a CONTROL attach: an `event` (new/add/remove/
+        // join/leave/title/…), the `userId` who acted, affected `userIds`, and maybe
+        // a `title` or a ready-made `message`/`shortMessage` text.
+        val control =
             attaches.firstNotNullOfOrNull { el ->
                 val a = el.jsonObject
-                if (a["_type"]?.jsonPrimitive?.contentOrNullSafe() == "CONTROL") {
-                    (a["message"] ?: a["shortMessage"])?.jsonPrimitive?.contentOrNullSafe()
-                } else {
-                    null
-                }
+                if (a["_type"]?.jsonPrimitive?.contentOrNullSafe() == "CONTROL") a else null
+            }
+        val controlText = control?.let { (it["message"] ?: it["shortMessage"])?.jsonPrimitive?.contentOrNullSafe() }
+        val service =
+            control?.get("event")?.jsonPrimitive?.contentOrNullSafe()?.let { event ->
+                ServiceEvent(
+                    event = event,
+                    actorId =
+                        control["userId"]?.jsonPrimitive?.longOrNullSafe()
+                            ?: obj["sender"]?.jsonPrimitive?.longOrNullSafe() ?: 0L,
+                    userIds =
+                        control["userIds"]
+                            ?.jsonArray
+                            .orEmptyList()
+                            .mapNotNull { it.jsonPrimitive.longOrNullSafe() },
+                    title = control["title"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null },
+                )
             }
         val text =
             buildString {
@@ -1272,7 +1478,9 @@ class MaxClient : MaxApi {
                     )
                 }
         // Skip empty service messages with no text, no media and no id.
-        if (text.isEmpty() && media.isEmpty() && files.isEmpty() && linkPreview == null && id == null) return null
+        if (text.isEmpty() && media.isEmpty() && files.isEmpty() && linkPreview == null && service == null && id == null) {
+            return null
+        }
         return Message(
             id = id,
             cid = cid,
@@ -1287,6 +1495,7 @@ class MaxClient : MaxApi {
             files = files,
             forwardedFrom = forwardedFrom,
             linkPreview = linkPreview,
+            service = service,
         )
     }
 
