@@ -32,6 +32,8 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -62,6 +64,8 @@ import com.avenarius.app.ui.AppViewModel
 import com.avenarius.app.ui.Tab
 import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.clickableRow
+import com.avenarius.app.ui.qrScanSupported
+import com.avenarius.app.ui.rememberQrScanLauncher
 import com.avenarius.app.ui.theme.ThemeMode
 
 @Composable
@@ -138,6 +142,14 @@ internal fun MainScreen(
     // typed query filters the chat list (handled in ChatsTab).
     var searchActive by remember { mutableStateOf(false) }
     var chatQuery by remember { mutableStateOf("") }
+    // Transient feedback (e.g. QR web-login result).
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(state.notice) {
+        state.notice?.let {
+            snackbarHostState.showSnackbar(it)
+            vm.clearNotice()
+        }
+    }
     if (showNewChat) {
         NewChatDialog(
             searchResults = state.searchResults,
@@ -240,6 +252,7 @@ internal fun MainScreen(
                 }
             }
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (state.tab) {
@@ -261,7 +274,9 @@ internal fun MainScreen(
                     SettingsTab(
                         account = state.account,
                         theme = state.theme,
+                        demoMode = state.demoMode,
                         onSetTheme = vm::setTheme,
+                        onConfirmWebLogin = vm::confirmWebLogin,
                         onOpenProfile = { state.account?.let { vm.openUser(it.userId) } },
                         onOpenAbout = vm::openAbout,
                         onLogout = vm::logout,
@@ -408,12 +423,16 @@ private fun ContactsTab(
 private fun SettingsTab(
     account: Account?,
     theme: ThemeMode,
+    demoMode: Boolean,
     onSetTheme: (ThemeMode) -> Unit,
+    onConfirmWebLogin: (String) -> Unit,
     onOpenProfile: () -> Unit,
     onOpenAbout: () -> Unit,
     onLogout: () -> Unit,
 ) {
     var confirmLogout by remember { mutableStateOf(false) }
+    // QR scanner launcher for authorizing the web/desktop version.
+    val scanWebLogin = rememberQrScanLauncher(onConfirmWebLogin)
     if (confirmLogout) {
         AlertDialog(
             onDismissRequest = { confirmLogout = false },
@@ -448,6 +467,23 @@ private fun SettingsTab(
         Spacer(Modifier.height(8.dp))
         TextButton(onClick = { confirmLogout = true }) { Text("Выйти из аккаунта") }
         HorizontalDivider()
+
+        // Authorize the web/desktop version by scanning its login QR code.
+        if (qrScanSupported && !demoMode) {
+            Row(
+                Modifier.fillMaxWidth().clickableRow { scanWebLogin() }.padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(AppIcons.Search, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    "Войти в веб-версию по QR-коду",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            HorizontalDivider()
+        }
 
         // Settings block.
         Text("Тема оформления", style = MaterialTheme.typography.titleMedium)

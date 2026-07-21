@@ -233,6 +233,9 @@ interface MaxApi {
     /** Leaves/exits a group chat. */
     suspend fun leaveGroup(chatId: Long)
 
+    /** Approves a web/desktop login by the token scanned from its QR code. */
+    suspend fun approveQrLogin(qrLink: String)
+
     suspend fun findByPhone(phone: String): FoundUser
 
     suspend fun addContact(
@@ -304,6 +307,7 @@ class MaxClient : MaxApi {
         private const val OP_MARK_READ = 50
         private const val OP_SEND_MESSAGE = 64
         private const val OP_CHECK_PASSWORD = 115
+        private const val OP_AUTH_QR_APPROVE = 290 // AUTH_QR_APPROVE: confirm a web/desktop login QR
         const val OP_NEW_MESSAGE = 128
         const val OP_MARK_UPDATE = 130 // server push: read/delivery marks changed
         const val OP_PRESENCE = 132 // server push: a contact's online state changed
@@ -1127,6 +1131,12 @@ class MaxClient : MaxApi {
     override suspend fun leaveGroup(chatId: Long) {
         // CHAT_LEAVE payload is just {chatId}.
         transport.request(OP_LEAVE_CHAT, buildJsonObject { put("chatId", chatId) })
+    }
+
+    override suspend fun approveQrLogin(qrLink: String) {
+        // AUTH_QR_APPROVE (op 290): confirm a web/desktop login by the URL encoded in
+        // its QR code. Payload is just {qrLink: <scanned string>} (official app: bi0).
+        transport.request(OP_AUTH_QR_APPROVE, buildJsonObject { put("qrLink", qrLink) })
     }
 
     // ---------------------------------------------------------------------

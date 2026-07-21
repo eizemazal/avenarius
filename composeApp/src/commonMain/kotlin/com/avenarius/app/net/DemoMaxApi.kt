@@ -176,6 +176,8 @@ class DemoMaxApi : MaxApi {
 
     override suspend fun leaveGroup(chatId: Long) = Unit
 
+    override suspend fun approveQrLogin(qrLink: String) = Unit
+
     override suspend fun findByPhone(phone: String): FoundUser = FoundUser(ALICE, "Алиса Демидова")
 
     override suspend fun addContact(

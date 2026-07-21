@@ -116,6 +116,8 @@ data class AppState(
     val forwarding: Message? = null,
     /** True in the offline Google Play review "demo account" session. */
     val demoMode: Boolean = false,
+    /** Transient message shown as a snackbar (e.g. "web login confirmed"). */
+    val notice: String? = null,
 )
 
 /**
@@ -1097,6 +1099,30 @@ class AppViewModel(
             }
         }
     }
+
+    /**
+     * Confirms a web/desktop login from a scanned QR code ([qrLink] = the raw
+     * decoded string). Shows a snackbar with the outcome.
+     */
+    fun confirmWebLogin(qrLink: String) {
+        val link = qrLink.trim()
+        if (link.isEmpty()) return
+        viewModelScope.launch {
+            val result = runCatching { client.approveQrLogin(link) }
+            _state.update {
+                it.copy(
+                    notice =
+                        if (result.isSuccess) {
+                            "Вход в веб-версию подтверждён"
+                        } else {
+                            "Не удалось подтвердить вход: ${result.exceptionOrNull()?.message ?: "ошибка"}"
+                        },
+                )
+            }
+        }
+    }
+
+    fun clearNotice() = _state.update { it.copy(notice = null) }
 
     fun logout() {
         prefs.clear()

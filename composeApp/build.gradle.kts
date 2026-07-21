@@ -67,6 +67,11 @@ kotlin {
             implementation(libs.ktor.client.okhttp) // Ktor engine for Android
             implementation(libs.androidx.media3.exoplayer) // in-app video playback
             implementation(libs.androidx.media3.ui)
+            // QR scanning (web-login authorize)
+            implementation(libs.androidx.camera.camera2)
+            implementation(libs.androidx.camera.lifecycle)
+            implementation(libs.androidx.camera.view)
+            implementation(libs.mlkit.barcode.scanning)
         }
 
         desktopMain.dependencies {

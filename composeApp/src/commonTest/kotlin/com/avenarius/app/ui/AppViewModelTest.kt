@@ -135,6 +135,7 @@ private class FakeMaxClient : MaxApi {
     val deletedChats = mutableListOf<Long>()
     var lastDeleteForAll: Boolean? = null
     val leftGroups = mutableListOf<Long>()
+    val approvedQrLinks = mutableListOf<String>()
 
     override suspend fun sendMessage(
         chatId: Long,
@@ -210,6 +211,10 @@ private class FakeMaxClient : MaxApi {
 
     override suspend fun leaveGroup(chatId: Long) {
         leftGroups += chatId
+    }
+
+    override suspend fun approveQrLogin(qrLink: String) {
+        approvedQrLinks += qrLink
     }
 
     override suspend fun findByPhone(phone: String): FoundUser = FoundUser(1L, "Найден")
