@@ -1,11 +1,14 @@
 package com.avenarius.app.ui
 
+import android.Manifest
 import android.content.ContentResolver
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -14,6 +17,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
@@ -80,38 +84,59 @@ actual fun rememberFilePickLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit
 }
 
 @Composable
-actual fun rememberCameraPhotoLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit {
+actual fun rememberCameraPhotoLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit =
+    rememberCameraCapture(isVideo = false, onPicked = onPicked)
+
+/**
+ * Shared photo/video capture launcher. Because the app declares the CAMERA permission
+ * (for the QR scanner), the system's ACTION_IMAGE_CAPTURE / ACTION_VIDEO_CAPTURE now
+ * *require* that permission to be granted at runtime — otherwise they throw a
+ * SecurityException. So we request CAMERA first and only launch once it's granted.
+ */
+@Composable
+private fun rememberCameraCapture(
+    isVideo: Boolean,
+    onPicked: (PickedMedia) -> Unit,
+): () -> Unit {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var target by remember { mutableStateOf<Uri?>(null) }
-    val launcher =
-        rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-            val uri = target
-            if (success && uri != null) deliver(scope, context, uri, "image/jpeg", "camera.jpg", PickedKind.PHOTO, onPicked)
+    val onResult: (Boolean) -> Unit = { success ->
+        val uri = target
+        if (success && uri != null) {
+            if (isVideo) {
+                deliver(scope, context, uri, "video/mp4", "camera.mp4", PickedKind.VIDEO, onPicked)
+            } else {
+                deliver(scope, context, uri, "image/jpeg", "camera.jpg", PickedKind.PHOTO, onPicked)
+            }
+        }
+    }
+    val contract: ActivityResultContract<Uri, Boolean> =
+        if (isVideo) ActivityResultContracts.CaptureVideo() else ActivityResultContracts.TakePicture()
+    val capture = rememberLauncherForActivityResult(contract, onResult)
+    val doLaunch: () -> Unit = {
+        val uri = newMediaUri(context, if (isVideo) ".mp4" else ".jpg")
+        target = uri
+        capture.launch(uri)
+    }
+    val requestCamera =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) doLaunch()
         }
     return {
-        val uri = newMediaUri(context, ".jpg")
-        target = uri
-        launcher.launch(uri)
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            doLaunch()
+        } else {
+            requestCamera.launch(Manifest.permission.CAMERA)
+        }
     }
 }
 
 @Composable
-actual fun rememberCameraVideoLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var target by remember { mutableStateOf<Uri?>(null) }
-    val launcher =
-        rememberLauncherForActivityResult(ActivityResultContracts.CaptureVideo()) { success ->
-            val uri = target
-            if (success && uri != null) deliver(scope, context, uri, "video/mp4", "camera.mp4", PickedKind.VIDEO, onPicked)
-        }
-    return {
-        val uri = newMediaUri(context, ".mp4")
-        target = uri
-        launcher.launch(uri)
-    }
-}
+actual fun rememberCameraVideoLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit =
+    rememberCameraCapture(isVideo = true, onPicked = onPicked)
 
 /** Reads [uri]'s bytes off the main thread and hands back a [PickedMedia]. */
 private fun deliver(

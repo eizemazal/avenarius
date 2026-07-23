@@ -44,7 +44,17 @@ class ConnectionService : Service() {
         flags: Int,
         startId: Int,
     ): Int {
-        startForeground(ONGOING_ID, buildOngoingNotification())
+        // On Android 12+ starting a foreground service from the background is not
+        // allowed and throws ForegroundServiceStartNotAllowedException (a subclass of
+        // IllegalStateException). This can happen on a START_STICKY restart while the
+        // app is backgrounded — bail out gracefully instead of crashing; MainActivity
+        // will start us again next time it's in the foreground.
+        try {
+            startForeground(ONGOING_ID, buildOngoingNotification())
+        } catch (e: IllegalStateException) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (collectorJob == null) {
             collectorJob =
                 scope.launch {
@@ -53,6 +63,24 @@ class ConnectionService : Service() {
         }
         // If killed, restart so the connection comes back.
         return START_STICKY
+    }
+
+    // Android 14+/15 impose a daily time limit on `dataSync` foreground services.
+    // When it's reached the system calls onTimeout and we MUST stop promptly, else it
+    // throws ForegroundServiceDidNotStopInTimeException. The connection is simply
+    // re-established the next time the app is foregrounded.
+    override fun onTimeout(startId: Int) = stopCleanly()
+
+    override fun onTimeout(
+        startId: Int,
+        fgsType: Int,
+    ) = stopCleanly()
+
+    private fun stopCleanly() {
+        collectorJob?.cancel()
+        collectorJob = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private suspend fun onIncoming(msg: Message) {
