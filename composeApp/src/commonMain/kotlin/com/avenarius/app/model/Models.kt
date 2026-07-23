@@ -22,6 +22,16 @@ data class SearchResult(
     val title: String,
     val avatarUrl: String?,
     val isDialog: Boolean,
+    /** Set for an address-book entry with no known chat yet — opened by phone lookup. */
+    val phone: String? = null,
+    /** A short label shown under the title (e.g. the phone number for book entries). */
+    val subtitle: String? = null,
+)
+
+/** A phone contact read from the device address book. */
+data class DeviceContact(
+    val name: String,
+    val phone: String,
 )
 
 /** A user/contact, used for the contacts list, search results and the profile page. */
@@ -126,6 +136,8 @@ data class ServiceEvent(
     val actorId: Long,
     val userIds: List<Long> = emptyList(),
     val title: String? = null,
+    /** Server-rendered text (CONTROL `message`/`shortMessage`), used when we don't format the event ourselves. */
+    val message: String? = null,
 )
 
 /** A single message inside a chat. */

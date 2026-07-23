@@ -59,6 +59,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.DeviceContact
 import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
@@ -69,6 +70,7 @@ import com.avenarius.app.ui.Tab
 import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.clickableRow
 import com.avenarius.app.ui.qrScanSupported
+import com.avenarius.app.ui.rememberDeviceContacts
 import com.avenarius.app.ui.rememberQrScanLauncher
 import com.avenarius.app.ui.rememberSingleImagePickLauncher
 import com.avenarius.app.ui.theme.ThemeMode
@@ -83,9 +85,14 @@ private fun NewChatDialog(
     onSearch: (String) -> Unit,
     onPickResult: (SearchResult) -> Unit,
     onPhone: (String) -> Unit,
-    onCreateGroup: (String, List<Long>, PickedMedia?) -> Unit,
+    onCreateGroup: (name: String, memberIds: List<Long>, phones: List<String>, avatar: PickedMedia?) -> Unit,
+    onLoadDeviceContacts: (List<DeviceContact>) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // Load the device address book (requests READ_CONTACTS) and feed it to the VM
+    // so it can rank book contacts into the search results.
+    val deviceContacts = rememberDeviceContacts()
+    LaunchedEffect(deviceContacts) { onLoadDeviceContacts(deviceContacts) }
     var tab by remember { mutableStateOf(0) } // 0 = new chat, 1 = new group
     // --- New chat state ---
     var query by remember { mutableStateOf("") }
@@ -97,6 +104,7 @@ private fun NewChatDialog(
     var groupName by remember { mutableStateOf("") }
     var avatar by remember { mutableStateOf<PickedMedia?>(null) }
     var selected by remember { mutableStateOf(setOf<Long>()) }
+    var selectedPhones by remember { mutableStateOf(setOf<String>()) }
     val pickAvatar = rememberSingleImagePickLauncher { avatar = it }
 
     AlertDialog(
@@ -118,8 +126,11 @@ private fun NewChatDialog(
                         avatarPicked = avatar != null,
                         onPickAvatar = pickAvatar,
                         contacts = contacts.filter { it.id != myId },
-                        selected = selected,
-                        onToggle = { id, on -> selected = if (on) selected + id else selected - id },
+                        deviceContacts = deviceContacts,
+                        selectedIds = selected,
+                        selectedPhones = selectedPhones,
+                        onToggleId = { id, on -> selected = if (on) selected + id else selected - id },
+                        onTogglePhone = { p, on -> selectedPhones = if (on) selectedPhones + p else selectedPhones - p },
                     )
                 }
             }
@@ -131,8 +142,8 @@ private fun NewChatDialog(
                 }
             } else {
                 TextButton(
-                    onClick = { onCreateGroup(groupName, selected.toList(), avatar) },
-                    enabled = groupName.isNotBlank() && selected.isNotEmpty(),
+                    onClick = { onCreateGroup(groupName, selected.toList(), selectedPhones.toList(), avatar) },
+                    enabled = groupName.isNotBlank() && (selected.isNotEmpty() || selectedPhones.isNotEmpty()),
                 ) { Text("Создать") }
             }
         },
@@ -174,7 +185,16 @@ private fun NewChatTab(
                     ) {
                         Avatar(result.title, result.avatarUrl, 36.dp)
                         Spacer(Modifier.width(10.dp))
-                        Text(result.title, style = MaterialTheme.typography.bodyLarge)
+                        Column {
+                            Text(result.title, style = MaterialTheme.typography.bodyLarge)
+                            result.subtitle?.let {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -189,15 +209,19 @@ private fun NewGroupTab(
     avatarPicked: Boolean,
     onPickAvatar: () -> Unit,
     contacts: List<UserInfo>,
-    selected: Set<Long>,
-    onToggle: (Long, Boolean) -> Unit,
+    deviceContacts: List<DeviceContact>,
+    selectedIds: Set<Long>,
+    selectedPhones: Set<String>,
+    onToggleId: (Long, Boolean) -> Unit,
+    onTogglePhone: (String, Boolean) -> Unit,
 ) {
     var filter by remember { mutableStateOf("") }
-    val shown =
-        remember(contacts, filter) {
-            val q = filter.trim()
-            if (q.isBlank()) contacts else contacts.filter { it.name.contains(q, ignoreCase = true) }
-        }
+    val serverNames = remember(contacts) { contacts.map { it.name.lowercase() }.toSet() }
+    val book =
+        remember(deviceContacts, serverNames) { deviceContacts.filter { it.name.lowercase() !in serverNames }.distinctBy { it.phone } }
+    val q = filter.trim()
+    val shownServer = contacts.filter { q.isBlank() || it.name.contains(q, ignoreCase = true) }
+    val shownBook = book.filter { q.isBlank() || it.name.contains(q, ignoreCase = true) }
     Column {
         OutlinedTextField(
             value = groupName,
@@ -211,7 +235,7 @@ private fun NewGroupTab(
             Text(if (avatarPicked) "Фото выбрано ✓" else "Добавить фото")
         }
         Spacer(Modifier.height(4.dp))
-        Text("Участники (${selected.size})", style = MaterialTheme.typography.bodyMedium)
+        Text("Участники (${selectedIds.size + selectedPhones.size})", style = MaterialTheme.typography.bodyMedium)
         OutlinedTextField(
             value = filter,
             onValueChange = { filter = it },
@@ -221,21 +245,37 @@ private fun NewGroupTab(
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         )
         LazyColumn(Modifier.heightIn(max = 240.dp)) {
-            items(shown, key = { it.id }) { c ->
-                val checked = c.id in selected
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .toggleable(value = checked, onValueChange = { onToggle(c.id, it) })
-                        .padding(vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Checkbox(checked = checked, onCheckedChange = null)
-                    Spacer(Modifier.width(8.dp))
-                    Avatar(c.name, c.avatarUrl, 36.dp)
-                    Spacer(Modifier.width(10.dp))
-                    Text(c.name, style = MaterialTheme.typography.bodyLarge)
-                }
+            items(shownServer, key = { "u${it.id}" }) { c ->
+                PickPersonRow(c.name, c.avatarUrl, null, c.id in selectedIds) { on -> onToggleId(c.id, on) }
+            }
+            items(shownBook, key = { "p${it.phone}" }) { c ->
+                PickPersonRow(c.name, null, c.phone, c.phone in selectedPhones) { on -> onTogglePhone(c.phone, on) }
+            }
+        }
+    }
+}
+
+/** A checkable person row (server contact or address-book entry with a phone subtitle). */
+@Composable
+private fun PickPersonRow(
+    name: String,
+    avatarUrl: String?,
+    subtitle: String?,
+    checked: Boolean,
+    onToggle: (Boolean) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().toggleable(value = checked, onValueChange = onToggle).padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = null)
+        Spacer(Modifier.width(8.dp))
+        Avatar(name, avatarUrl, 36.dp)
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text(name, style = MaterialTheme.typography.bodyLarge)
+            subtitle?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -270,17 +310,20 @@ internal fun MainScreen(
             onPickResult = { r ->
                 showNewChat = false
                 vm.clearSearch()
-                vm.openSearchResult(r)
+                // Address-book entries have no chat yet — open by phone lookup.
+                val phone = r.phone
+                if (phone != null) vm.startChatByPhone(phone) else vm.openSearchResult(r)
             },
+            onLoadDeviceContacts = vm::setDeviceContacts,
             onPhone = { phone ->
                 showNewChat = false
                 vm.clearSearch()
                 vm.startChatByPhone(phone)
             },
-            onCreateGroup = { name, memberIds, avatar ->
+            onCreateGroup = { name, memberIds, phones, avatar ->
                 showNewChat = false
                 vm.clearSearch()
-                vm.createGroup(name, memberIds, avatar)
+                vm.createGroup(name, memberIds, phones, avatar)
             },
             onDismiss = {
                 showNewChat = false

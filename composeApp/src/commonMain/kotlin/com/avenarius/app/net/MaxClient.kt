@@ -49,6 +49,12 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
+/** A server push that [messageIds] were deleted in [chatId] (NOTIF_MSG_DELETE). */
+data class MessageDeletion(
+    val chatId: Long,
+    val messageIds: List<String>,
+)
+
 /** A read-mark update: [userId] has read everything up to [mark] (ms) in [chatId]. */
 data class ReadMark(
     val chatId: Long,
@@ -120,6 +126,9 @@ interface MaxApi {
 
     /** A chat that was created or updated (NOTIF_CHAT) — upsert it into the list. */
     val chatUpdates: SharedFlow<Chat>
+
+    /** Messages the other party deleted (NOTIF_MSG_DELETE) — drop them from the chat. */
+    val deletions: SharedFlow<MessageDeletion>
     val drops: SharedFlow<Unit>
     val isConnected: Boolean
 
@@ -175,6 +184,20 @@ interface MaxApi {
         fromChatId: Long,
         cid: Long,
     ): Message?
+
+    /** Edits our own message [messageId] in [chatId], replacing its text. */
+    suspend fun editMessage(
+        chatId: Long,
+        messageId: String,
+        text: String,
+    )
+
+    /** Deletes [messageIds] in [chatId]. [forAll] = delete for everyone (only our own). */
+    suspend fun deleteMessages(
+        chatId: Long,
+        messageIds: List<String>,
+        forAll: Boolean,
+    )
 
     /** Updates the signed-in user's profile (name, bio, and optionally a new avatar). */
     suspend fun updateProfile(
@@ -347,6 +370,7 @@ class MaxClient : MaxApi {
         const val OP_PRESENCE = 132 // server push: a contact's online state changed
         const val OP_REACTION_UPDATE = 155 // NOTIF_MSG_REACTIONS_CHANGED push
         const val OP_NOTIF_CHAT = 135 // NOTIF_CHAT push: a chat was created/updated (e.g. added to a group)
+        const val OP_NOTIF_MSG_DELETE = 142 // NOTIF_MSG_DELETE push: the other party deleted a message
         const val OP_NOTIF_ATTACH = 136 // NOTIF_ATTACH push: an uploaded video/file finished processing
 
         // Confirmed from the official client's opcode enum (ru.ok.tamtam.api.d,
@@ -357,6 +381,8 @@ class MaxClient : MaxApi {
         private const val OP_LEAVE_CHAT = 58 // CHAT_LEAVE
         private const val OP_CHAT_MEMBERS = 59 // CHAT_MEMBERS: paginated member list
         private const val OP_CHAT_MEMBERS_UPDATE = 77 // CHAT_MEMBERS_UPDATE: add/remove members
+        private const val OP_MSG_DELETE = 66 // MSG_DELETE
+        private const val OP_MSG_EDIT = 67 // MSG_EDIT
     }
 
     private val transport = MobileTransport()
@@ -396,6 +422,10 @@ class MaxClient : MaxApi {
     /** Stream of created/updated chats (server push, opcode 135). */
     private val _chatUpdates = MutableSharedFlow<Chat>(extraBufferCapacity = 64)
     override val chatUpdates: SharedFlow<Chat> = _chatUpdates
+
+    /** Stream of message deletions by the other party (server push, opcode 142). */
+    private val _deletions = MutableSharedFlow<MessageDeletion>(extraBufferCapacity = 64)
+    override val deletions: SharedFlow<MessageDeletion> = _deletions
 
     override val isConnected: Boolean get() = transport.isConnected
 
@@ -440,6 +470,24 @@ class MaxClient : MaxApi {
                         // {videoId} or {fileId} — an uploaded media finished processing.
                         payload["videoId"]?.jsonPrimitive?.longOrNullSafe()?.let { videoReadyFlow.emit(it) }
                         payload["fileId"]?.jsonPrimitive?.longOrNullSafe()?.let { fileReadyFlow.emit(it) }
+                    }
+                    OP_NOTIF_MSG_DELETE -> {
+                        // The chat id is nested under `chat` (no top-level chatId); messageIds is top-level.
+                        val chatId =
+                            payload["chatId"]?.jsonPrimitive?.longOrNullSafe()
+                                ?: payload["chat"]
+                                    ?.jsonObject
+                                    ?.get("id")
+                                    ?.jsonPrimitive
+                                    ?.longOrNullSafe()
+                        val ids =
+                            buildList {
+                                payload["messageIds"]
+                                    ?.jsonArray
+                                    ?.forEach { it.jsonPrimitive.longOrNullSafe()?.let { id -> add(id.toString()) } }
+                                payload["messageId"]?.jsonPrimitive?.longOrNullSafe()?.let { add(it.toString()) }
+                            }
+                        if (chatId != null && ids.isNotEmpty()) _deletions.emit(MessageDeletion(chatId, ids))
                     }
                 }
             }
@@ -1033,6 +1081,46 @@ class MaxClient : MaxApi {
         return parseMessage(msgObj, toChatId)
     }
 
+    override suspend fun editMessage(
+        chatId: Long,
+        messageId: String,
+        text: String,
+    ) {
+        // MSG_EDIT (op 67): {chatId, messageId (numeric), text} (official app: aic).
+        val mid = messageId.toLongOrNull() ?: return
+        val payload =
+            transport.request(
+                OP_MSG_EDIT,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("messageId", mid)
+                    put("text", text)
+                },
+            )
+        if ((payload["message"] as? JsonObject) == null && payload["error"] != null) {
+            error(payload.serverMessage("Не удалось изменить сообщение"))
+        }
+    }
+
+    override suspend fun deleteMessages(
+        chatId: Long,
+        messageIds: List<String>,
+        forAll: Boolean,
+    ) {
+        // MSG_DELETE (op 66): {chatId, messageIds:[numeric], forMe, itemType} (official app: rhc).
+        val ids = messageIds.mapNotNull { it.toLongOrNull() }
+        if (ids.isEmpty()) return
+        transport.request(
+            OP_MSG_DELETE,
+            buildJsonObject {
+                put("chatId", chatId)
+                putJsonArray("messageIds") { ids.forEach { add(it) } }
+                put("forMe", !forAll)
+                put("itemType", "REGULAR")
+            },
+        )
+    }
+
     override suspend fun uploadPhoto(
         bytes: ByteArray,
         fileName: String,
@@ -1443,6 +1531,7 @@ class MaxClient : MaxApi {
                             .orEmptyList()
                             .mapNotNull { it.jsonPrimitive.longOrNullSafe() },
                     title = control["title"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null },
+                    message = controlText?.ifBlank { null },
                 )
             }
         val text =

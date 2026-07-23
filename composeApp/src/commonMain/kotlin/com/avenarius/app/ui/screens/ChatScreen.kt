@@ -33,6 +33,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -68,9 +69,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -128,6 +131,8 @@ internal fun ChatScreen(
     onReact: (Message, String) -> Unit,
     onReply: (Message) -> Unit,
     onForward: (Message) -> Unit,
+    onEditMessage: (Message, String) -> Unit,
+    onDeleteMessage: (Message, Boolean) -> Unit,
     onDownloadFile: (Message, FileAttach) -> Unit,
     onCancelReply: () -> Unit,
     onDeleteChat: () -> Unit,
@@ -135,6 +140,10 @@ internal fun ChatScreen(
     onOpenGroup: () -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
+    // The message currently being edited (input shows its text + an "editing" banner).
+    var editing by remember(chat?.id) { mutableStateOf<Message?>(null) }
+    // The message pending a delete confirmation.
+    var deleteTarget by remember(chat?.id) { mutableStateOf<Message?>(null) }
     // Photos/videos/files staged for sending, with an optional caption (the draft).
     var pending by remember(chat?.id) { mutableStateOf<List<PickedMedia>>(emptyList()) }
     val pickFromGallery = rememberPhotoPickLauncher { pending = pending + it }
@@ -268,7 +277,14 @@ internal fun ChatScreen(
                     )
                     return@Column
                 }
-                if (replyingTo != null) ReplyBanner(replyingTo, contacts, myId, onCancelReply)
+                if (editing != null) {
+                    EditBanner(editing!!.text) {
+                        editing = null
+                        draft = ""
+                    }
+                } else if (replyingTo != null) {
+                    ReplyBanner(replyingTo, contacts, myId, onCancelReply)
+                }
                 if (pending.isNotEmpty()) {
                     StagedAttachments(pending, onRemove = { item -> pending = pending - item })
                 }
@@ -338,6 +354,8 @@ internal fun ChatScreen(
                                     color = MaterialTheme.colorScheme.onSurface,
                                 ),
                             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            // Auto-capitalize sentences, like other messengers.
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                             maxLines = 5,
                             decorationBox = { inner ->
                                 if (draft.isEmpty()) {
@@ -363,11 +381,17 @@ internal fun ChatScreen(
                                 ).then(
                                     if (canSend) {
                                         Modifier.clickable {
-                                            if (pending.isNotEmpty()) {
-                                                onSendMedia(pending, draft)
-                                                pending = emptyList()
-                                            } else {
-                                                onSend(draft)
+                                            val target = editing
+                                            when {
+                                                target != null -> {
+                                                    onEditMessage(target, draft)
+                                                    editing = null
+                                                }
+                                                pending.isNotEmpty() -> {
+                                                    onSendMedia(pending, draft)
+                                                    pending = emptyList()
+                                                }
+                                                else -> onSend(draft)
                                             }
                                             draft = ""
                                         }
@@ -467,6 +491,9 @@ internal fun ChatScreen(
     menuTarget?.let { target ->
         MessageContextMenu(
             message = target,
+            // Editing is for our own text messages (not media/service messages).
+            canEdit = target.senderId == myId && target.service == null && target.media.isEmpty() && target.files.isEmpty(),
+            isMine = target.senderId == myId,
             onDismiss = { menuTarget = null },
             onReact = { emoji ->
                 onReact(target, emoji)
@@ -480,6 +507,40 @@ internal fun ChatScreen(
                 onForward(target)
                 menuTarget = null
             },
+            onEdit = {
+                editing = target
+                draft = target.text
+                menuTarget = null
+            },
+            onDelete = {
+                deleteTarget = target
+                menuTarget = null
+            },
+        )
+    }
+
+    // Delete confirmation: "for everyone" is offered only for our own messages.
+    deleteTarget?.let { target ->
+        val mine = target.senderId == myId
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("Удалить сообщение?") },
+            text = { Text(if (mine) "Сообщение будет удалено." else "Сообщение будет удалено у вас.") },
+            confirmButton = {
+                Column {
+                    if (mine) {
+                        TextButton(onClick = {
+                            onDeleteMessage(target, true)
+                            deleteTarget = null
+                        }) { Text("Удалить у всех") }
+                    }
+                    TextButton(onClick = {
+                        onDeleteMessage(target, false)
+                        deleteTarget = null
+                    }) { Text("Удалить у меня") }
+                }
+            },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Отмена") } },
         )
     }
 
@@ -895,6 +956,37 @@ private fun ReplyBanner(
     }
 }
 
+/** Banner shown above the input while editing a message. */
+@Composable
+private fun EditBanner(
+    text: String,
+    onCancel: () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(AppIcons.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Редактирование",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text.ifBlank { "Сообщение" },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+            IconButton(onClick = onCancel) { Icon(AppIcons.Close, contentDescription = "Отменить") }
+        }
+    }
+}
+
 private val QuickReactions = listOf("❤️", "🥰", "😱", "🤣", "😄", "👍", "😘")
 
 private val MoreReactions = listOf("🔥", "👏", "😢", "🙏", "💯", "🎉", "😡", "🤔")
@@ -907,16 +999,28 @@ private val MoreReactions = listOf("🔥", "👏", "😢", "🙏", "💯", "🎉
 @Composable
 private fun MessageContextMenu(
     message: Message,
+    canEdit: Boolean,
+    isMine: Boolean,
     onDismiss: () -> Unit,
     onReact: (String) -> Unit,
     onReply: () -> Unit,
     onForward: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
     var expanded by remember { mutableStateOf(false) }
+    // Drop input focus so the soft keyboard closes — otherwise the menu (centered
+    // over the whole screen) would sit behind the keyboard.
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(Unit) { focusManager.clearFocus() }
     PlatformBackHandler(enabled = true, onBack = onDismiss)
     Box(
-        Modifier.fillMaxSize().background(Color(0x99000000)).clickable(onClick = onDismiss),
+        Modifier
+            .fillMaxSize()
+            .background(Color(0x99000000))
+            .clickable(onClick = onDismiss)
+            .imePadding(),
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -961,11 +1065,17 @@ private fun MessageContextMenu(
                 Column(Modifier.widthIn(min = 220.dp)) {
                     ContextMenuItem(AppIcons.Reply, "Ответить", onClick = onReply)
                     ContextMenuItem(AppIcons.Forward, "Переслать", onClick = onForward)
+                    if (canEdit) {
+                        ContextMenuItem(AppIcons.Edit, "Изменить", onClick = onEdit)
+                    }
                     if (message.text.isNotBlank()) {
                         ContextMenuItem(AppIcons.Copy, "Копировать") {
                             clipboard.setText(AnnotatedString(message.text))
                             onDismiss()
                         }
+                    }
+                    if (isMine || message.service == null) {
+                        ContextMenuItem(AppIcons.Delete, "Удалить", onClick = onDelete)
                     }
                 }
             }
@@ -1135,8 +1245,12 @@ private fun serviceMessageText(
         "icon" -> "$actor изменил(а) фото группы"
         "pin" -> "$actor закрепил(а) сообщение"
         "unpin" -> "$actor открепил(а) сообщение"
+        "hello" -> "$actor теперь в MAX"
+        "joinByLink" -> "$actor присоединил(ся/ась) по ссылке"
         "call" -> "Звонок"
-        else -> "$actor обновил(а) чат"
+        // "system" (e.g. the "Теперь в MAX!" greeting) and any unmapped event carry
+        // ready-made server text — prefer it over a generic fallback.
+        else -> service.message ?: "$actor обновил(а) чат"
     }
 }
 

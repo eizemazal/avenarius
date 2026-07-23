@@ -21,6 +21,7 @@ class DemoMaxApi : MaxApi {
     override val presence = MutableSharedFlow<Presence>()
     override val reactionUpdates = MutableSharedFlow<ReactionUpdate>()
     override val chatUpdates = MutableSharedFlow<Chat>()
+    override val deletions = MutableSharedFlow<MessageDeletion>()
     override val drops = MutableSharedFlow<Unit>()
     override val isConnected = true
 
@@ -146,6 +147,18 @@ class DemoMaxApi : MaxApi {
         fromChatId: Long,
         cid: Long,
     ): Message = Message(id = "demo-fwd-$cid", cid = cid, chatId = toChatId, senderId = ME, text = "", time = cid)
+
+    override suspend fun editMessage(
+        chatId: Long,
+        messageId: String,
+        text: String,
+    ) = Unit
+
+    override suspend fun deleteMessages(
+        chatId: Long,
+        messageIds: List<String>,
+        forAll: Boolean,
+    ) = Unit
 
     override suspend fun updateProfile(
         firstName: String,

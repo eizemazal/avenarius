@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,6 +50,7 @@ import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.CenteredSpinner
 import com.avenarius.app.ui.components.clickableRow
+import com.avenarius.app.ui.rememberDeviceContacts
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -59,9 +61,11 @@ internal fun GroupScreen(
     loading: Boolean,
     myId: Long,
     contacts: List<UserInfo>,
+    notice: String?,
+    onNoticeShown: () -> Unit,
     onBack: () -> Unit,
     onOpenUser: (Long) -> Unit,
-    onAddMembers: (List<Long>) -> Unit,
+    onAddMembers: (userIds: List<Long>, phones: List<String>) -> Unit,
     onRemoveMember: (Long) -> Unit,
     onSetAdmin: (Long, Boolean) -> Unit,
 ) {
@@ -69,14 +73,21 @@ internal fun GroupScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var showAddDialog by remember { mutableStateOf(false) }
+    // Surface transient notices (e.g. "some contacts aren't on MAX") on this screen.
+    LaunchedEffect(notice) {
+        notice?.let {
+            snackbarHostState.showSnackbar(it)
+            onNoticeShown()
+        }
+    }
 
     if (showAddDialog && group != null) {
         AddMembersDialog(
             contacts = contacts.filter { it.id !in group.memberIds && it.id != myId },
             onDismiss = { showAddDialog = false },
-            onConfirm = { ids ->
+            onConfirm = { ids, phones ->
                 showAddDialog = false
-                onAddMembers(ids)
+                onAddMembers(ids, phones)
             },
         )
     }
@@ -257,51 +268,46 @@ private fun MemberRow(
 private fun AddMembersDialog(
     contacts: List<UserInfo>,
     onDismiss: () -> Unit,
-    onConfirm: (List<Long>) -> Unit,
+    onConfirm: (userIds: List<Long>, phones: List<String>) -> Unit,
 ) {
-    val selected = remember { mutableStateOf(setOf<Long>()) }
+    // Address book, so we can add people not in our Max contacts (resolved by phone
+    // on confirm — only the few selected, so no bulk lookup).
+    val device = rememberDeviceContacts()
+    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    var selectedPhones by remember { mutableStateOf(setOf<String>()) }
     var filter by remember { mutableStateOf("") }
-    val shown =
-        remember(contacts, filter) {
-            val q = filter.trim()
-            if (q.isBlank()) contacts else contacts.filter { it.name.contains(q, ignoreCase = true) }
-        }
+
+    val serverNames = remember(contacts) { contacts.map { it.name.lowercase() }.toSet() }
+    val book = remember(device, serverNames) { device.filter { it.name.lowercase() !in serverNames }.distinctBy { it.phone } }
+    val q = filter.trim()
+    val shownServer = contacts.filter { q.isBlank() || it.name.contains(q, ignoreCase = true) }
+    val shownBook = book.filter { q.isBlank() || it.name.contains(q, ignoreCase = true) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Добавить участников") },
         text = {
-            if (contacts.isEmpty()) {
-                Text("Нет контактов для добавления", style = MaterialTheme.typography.bodyMedium)
-            } else {
-                Column {
-                    OutlinedTextField(
-                        value = filter,
-                        onValueChange = { filter = it },
-                        singleLine = true,
-                        leadingIcon = { Icon(AppIcons.Search, contentDescription = null) },
-                        placeholder = { Text("Поиск по имени") },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+            Column {
+                OutlinedTextField(
+                    value = filter,
+                    onValueChange = { filter = it },
+                    singleLine = true,
+                    leadingIcon = { Icon(AppIcons.Search, contentDescription = null) },
+                    placeholder = { Text("Поиск по имени") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (shownServer.isEmpty() && shownBook.isEmpty()) {
+                    Text("Ничего не найдено", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(8.dp))
+                } else {
                     LazyColumn(Modifier.heightIn(max = 320.dp)) {
-                        items(shown, key = { it.id }) { c ->
-                            val checked = c.id in selected.value
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .toggleable(
-                                        value = checked,
-                                        onValueChange = {
-                                            selected.value =
-                                                if (it) selected.value + c.id else selected.value - c.id
-                                        },
-                                    ).padding(vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Checkbox(checked = checked, onCheckedChange = null)
-                                Spacer(Modifier.width(8.dp))
-                                Avatar(c.name, c.avatarUrl, 36.dp)
-                                Spacer(Modifier.width(10.dp))
-                                Text(c.name, style = MaterialTheme.typography.bodyLarge)
+                        items(shownServer, key = { "u${it.id}" }) { c ->
+                            PickRow(c.name, c.avatarUrl, null, c.id in selectedIds) { on ->
+                                selectedIds = if (on) selectedIds + c.id else selectedIds - c.id
+                            }
+                        }
+                        items(shownBook, key = { "p${it.phone}" }) { c ->
+                            PickRow(c.name, null, c.phone, c.phone in selectedPhones) { on ->
+                                selectedPhones = if (on) selectedPhones + c.phone else selectedPhones - c.phone
                             }
                         }
                     }
@@ -310,12 +316,38 @@ private fun AddMembersDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = { onConfirm(selected.value.toList()) },
-                enabled = selected.value.isNotEmpty(),
+                onClick = { onConfirm(selectedIds.toList(), selectedPhones.toList()) },
+                enabled = selectedIds.isNotEmpty() || selectedPhones.isNotEmpty(),
             ) { Text("Добавить") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
     )
+}
+
+/** A checkable person row (server contact or address-book entry with a phone subtitle). */
+@Composable
+private fun PickRow(
+    name: String,
+    avatarUrl: String?,
+    subtitle: String?,
+    checked: Boolean,
+    onToggle: (Boolean) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().toggleable(value = checked, onValueChange = onToggle).padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = null)
+        Spacer(Modifier.width(8.dp))
+        Avatar(name, avatarUrl, 36.dp)
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text(name, style = MaterialTheme.typography.bodyLarge)
+            subtitle?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
 }
 
 private fun roleLabel(

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.avenarius.app.data.Prefs
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.DeviceContact
 import com.avenarius.app.model.FileAttach
 import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
@@ -17,6 +18,7 @@ import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.DemoMaxApi
+import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
 import com.avenarius.app.ui.theme.ThemeMode
 import com.avenarius.app.ui.theme.prefValue
@@ -357,6 +359,18 @@ class AppViewModel(
                 resolveDialogTitles()
             }
         }
+        // The other party deleted a message (op142): drop it from the open chat live.
+        viewModelScope.launch {
+            client.deletions.collect { d ->
+                _state.update { s ->
+                    if (s.currentChat?.id != d.chatId) {
+                        s
+                    } else {
+                        s.copy(messages = s.messages.filterNot { it.id != null && it.id in d.messageIds })
+                    }
+                }
+            }
+        }
         // Auto-reconnect transparently whenever the connection drops.
         viewModelScope.launch {
             client.drops.collect {
@@ -658,19 +672,47 @@ class AppViewModel(
     }
 
     /** Adds [userIds] to the currently-open group, then refreshes the member list. */
-    fun addMembersToGroup(userIds: List<Long>) {
+    fun addMembersToGroup(
+        userIds: List<Long>,
+        phones: List<String> = emptyList(),
+    ) {
         val group = _state.value.viewingGroup ?: return
-        if (userIds.isEmpty()) return
+        if (userIds.isEmpty() && phones.isEmpty()) return
         launchBusyless {
-            client.addMembers(group.id, userIds)
-            val members = runCatching { client.getChatMembers(group.id) }.getOrDefault(_state.value.groupMemberList)
-            val sorted =
-                members.sortedWith(
-                    compareByDescending<UserInfo> { it.id == group.ownerId }
-                        .thenByDescending { it.id in group.adminIds }
-                        .thenBy { it.name.lowercase() },
-                )
-            _state.update { it.copy(groupMemberList = sorted) }
+            // Resolve the selected address-book phones to Max ids through the rate
+            // limiter (spaced out). Stop early if we hit the cap.
+            val resolved = mutableListOf<Long>()
+            var notOnMax = 0
+            var rateLimited = false
+            for (p in phones) {
+                when (val r = lookupByPhone(p)) {
+                    is LookupResult.Ok -> resolved += r.user.userId
+                    is LookupResult.NotOnMax -> notOnMax++
+                    is LookupResult.RateLimited -> {
+                        rateLimited = true
+                        break
+                    }
+                }
+            }
+            val allIds = (userIds + resolved).distinct()
+            if (allIds.isNotEmpty()) {
+                client.addMembers(group.id, allIds)
+                val members = runCatching { client.getChatMembers(group.id) }.getOrDefault(_state.value.groupMemberList)
+                val sorted =
+                    members.sortedWith(
+                        compareByDescending<UserInfo> { it.id == group.ownerId }
+                            .thenByDescending { it.id in group.adminIds }
+                            .thenBy { it.name.lowercase() },
+                    )
+                _state.update { it.copy(groupMemberList = sorted) }
+            }
+            val msg =
+                when {
+                    rateLimited -> RATE_LIMIT_MSG
+                    notOnMax > 0 -> "Не в MAX: $notOnMax контакт(ов) не добавлено"
+                    else -> null
+                }
+            if (msg != null) _state.update { it.copy(notice = msg) }
         }
     }
 
@@ -710,13 +752,28 @@ class AppViewModel(
     fun createGroup(
         name: String,
         memberIds: List<Long>,
+        phones: List<String>,
         avatar: PickedMedia?,
     ) {
         val title = name.trim()
         if (title.isEmpty()) return
         launchBusy {
             val token = avatar?.let { client.uploadPhoto(it.bytes, it.fileName, it.mime).token }
-            val newId = client.createGroup(title, memberIds, token)
+            // Resolve selected address-book phones through the rate limiter (spaced).
+            val resolved = mutableListOf<Long>()
+            var rateLimited = false
+            for (p in phones) {
+                when (val r = lookupByPhone(p)) {
+                    is LookupResult.Ok -> resolved += r.user.userId
+                    is LookupResult.NotOnMax -> {}
+                    is LookupResult.RateLimited -> {
+                        rateLimited = true
+                        break
+                    }
+                }
+            }
+            if (rateLimited) _state.update { it.copy(notice = RATE_LIMIT_MSG) }
+            val newId = client.createGroup(title, (memberIds + resolved).distinct(), token)
             // Re-sync so the new group appears, then open it if we learned its id.
             val syncToken = prefs.token
             if (syncToken != null) {
@@ -735,27 +792,68 @@ class AppViewModel(
         }
     }
 
-    /** Searches by name for the new-chat dialog: your contacts (instant) + public chats. */
+    // Device address book (pushed in from the UI, which owns the READ_CONTACTS flow).
+    private var deviceContacts: List<DeviceContact> = emptyList()
+    private var lastSearchQuery: String = ""
+
+    /** The new-chat picker supplies the loaded address book; re-rank if a query is live. */
+    fun setDeviceContacts(list: List<DeviceContact>) {
+        deviceContacts = list
+        if (lastSearchQuery.isNotBlank()) searchUsers(lastSearchQuery)
+    }
+
+    /**
+     * New-chat search, ranked: your Max contacts (those with an existing chat first),
+     * then address-book contacts not already among them, then public results (channels).
+     */
     fun searchUsers(query: String) {
         val q = query.trim()
+        lastSearchQuery = q
         if (q.isBlank()) {
             _state.update { it.copy(searchResults = emptyList(), searching = false) }
             return
         }
         val myId = _state.value.account?.userId
-        // Local contacts matching the query, opened as 1:1 dialogs.
-        val local =
+        val s = _state.value
+        // 1) Server contacts matching the query, ones with an existing chat ranked first.
+        val serverLocal =
             if (myId == null) {
                 emptyList()
             } else {
-                _state.value.contactsList
+                s.contactsList
                     .filter { it.name.contains(q, ignoreCase = true) }
-                    .map { SearchResult(client.dialogChatId(myId, it.id), it.name, it.avatarUrl, isDialog = true) }
+                    .map { u -> u to client.dialogChatId(myId, u.id) }
+                    .sortedByDescending { (_, cid) -> s.chats.any { it.id == cid } }
+                    .map { (u, cid) -> SearchResult(cid, u.name, u.avatarUrl, isDialog = true) }
             }
-        _state.update { it.copy(searchResults = local, searching = true) }
+        // 2) Address-book contacts. We dedup only by NAME (not phone): a person saved
+        // under a different name in Max vs. the address book must still be findable by
+        // the local name, so we keep the book entry even when the phone is a contact.
+        val serverNames = s.contactsList.map { it.name.lowercase() }.toSet()
+        val book =
+            deviceContacts
+                .filter { it.name.contains(q, ignoreCase = true) && it.name.lowercase() !in serverNames }
+                .distinctBy { it.phone }
+                .map { c ->
+                    SearchResult(
+                        // Synthetic negative id (real dialog ids are positive) so list keys stay unique.
+                        chatId = -(c.phone.filter(Char::isDigit).toLongOrNull() ?: c.phone.hashCode().toLong()),
+                        title = c.name,
+                        avatarUrl = null,
+                        isDialog = true,
+                        phone = c.phone,
+                        subtitle = c.phone,
+                    )
+                }
+        _state.update { it.copy(searchResults = (serverLocal + book).distinctBy { r -> r.chatId }, searching = true) }
         viewModelScope.launch {
+            // 3) Public search (channels etc.) ranked last.
             val remote = runCatching { client.searchChats(q) }.getOrDefault(emptyList())
-            _state.update { it.copy(searchResults = (local + remote).distinctBy { r -> r.chatId }, searching = false) }
+            if (lastSearchQuery == q) {
+                _state.update {
+                    it.copy(searchResults = (serverLocal + book + remote).distinctBy { r -> r.chatId }, searching = false)
+                }
+            }
         }
     }
 
@@ -903,20 +1001,30 @@ class AppViewModel(
     fun startChatByPhone(phone: String) {
         val normalized = "+" + phone.filter { it.isDigit() }
         val myId = _state.value.account?.userId ?: return
-        launchBusy {
-            val found = client.findByPhone(normalized)
-            runCatching { client.addContact(found.userId, found.name) }
-            _state.update { it.copy(contacts = it.contacts + (found.userId to found.name)) }
-            val chat =
-                Chat(
-                    id = client.dialogChatId(myId, found.userId),
-                    title = found.name,
-                    lastMessageText = null,
-                    lastEventTime = nowMillis(),
-                    unreadCount = 0,
-                    isDialog = true,
-                )
-            openChat(chat)
+        viewModelScope.launch {
+            _state.update { it.copy(busy = true) }
+            val result = lookupByPhone(normalized)
+            _state.update { it.copy(busy = false) }
+            when (result) {
+                is LookupResult.RateLimited -> _state.update { it.copy(notice = RATE_LIMIT_MSG) }
+                is LookupResult.NotOnMax ->
+                    _state.update { it.copy(notice = "У этого контакта нет аккаунта MAX") }
+                is LookupResult.Ok -> {
+                    val found = result.user
+                    runCatching { client.addContact(found.userId, found.name) }
+                    _state.update { it.copy(contacts = it.contacts + (found.userId to found.name)) }
+                    openChat(
+                        Chat(
+                            id = client.dialogChatId(myId, found.userId),
+                            title = found.name,
+                            lastMessageText = null,
+                            lastEventTime = nowMillis(),
+                            unreadCount = 0,
+                            isDialog = true,
+                        ),
+                    )
+                }
+            }
         }
     }
 
@@ -1164,6 +1272,30 @@ class AppViewModel(
         }
     }
 
+    /** Edits our own [msg] to [newText] (optimistically updates the bubble). */
+    fun editMessage(
+        msg: Message,
+        newText: String,
+    ) {
+        val id = msg.id ?: return
+        val trimmed = newText.trim()
+        if (trimmed.isEmpty() || trimmed == msg.text) return
+        _state.update { s ->
+            s.copy(messages = s.messages.map { if (it.id == id) it.copy(text = trimmed) else it })
+        }
+        launchBusyless { client.editMessage(msg.chatId, id, trimmed) }
+    }
+
+    /** Deletes [msg] ([forAll] = for everyone), removing it from the open chat. */
+    fun deleteMessage(
+        msg: Message,
+        forAll: Boolean,
+    ) {
+        val id = msg.id ?: return
+        _state.update { s -> s.copy(messages = s.messages.filterNot { it.id == id }) }
+        launchBusyless { client.deleteMessages(msg.chatId, listOf(id), forAll) }
+    }
+
     /** Begins replying to [msg] (shows a banner above the input). */
     fun startReply(msg: Message) = _state.update { it.copy(replyingTo = msg) }
 
@@ -1258,6 +1390,35 @@ class AppViewModel(
 
     // --- helpers ---
 
+    // Timestamps (ms) of recent findByPhone calls, oldest first, for rate limiting.
+    private val phoneLookupTimes = ArrayDeque<Long>()
+
+    /**
+     * Gated wrapper around [MaxApi.findByPhone]. Rapid phone lookups look like number
+     * enumeration to Max's anti-abuse system and can LOCK the account, so all lookups
+     * go through here: a minimum spacing plus short- and long-window caps. When a limit
+     * is hit it returns [LookupResult.RateLimited] WITHOUT calling the server. A call
+     * that does go out is spaced by [LOOKUP_MIN_SPACING_MS] (awaited via delay).
+     */
+    private suspend fun lookupByPhone(phone: String): LookupResult {
+        val now = nowMillis()
+        while (phoneLookupTimes.isNotEmpty() && now - phoneLookupTimes.first() > LOOKUP_LONG_WINDOW_MS) {
+            phoneLookupTimes.removeFirst()
+        }
+        val inShort = phoneLookupTimes.count { now - it <= LOOKUP_SHORT_WINDOW_MS }
+        if (phoneLookupTimes.size >= LOOKUP_MAX_PER_LONG || inShort >= LOOKUP_MAX_PER_SHORT) {
+            return LookupResult.RateLimited
+        }
+        phoneLookupTimes.lastOrNull()?.let { last ->
+            val since = now - last
+            if (since < LOOKUP_MIN_SPACING_MS) delay(LOOKUP_MIN_SPACING_MS - since)
+        }
+        // Count the request even if it fails — the server still saw it.
+        phoneLookupTimes.addLast(nowMillis())
+        val found = runCatching { client.findByPhone(phone) }.getOrNull()
+        return if (found != null) LookupResult.Ok(found) else LookupResult.NotOnMax
+    }
+
     /** Returns [msg] with our own reaction changed to [emoji] (or removed when null). */
     private fun applyMyReaction(
         msg: Message,
@@ -1316,5 +1477,26 @@ class AppViewModel(
         // Offline demo account for Google Play review (no real server access).
         const val DEMO_PHONE = "+79990000000"
         const val DEMO_CODE = "00000"
+
+        // Phone-lookup rate limiting. Rapid findByPhone bursts read as number
+        // enumeration to Max and can lock the account, so lookups are spaced out and
+        // capped. Conservative on purpose — the exact server limit is unknown.
+        const val LOOKUP_MIN_SPACING_MS = 3_000L
+        const val LOOKUP_SHORT_WINDOW_MS = 60_000L
+        const val LOOKUP_MAX_PER_SHORT = 5
+        const val LOOKUP_LONG_WINDOW_MS = 3_600_000L
+        const val LOOKUP_MAX_PER_LONG = 20
+        const val RATE_LIMIT_MSG = "Слишком много проверок номеров. Подождите немного и повторите."
     }
+}
+
+/** Outcome of a rate-limited phone lookup. */
+private sealed interface LookupResult {
+    data class Ok(
+        val user: FoundUser,
+    ) : LookupResult
+
+    data object NotOnMax : LookupResult
+
+    data object RateLimited : LookupResult
 }

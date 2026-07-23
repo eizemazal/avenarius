@@ -10,6 +10,7 @@ import com.avenarius.app.resources.check
 import com.avenarius.app.resources.close
 import com.avenarius.app.resources.collapse_content
 import com.avenarius.app.resources.content_copy
+import com.avenarius.app.resources.delete
 import com.avenarius.app.resources.done_all
 import com.avenarius.app.resources.edit
 import com.avenarius.app.resources.expand_content
@@ -46,6 +47,7 @@ object AppIcons {
     val Reply: Painter @Composable get() = painterResource(Res.drawable.reply)
     val Copy: Painter @Composable get() = painterResource(Res.drawable.content_copy)
     val Forward: Painter @Composable get() = painterResource(Res.drawable.forward)
+    val Delete: Painter @Composable get() = painterResource(Res.drawable.delete)
 
     // Expand/collapse the extra row of reactions.
     val Expand: Painter @Composable get() = painterResource(Res.drawable.expand_content)

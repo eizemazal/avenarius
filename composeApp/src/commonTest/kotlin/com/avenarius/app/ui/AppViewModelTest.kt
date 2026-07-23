@@ -13,6 +13,7 @@ import com.avenarius.app.model.UserInfo
 import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
+import com.avenarius.app.net.MessageDeletion
 import com.avenarius.app.net.Presence
 import com.avenarius.app.net.ReactionUpdate
 import com.avenarius.app.net.ReadMark
@@ -57,12 +58,14 @@ private class FakeMaxClient : MaxApi {
     private val _presence = MutableSharedFlow<Presence>(extraBufferCapacity = 16)
     private val _reactionUpdates = MutableSharedFlow<ReactionUpdate>(extraBufferCapacity = 16)
     private val _chatUpdates = MutableSharedFlow<Chat>(extraBufferCapacity = 16)
+    private val _deletions = MutableSharedFlow<MessageDeletion>(extraBufferCapacity = 16)
     private val _drops = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
     override val incoming: SharedFlow<Message> get() = _incoming
     override val readMarks: SharedFlow<ReadMark> get() = _readMarks
     override val presence: SharedFlow<Presence> get() = _presence
     override val reactionUpdates: SharedFlow<ReactionUpdate> get() = _reactionUpdates
     override val chatUpdates: SharedFlow<Chat> get() = _chatUpdates
+    override val deletions: SharedFlow<MessageDeletion> get() = _deletions
     override val drops: SharedFlow<Unit> get() = _drops
     override var isConnected: Boolean = false
         private set
@@ -173,6 +176,25 @@ private class FakeMaxClient : MaxApi {
         fromChatId: Long,
         cid: Long,
     ): Message? = Message(id = "fwd-$cid", cid = cid, chatId = toChatId, senderId = account.userId, text = "", time = cid)
+
+    val editedMessages = mutableListOf<Triple<Long, String, String>>()
+    val deletedMessages = mutableListOf<Triple<Long, List<String>, Boolean>>()
+
+    override suspend fun editMessage(
+        chatId: Long,
+        messageId: String,
+        text: String,
+    ) {
+        editedMessages += Triple(chatId, messageId, text)
+    }
+
+    override suspend fun deleteMessages(
+        chatId: Long,
+        messageIds: List<String>,
+        forAll: Boolean,
+    ) {
+        deletedMessages += Triple(chatId, messageIds, forAll)
+    }
 
     override suspend fun uploadVideo(
         bytes: ByteArray,
