@@ -16,10 +16,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -177,7 +179,7 @@ private fun NewChatTab(
                     CircularProgressIndicator(Modifier.size(20.dp))
                 }
             }
-            LazyColumn(Modifier.heightIn(max = 280.dp)) {
+            LazyColumn(Modifier.weight(1f, fill = false).heightIn(max = 280.dp)) {
                 items(searchResults, key = { it.chatId }) { result ->
                     Row(
                         Modifier.fillMaxWidth().clickableRow { onPickResult(result) }.padding(vertical = 8.dp),
@@ -244,7 +246,7 @@ private fun NewGroupTab(
             placeholder = { Text("Поиск по имени") },
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         )
-        LazyColumn(Modifier.heightIn(max = 240.dp)) {
+        LazyColumn(Modifier.weight(1f, fill = false).heightIn(max = 240.dp)) {
             items(shownServer, key = { "u${it.id}" }) { c ->
                 PickPersonRow(c.name, c.avatarUrl, null, c.id in selectedIds) { on -> onToggleId(c.id, on) }
             }
@@ -609,7 +611,10 @@ private fun SettingsTab(
             },
         )
     }
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
         Row(
             Modifier.fillMaxWidth().clickableRow(onOpenProfile).padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,

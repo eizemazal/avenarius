@@ -5,9 +5,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -27,9 +30,16 @@ import com.avenarius.app.ui.components.SmallSpinner
 
 @Composable
 private fun CenteredForm(content: @Composable ColumnScopeAlias.() -> Unit) {
-    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+    // The form stays centred while it fits, and scrolls (rather than being clipped)
+    // on short screens or once the soft keyboard has eaten half of the window.
+    Box(Modifier.fillMaxSize().imePadding(), contentAlignment = Alignment.Center) {
         Column(
-            modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth(),
+            modifier =
+                Modifier
+                    .verticalScroll(rememberScrollState())
+                    .padding(24.dp)
+                    .widthIn(max = 360.dp)
+                    .fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
             content = content,

@@ -299,7 +299,7 @@ private fun AddMembersDialog(
                 if (shownServer.isEmpty() && shownBook.isEmpty()) {
                     Text("Ничего не найдено", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(8.dp))
                 } else {
-                    LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                    LazyColumn(Modifier.weight(1f, fill = false).heightIn(max = 320.dp)) {
                         items(shownServer, key = { "u${it.id}" }) { c ->
                             PickRow(c.name, c.avatarUrl, null, c.id in selectedIds) { on ->
                                 selectedIds = if (on) selectedIds + c.id else selectedIds - c.id
