@@ -1,5 +1,7 @@
 package com.avenarius.app.model
 
+import kotlinx.serialization.Serializable
+
 /*
  * Domain models used by the UI. These are deliberately small and decoupled from
  * the raw Max wire format (which is parsed in com.avenarius.app.net.MaxClient).
@@ -9,6 +11,7 @@ package com.avenarius.app.model
  */
 
 /** The signed-in user. */
+@Serializable
 data class Account(
     val userId: Long,
     val firstName: String,
@@ -35,6 +38,7 @@ data class DeviceContact(
 )
 
 /** A user/contact, used for the contacts list, search results and the profile page. */
+@Serializable
 data class UserInfo(
     val id: Long,
     val name: String,
@@ -48,6 +52,7 @@ data class UserInfo(
 )
 
 /** A conversation in the chat list. */
+@Serializable
 data class Chat(
     val id: Long,
     val title: String,
@@ -140,6 +145,43 @@ data class ServiceEvent(
     val message: String? = null,
 )
 
+/**
+ * One line describing a message for the chat list: its text, or a label for what it
+ * carries when it has none.
+ *
+ * Without this an attachment-only message left the row showing an *older* text
+ * message, so a chat could sit there with an unread badge next to something the
+ * reader had already seen.
+ */
+fun Message.previewLabel(): String =
+    when {
+        text.isNotBlank() -> text
+        service != null -> service.message ?: "Служебное сообщение"
+        media.any { it.type == MediaType.VIDEO } -> "🎥 Видео"
+        media.isNotEmpty() -> "📷 Фото"
+        files.isNotEmpty() -> "📎 " + files.first().name
+        linkPreview != null -> linkPreview.url
+        else -> ""
+    }
+
+/** Where an outgoing attachment has got to in its upload. */
+enum class UploadState { QUEUED, UPLOADING, DONE, FAILED }
+
+/**
+ * One attachment of a message that is still being sent: what to show as its
+ * thumbnail, and how far its upload has got. Lets the bubble appear in the chat
+ * immediately, with a progress ring per item, instead of the whole batch waiting
+ * behind a single spinner.
+ */
+data class PendingAttach(
+    /** A value Coil can render (the picked item's local URI). */
+    val preview: Any?,
+    val kind: PickedKind,
+    val state: UploadState = UploadState.QUEUED,
+    /** Fraction uploaded, 0..1. */
+    val progress: Float = 0f,
+)
+
 /** A single message inside a chat. */
 data class Message(
     /** Server message id (string in the protocol). Null for messages we just sent locally. */
@@ -166,4 +208,9 @@ data class Message(
     val linkPreview: LinkPreview? = null,
     /** Set when this is a group service/system message (rendered as a centered chip). */
     val service: ServiceEvent? = null,
+    /**
+     * Attachments still uploading, on a message we created locally and have not yet
+     * sent. Replaced by the server's copy (with real [media]) once the send lands.
+     */
+    val pending: List<PendingAttach> = emptyList(),
 )

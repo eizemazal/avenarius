@@ -71,7 +71,10 @@ fun App(viewModel: AppViewModel) {
                     // Thin "reconnecting" strip while we transparently re-establish the
                     // connection — shown over the chat list / open chat, never a bounce.
                     if (state.reconnecting && (state.screen == Screen.CHATS || state.screen == Screen.CHAT)) {
-                        ReconnectingBar()
+                        // On a cold start the cached chat list is already on screen while
+                        // the first sync runs, so the strip says "connecting" — calling
+                        // that a *re*connection would be wrong.
+                        ReconnectingBar(reconnecting = state.syncedOnce)
                     }
                     Box(Modifier.weight(1f)) {
                         when (state.screen) {
@@ -125,7 +128,9 @@ fun App(viewModel: AppViewModel) {
                             Screen.CHAT ->
                                 ChatScreen(
                                     chat = state.currentChat,
-                                    messages = state.messages,
+                                    // Includes bubbles whose attachments are still
+                                    // uploading, so they survive leaving the chat.
+                                    messages = state.visibleMessages,
                                     myId = state.account?.userId ?: -1L,
                                     // Merge resolved non-contact group members so their
                                     // name + avatar show instead of a "—" placeholder.
@@ -140,8 +145,10 @@ fun App(viewModel: AppViewModel) {
                                     replyingTo = state.replyingTo,
                                     sendingAttachment = state.sendingAttachment,
                                     stagedMedia = state.stagedMedia,
+                                    initialDraft = state.draft,
                                     onLoadOlder = viewModel::loadOlder,
                                     onBack = viewModel::backToChats,
+                                    onDraftChange = viewModel::setDraft,
                                     onSend = viewModel::sendMessage,
                                     onSendMedia = viewModel::sendMedia,
                                     onStagedConsumed = viewModel::consumeStagedMedia,
@@ -152,7 +159,11 @@ fun App(viewModel: AppViewModel) {
                                     onForward = viewModel::startForward,
                                     onEditMessage = viewModel::editMessage,
                                     onDeleteMessage = viewModel::deleteMessage,
-                                    onDownloadFile = viewModel::downloadFile,
+                                    onRetrySend = viewModel::retrySend,
+                                    onDiscardSend = viewModel::discardPendingSend,
+                                    onFileClick = viewModel::openOrDownloadFile,
+                                    downloadedFiles = state.downloadedFiles.keys,
+                                    downloadingFiles = state.downloadingFiles,
                                     onCancelReply = viewModel::cancelReply,
                                     onDeleteChat = viewModel::deleteCurrentChat,
                                     onLeaveGroup = viewModel::leaveCurrentGroup,
@@ -215,7 +226,7 @@ private fun LoadingScreen(reconnecting: Boolean) {
 }
 
 @Composable
-private fun ReconnectingBar() {
+private fun ReconnectingBar(reconnecting: Boolean) {
     Row(
         Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.secondaryContainer).padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.Center,
@@ -224,7 +235,7 @@ private fun ReconnectingBar() {
         CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
         Spacer(Modifier.width(8.dp))
         Text(
-            "Переподключение…",
+            if (reconnecting) "Переподключение…" else "Подключение…",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSecondaryContainer,
         )

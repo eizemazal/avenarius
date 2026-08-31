@@ -17,7 +17,9 @@ import com.avenarius.app.resources.expand_content
 import com.avenarius.app.resources.forward
 import com.avenarius.app.resources.group
 import com.avenarius.app.resources.more_vert
+import com.avenarius.app.resources.open_in_new
 import com.avenarius.app.resources.play_arrow
+import com.avenarius.app.resources.refresh
 import com.avenarius.app.resources.reply
 import com.avenarius.app.resources.search
 import com.avenarius.app.resources.send
@@ -37,10 +39,16 @@ object AppIcons {
     val Back: Painter @Composable get() = painterResource(Res.drawable.arrow_back)
     val More: Painter @Composable get() = painterResource(Res.drawable.more_vert)
     val Send: Painter @Composable get() = painterResource(Res.drawable.send)
+
+    /** Re-send a message whose attachments failed to upload. */
+    val Retry: Painter @Composable get() = painterResource(Res.drawable.refresh)
     val Close: Painter @Composable get() = painterResource(Res.drawable.close)
     val Edit: Painter @Composable get() = painterResource(Res.drawable.edit)
     val Play: Painter @Composable get() = painterResource(Res.drawable.play_arrow)
     val Attach: Painter @Composable get() = painterResource(Res.drawable.attach_file)
+
+    /** Open an already-downloaded file in another app. */
+    val Open: Painter @Composable get() = painterResource(Res.drawable.open_in_new)
     val Search: Painter @Composable get() = painterResource(Res.drawable.search)
 
     // Message context-menu actions.

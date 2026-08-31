@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import com.avenarius.app.data.Prefs
 import com.avenarius.app.net.MaxClient
+import com.avenarius.app.ui.clearMediaTempFiles
 
 /**
  * App-scoped singletons shared by the UI (MainActivity/AppViewModel) and the
@@ -50,5 +51,9 @@ class AvenariusApp : Application() {
     override fun onCreate() {
         super.onCreate()
         Session.init(this)
+        // Copies of shared-in content and camera captures live in the cache dir.
+        // Nothing can be staged for sending this early, so anything still there is
+        // left over from a previous run.
+        clearMediaTempFiles(this)
     }
 }

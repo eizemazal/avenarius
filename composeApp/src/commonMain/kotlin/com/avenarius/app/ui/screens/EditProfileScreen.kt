@@ -78,7 +78,7 @@ internal fun EditProfileScreen(
                 val picked = avatar
                 if (picked != null) {
                     AsyncImage(
-                        model = picked.bytes,
+                        model = picked.content.previewModel,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize().clip(CircleShape),

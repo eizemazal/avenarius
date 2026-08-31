@@ -58,6 +58,10 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
@@ -425,6 +429,7 @@ internal fun MainScreen(
                         contacts = state.contactsList,
                         peers = state.groupMembers,
                         online = state.onlineUsers,
+                        drafts = state.drafts,
                         query = if (searchActive) chatQuery else "",
                         isRefreshing = state.refreshing,
                         onRefresh = vm::refresh,
@@ -437,10 +442,13 @@ internal fun MainScreen(
                         account = state.account,
                         theme = state.theme,
                         demoMode = state.demoMode,
+                        cacheSizeBytes = state.cacheSizeBytes,
                         onSetTheme = vm::setTheme,
                         onConfirmWebLogin = vm::confirmWebLogin,
                         onOpenProfile = { state.account?.let { vm.openUser(it.userId) } },
                         onOpenAbout = vm::openAbout,
+                        onClearCache = vm::clearCache,
+                        onRefreshCacheSize = vm::refreshCacheSize,
                         onLogout = vm::logout,
                     )
             }
@@ -456,6 +464,8 @@ private fun ChatsTab(
     contacts: List<UserInfo>,
     peers: Map<Long, UserInfo>,
     online: Set<Long>,
+    /** Unsent text per chat, previewed instead of the last message. */
+    drafts: Map<Long, String>,
     query: String,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
@@ -522,14 +532,37 @@ private fun ChatsTab(
                         )
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(chat.title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
-                            chat.lastMessageText?.let {
+                            Text(
+                                chat.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            val draft = drafts[chat.id]?.takeIf { it.isNotBlank() }
+                            if (draft != null) {
                                 Text(
-                                    it,
+                                    buildAnnotatedString {
+                                        withStyle(SpanStyle(color = MaterialTheme.colorScheme.error)) {
+                                            append("Черновик: ")
+                                        }
+                                        // Newlines would make the row read oddly on one line.
+                                        append(draft.replace('\n', ' ').trim())
+                                    },
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
+                            } else {
+                                chat.lastMessageText?.let {
+                                    Text(
+                                        it,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
                             }
                         }
                         if (chat.unreadCount > 0) {
@@ -586,13 +619,40 @@ private fun SettingsTab(
     account: Account?,
     theme: ThemeMode,
     demoMode: Boolean,
+    cacheSizeBytes: Long,
     onSetTheme: (ThemeMode) -> Unit,
     onConfirmWebLogin: (String) -> Unit,
     onOpenProfile: () -> Unit,
     onOpenAbout: () -> Unit,
+    onClearCache: () -> Unit,
+    onRefreshCacheSize: () -> Unit,
     onLogout: () -> Unit,
 ) {
     var confirmLogout by remember { mutableStateOf(false) }
+    var confirmClearCache by remember { mutableStateOf(false) }
+    // The size is read from storage, so refresh it whenever this tab is shown.
+    LaunchedEffect(Unit) { onRefreshCacheSize() }
+    if (confirmClearCache) {
+        AlertDialog(
+            onDismissRequest = { confirmClearCache = false },
+            title = { Text("Очистить кэш?") },
+            text = {
+                Text(
+                    "Сохранённые списки чатов и контактов будут удалены и загружены заново " +
+                        "при следующем обновлении. Сообщения и черновики не пострадают.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClearCache = false
+                    onClearCache()
+                }) { Text("Очистить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearCache = false }) { Text("Отмена") }
+            },
+        )
+    }
     // QR scanner launcher for authorizing the web/desktop version.
     val scanWebLogin = rememberQrScanLauncher(onConfirmWebLogin)
     if (confirmLogout) {
@@ -658,6 +718,22 @@ private fun SettingsTab(
             ThemeOption("Светлая", ThemeMode.LIGHT, theme, onSetTheme)
         }
         HorizontalDivider()
+
+        // Cached chat list / contacts (the warm-start snapshot).
+        Row(
+            Modifier.fillMaxWidth().clickableRow { confirmClearCache = true }.padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Очистить кэш", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
+                Text(
+                    if (cacheSizeBytes > 0) "Сохранено ${formatBytes(cacheSizeBytes)}" else "Кэш пуст",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        HorizontalDivider()
         Text(
             "О программе",
             style = MaterialTheme.typography.bodyLarge,
@@ -686,6 +762,17 @@ private fun ThemeOption(
         Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }
+
+/** Human-readable byte size for the cache row ("42 КБ", "1,3 МБ"). */
+private fun formatBytes(bytes: Long): String =
+    when {
+        bytes < 1024 -> "$bytes Б"
+        bytes < 1024 * 1024 -> "${bytes / 1024} КБ"
+        else -> {
+            val mb = bytes * 10 / (1024 * 1024)
+            "${mb / 10},${mb % 10} МБ"
+        }
+    }
 
 @Composable
 private fun UnreadBadge(count: Int) {

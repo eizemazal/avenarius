@@ -19,8 +19,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.avenarius.app.model.MediaContent
 import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.jvm.javaio.toByteReadChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -138,7 +141,7 @@ private fun rememberCameraCapture(
 actual fun rememberCameraVideoLauncher(onPicked: (PickedMedia) -> Unit): () -> Unit =
     rememberCameraCapture(isVideo = true, onPicked = onPicked)
 
-/** Reads [uri]'s bytes off the main thread and hands back a [PickedMedia]. */
+/** Hands back a [PickedMedia] for [uri]; its content is read later, on upload. */
 private fun deliver(
     scope: CoroutineScope,
     context: Context,
@@ -149,8 +152,10 @@ private fun deliver(
     onPicked: (PickedMedia) -> Unit,
 ) {
     scope.launch {
-        val bytes = withContext(Dispatchers.IO) { readBytes(context, uri) } ?: return@launch
-        onPicked(PickedMedia(bytes, mime, name, kind))
+        // Only metadata is touched here (a cursor query), so this stays cheap even
+        // for a large capture.
+        val size = withContext(Dispatchers.IO) { querySize(context.contentResolver, uri) }
+        onPicked(PickedMedia(UriContent(context, uri, size), mime, name, kind))
     }
 }
 
@@ -163,10 +168,71 @@ private fun newMediaUri(
     return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 }
 
-internal fun readBytes(
+/**
+ * [MediaContent] backed by a content URI. Nothing is read until upload time, and
+ * each attempt opens its own stream.
+ */
+private class UriContent(
+    private val context: Context,
+    private val uri: Uri,
+    override val size: Long,
+) : MediaContent {
+    override val previewModel: Any = uri
+
+    override fun openChannel(): ByteReadChannel =
+        (
+            context.contentResolver.openInputStream(uri)
+                ?: error("Не удалось открыть выбранный файл")
+        ).toByteReadChannel()
+}
+
+/** [MediaContent] backed by a file we own — a copy of shared-in content. */
+private class FileContent(
+    private val file: File,
+) : MediaContent {
+    override val size: Long get() = file.length()
+    override val previewModel: Any = Uri.fromFile(file)
+
+    override fun openChannel(): ByteReadChannel = file.inputStream().toByteReadChannel()
+}
+
+/**
+ * Streams [uri] into a file of our own, in constant memory.
+ *
+ * Used for shared-in content: the grant from the sending app lasts only as long
+ * as the receiving activity's intent, and the user may spend a while choosing a
+ * chat, so that path takes a copy rather than keeping a handle to someone else's
+ * URI. Returns null if the content could not be read.
+ */
+private fun copyToCache(
     context: Context,
     uri: Uri,
-): ByteArray? = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+    name: String,
+): File? {
+    val dir = File(context.cacheDir, SHARED_MEDIA_DIR).apply { mkdirs() }
+    val target = File.createTempFile("share_", "_" + name.takeLast(40), dir)
+    return runCatching {
+        val stream = context.contentResolver.openInputStream(uri) ?: error("Нет доступа к файлу")
+        stream.use { input -> target.outputStream().use { output -> input.copyTo(output) } }
+        target
+    }.getOrElse {
+        target.delete()
+        null
+    }
+}
+
+/**
+ * Deletes temp files left behind by shared-in content and camera captures. Safe to
+ * call at startup only, when nothing can still be staged for sending.
+ */
+internal fun clearMediaTempFiles(context: Context) {
+    runCatching {
+        File(context.cacheDir, SHARED_MEDIA_DIR).deleteRecursively()
+        context.cacheDir.listFiles { f -> f.isFile && f.name.startsWith("capture_") }?.forEach { it.delete() }
+    }
+}
+
+private const val SHARED_MEDIA_DIR = "shared_media"
 
 /** A gallery pick: photo or video, decided by MIME type. */
 internal fun readGalleryMedia(
@@ -175,10 +241,14 @@ internal fun readGalleryMedia(
 ): PickedMedia? {
     val resolver = context.contentResolver
     val mime = resolver.getType(uri) ?: "application/octet-stream"
-    val bytes = readBytes(context, uri) ?: return null
     val isVideo = mime.startsWith("video")
     val name = queryDisplayName(resolver, uri) ?: if (isVideo) "video" else "image"
-    return PickedMedia(bytes, mime, name, if (isVideo) PickedKind.VIDEO else PickedKind.PHOTO)
+    return PickedMedia(
+        UriContent(context, uri, querySize(resolver, uri)),
+        mime,
+        name,
+        if (isVideo) PickedKind.VIDEO else PickedKind.PHOTO,
+    )
 }
 
 /** An arbitrary file pick — always [PickedKind.FILE]. */
@@ -188,9 +258,8 @@ internal fun readFile(
 ): PickedMedia? {
     val resolver = context.contentResolver
     val mime = resolver.getType(uri) ?: "application/octet-stream"
-    val bytes = readBytes(context, uri) ?: return null
     val name = queryDisplayName(resolver, uri) ?: "file"
-    return PickedMedia(bytes, mime, name, PickedKind.FILE)
+    return PickedMedia(UriContent(context, uri, querySize(resolver, uri)), mime, name, PickedKind.FILE)
 }
 
 /** An incoming share: kind is inferred from the MIME type (image/video/else). */
@@ -200,7 +269,6 @@ internal fun readSharedMedia(
 ): PickedMedia? {
     val resolver = context.contentResolver
     val mime = resolver.getType(uri) ?: "application/octet-stream"
-    val bytes = readBytes(context, uri) ?: return null
     val kind =
         when {
             mime.startsWith("image") -> PickedKind.PHOTO
@@ -213,8 +281,20 @@ internal fun readSharedMedia(
             PickedKind.VIDEO -> "video"
             PickedKind.FILE -> "file"
         }
-    return PickedMedia(bytes, mime, name, kind)
+    // Copied rather than handed over as a URI — see [copyToCache].
+    val copy = copyToCache(context, uri, name) ?: return null
+    return PickedMedia(FileContent(copy), mime, name, kind)
 }
+
+/** The content's size in bytes, or -1 when the provider doesn't report one. */
+private fun querySize(
+    resolver: ContentResolver,
+    uri: Uri,
+): Long =
+    resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+        val column = c.getColumnIndex(OpenableColumns.SIZE)
+        if (c.moveToFirst() && column >= 0 && !c.isNull(column)) c.getLong(column) else -1L
+    } ?: -1L
 
 private fun queryDisplayName(
     resolver: ContentResolver,

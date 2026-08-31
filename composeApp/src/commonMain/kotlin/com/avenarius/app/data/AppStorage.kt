@@ -18,7 +18,9 @@ interface AppStorage {
 
 /** Convenience accessors layered on top of the raw key/value store. */
 class Prefs(
-    private val storage: AppStorage,
+    // Internal (not private) so [AppCache] can layer its own keys over the same
+    // store without every call site having to pass the storage around twice.
+    internal val storage: AppStorage,
 ) {
     var token: String?
         get() = storage.getString(KEY_TOKEN)

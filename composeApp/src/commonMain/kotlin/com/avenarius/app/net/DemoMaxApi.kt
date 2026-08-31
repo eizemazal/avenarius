@@ -2,6 +2,7 @@ package com.avenarius.app.net
 
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.MediaContent
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
 import com.avenarius.app.model.OutAttach
@@ -123,22 +124,25 @@ class DemoMaxApi : MaxApi {
     ): Message = Message(id = "demo-$cid", cid = cid, chatId = chatId, senderId = ME, text = text, time = cid, status = MessageStatus.SENT)
 
     override suspend fun uploadPhoto(
-        bytes: ByteArray,
+        content: MediaContent,
         fileName: String,
         mime: String,
         profile: Boolean,
+        onProgress: ((Float) -> Unit)?,
     ): OutAttach.Photo = OutAttach.Photo("demo")
 
     override suspend fun uploadVideo(
-        bytes: ByteArray,
+        content: MediaContent,
         fileName: String,
         mime: String,
+        onProgress: ((Float) -> Unit)?,
     ): OutAttach.Video = OutAttach.Video(0L, "demo")
 
     override suspend fun uploadFile(
-        bytes: ByteArray,
+        content: MediaContent,
         fileName: String,
         mime: String,
+        onProgress: ((Float) -> Unit)?,
     ): OutAttach.File = OutAttach.File(0L)
 
     override suspend fun forwardMessage(

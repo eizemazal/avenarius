@@ -6,26 +6,12 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** In-memory [AppStorage] for tests. */
-private class FakeStorage : AppStorage {
-    val map = mutableMapOf<String, String>()
-
-    override fun getString(key: String): String? = map[key]
-
-    override fun putString(
-        key: String,
-        value: String?,
-    ) {
-        if (value == null) map.remove(key) else map[key] = value
-    }
-}
-
 private val UUID = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 class PrefsTest {
     @Test
     fun tokenAndUserIdRoundTrip() {
-        val prefs = Prefs(FakeStorage())
+        val prefs = Prefs(InMemoryStorage())
         assertNull(prefs.token)
         assertNull(prefs.userId)
 
@@ -37,7 +23,7 @@ class PrefsTest {
 
     @Test
     fun clearRemovesTokenButKeepsDeviceIds() {
-        val prefs = Prefs(FakeStorage())
+        val prefs = Prefs(InMemoryStorage())
         prefs.token = "tok"
         prefs.userId = 5L
         val device = prefs.deviceId
@@ -53,7 +39,7 @@ class PrefsTest {
 
     @Test
     fun deviceIdIsStableUuidAndPersisted() {
-        val storage = FakeStorage()
+        val storage = InMemoryStorage()
         val prefs = Prefs(storage)
         val first = prefs.deviceId
         assertTrue(UUID.matches(first), "deviceId should be a UUID: $first")
@@ -64,7 +50,7 @@ class PrefsTest {
 
     @Test
     fun deviceAndMtInstanceDiffer() {
-        val prefs = Prefs(FakeStorage())
+        val prefs = Prefs(InMemoryStorage())
         assertNotEquals(prefs.deviceId, prefs.mtInstance)
         assertTrue(UUID.matches(prefs.mtInstance))
     }

@@ -2,6 +2,8 @@ package com.avenarius.app.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.avenarius.app.data.AppCache
+import com.avenarius.app.data.CachedSession
 import com.avenarius.app.data.Prefs
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
@@ -11,11 +13,15 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.OutAttach
+import com.avenarius.app.model.PendingAttach
 import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.SearchResult
+import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.model.previewLabel
 import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.DemoMaxApi
 import com.avenarius.app.net.FoundUser
@@ -23,11 +29,16 @@ import com.avenarius.app.net.MaxApi
 import com.avenarius.app.ui.theme.ThemeMode
 import com.avenarius.app.ui.theme.prefValue
 import com.avenarius.app.ui.theme.themeModeOf
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -126,7 +137,39 @@ data class AppState(
     val demoMode: Boolean = false,
     /** Transient message shown as a snackbar (e.g. "web login confirmed"). */
     val notice: String? = null,
-)
+    /** The saved unsent text of the chat being opened (restored into the input). */
+    val draft: String = "",
+    /** Saved unsent text per chat id, previewed in the chat list ("Черновик: …"). */
+    val drafts: Map<Long, String> = emptyMap(),
+    /** fileId -> platform reference, for attachments already saved to the device. */
+    val downloadedFiles: Map<Long, String> = emptyMap(),
+    /** File attachments being fetched right now, as fileId -> fraction done (0..1). */
+    val downloadingFiles: Map<Long, Float> = emptyMap(),
+    /** Approximate size of the on-disk cache, shown in settings. */
+    val cacheSizeBytes: Long = 0,
+    /**
+     * Messages created locally whose attachments are still uploading, keyed by chat.
+     *
+     * Kept out of [messages] on purpose: that list is cleared whenever a chat is
+     * left or opened, which would drop an in-flight send from view while it was
+     * still running. These survive navigation and reappear with the chat.
+     */
+    val pendingSends: Map<Long, List<Message>> = emptyMap(),
+    /** False until the first successful sync of this launch (drives the status bar text). */
+    val syncedOnce: Boolean = false,
+) {
+    /**
+     * The open chat's messages with its still-sending bubbles merged in.
+     *
+     * Ordered by time, not appended: a bubble that failed a while ago belongs where
+     * it was written, so anything sent since shows up below it rather than above.
+     */
+    val visibleMessages: List<Message>
+        get() {
+            val pending = currentChat?.let { pendingSends[it.id] }.orEmpty()
+            return if (pending.isEmpty()) messages else (messages + pending).sortedBy { it.time }
+        }
+}
 
 /**
  * Holds all app state and drives the [MaxClient]. Lives in commonMain, so the
@@ -137,6 +180,7 @@ class AppViewModel(
     // The client is app-scoped (shared with the background service), so the
     // ViewModel must NOT create or tear it down — it's injected.
     realClient: MaxApi,
+    private val cache: AppCache = AppCache(prefs.storage),
 ) : ViewModel() {
     // Swappable: the demo login (Google Play review account) replaces this with an
     // offline [DemoMaxApi] so it never touches the real servers. [originalClient] is
@@ -171,7 +215,7 @@ class AppViewModel(
     ) {
         val myId = _state.value.account?.userId ?: return
         launchBusy {
-            val token = avatar?.let { client.uploadPhoto(it.bytes, it.fileName, it.mime, profile = true).token }
+            val token = avatar?.let { client.uploadPhoto(it.content, it.fileName, it.mime, profile = true).token }
             client.updateProfile(
                 firstName.trim(),
                 lastName.trim().ifBlank { null },
@@ -200,6 +244,45 @@ class AppViewModel(
     // Google Play review "demo account": this phone + code starts an offline session.
     private var demoPending = false
 
+    /**
+     * A media send in progress: its items and whatever has uploaded so far. Held
+     * here rather than in [AppState] because it owns live content handles; the
+     * state only carries what the bubble needs to draw itself.
+     */
+    private class OutgoingSend(
+        val chatId: Long,
+        val cid: Long,
+        val caption: String,
+        val replyToId: String?,
+        val items: List<PickedMedia>,
+        /** Parallel to [items]; non-null once that item has uploaded. */
+        val attaches: MutableList<OutAttach?> = MutableList(items.size) { null },
+    )
+
+    // Retry material for the bubbles in [AppState.pendingSends], keyed by cid.
+    private val outgoing = mutableMapOf<Long, OutgoingSend>()
+
+    private var lastCid = 0L
+
+    /**
+     * A client id for an outgoing message. Wall-clock millis on its own can repeat —
+     * two sends inside the same millisecond would share a cid, which the server uses
+     * to deduplicate and we use to match a bubble to its echo — so it only ever
+     * moves forward.
+     */
+    private fun nextCid(): Long {
+        val now = nowMillis()
+        lastCid = if (now > lastCid) now else lastCid + 1
+        return lastCid
+    }
+
+    // cids with an upload/send job running, so a retry can't double-fire.
+    private val activeSends = mutableMapOf<Long, Job>()
+
+    // Unsent per-chat input, loaded once and written back on a debounce.
+    private val drafts: MutableMap<Long, String> by lazy { cache.drafts().toMutableMap() }
+    private var draftFlushJob: Job? = null
+
     init {
         // Forward server-pushed messages into whichever chat is open AND keep the
         // chat-list row live (preview text, timestamp, unread badge, ordering).
@@ -221,6 +304,13 @@ class AppViewModel(
                             alreadyShown -> s.messages.map { if (it.id == msg.id) msg else it }
                             else -> s.messages + msg
                         }
+                    // Our own echo (matched on the cid we sent): the server's copy is
+                    // now in the list, so the local bubble has done its job.
+                    val prunedPending =
+                        msg.cid?.let { cid ->
+                            outgoing.remove(cid)
+                            s.pendingSends.minusPending(msg.chatId, cid)
+                        } ?: s.pendingSends
                     val known = s.chats.any { it.id == msg.chatId }
                     val updated =
                         if (known) {
@@ -229,7 +319,7 @@ class AppViewModel(
                                     c
                                 } else {
                                     c.copy(
-                                        lastMessageText = msg.text.ifBlank { c.lastMessageText },
+                                        lastMessageText = msg.previewLabel().ifBlank { c.lastMessageText },
                                         lastEventTime = maxOf(c.lastEventTime, msg.time),
                                         // Bump the badge only for chats we aren't looking at,
                                         // and never for our own (echoed) messages.
@@ -251,13 +341,17 @@ class AppViewModel(
                                 Chat(
                                     id = msg.chatId,
                                     title = title,
-                                    lastMessageText = msg.text,
+                                    lastMessageText = msg.previewLabel(),
                                     lastEventTime = msg.time,
                                     unreadCount = if (fromMe) 0 else 1,
                                     isDialog = isDialog,
                                 )
                         }
-                    s.copy(messages = messages, chats = updated.sortedByDescending { it.lastEventTime })
+                    s.copy(
+                        messages = messages,
+                        pendingSends = prunedPending,
+                        chats = updated.sortedByDescending { it.lastEventTime },
+                    )
                 }
                 // We're looking at this chat -> immediately mark the new message read.
                 // Use max(now, msg.time) so device-clock skew can't make the mark
@@ -380,15 +474,131 @@ class AppViewModel(
                 }
             }
         }
+        // Keep the warm-start snapshot fresh. Collected from the state (rather than
+        // written at each mutation site) so every path that changes the chat list —
+        // sync, live pushes, late dialog-title resolution — is covered. conflate()
+        // plus a trailing delay throttles it to at most one write per interval.
+        viewModelScope.launch {
+            _state
+                .map(::cacheableSnapshot)
+                .distinctUntilChanged()
+                .conflate()
+                .collect { snapshot ->
+                    if (snapshot != null) {
+                        cache.saveSession(snapshot.copy(savedAt = nowMillis()))
+                        delay(CACHE_WRITE_THROTTLE_MS)
+                    }
+                }
+        }
         // Auto-login if we already have a token.
         if (prefs.token == null) {
             _state.update { it.copy(screen = Screen.LOGIN) }
         } else {
+            restoreCachedSession()
             connectWithRetry(freshSession = true)
         }
     }
 
+    /**
+     * The slice of the state worth persisting, or null when there is nothing to
+     * cache (not signed in, or in the offline demo session — whose fake data must
+     * never overwrite a real account's snapshot). [CachedSession.savedAt] is left
+     * at 0 here so the timestamp doesn't defeat distinctUntilChanged.
+     */
+    private fun cacheableSnapshot(s: AppState): CachedSession? {
+        if (s.demoMode) return null
+        val account = s.account ?: return null
+        return CachedSession(
+            userId = account.userId,
+            account = account,
+            chats = s.chats,
+            contacts = s.contacts,
+            contactsList = s.contactsList,
+            peers = s.groupMembers,
+        )
+    }
+
+    /**
+     * Paints the last known chat list before the network answers. Without it the
+     * first frames after launch show placeholder dialog titles ("Диалог <id>"),
+     * because a dialog's title is derived from the contact map when the chat is
+     * parsed — and is only patched up later, one fetchUser per dialog.
+     */
+    private fun restoreCachedSession() {
+        // Drafts and download records are stored separately from the chat-list
+        // snapshot, so they are restored even when there is no snapshot to paint.
+        if (drafts.isNotEmpty()) _state.update { it.copy(drafts = drafts.toMap()) }
+        cache.downloadedFiles().takeIf { it.isNotEmpty() }?.let { refs ->
+            _state.update { it.copy(downloadedFiles = refs) }
+        }
+        val cached = prefs.userId?.let { cache.loadSession(it) } ?: return
+        _state.update {
+            it.copy(
+                screen = Screen.CHATS,
+                account = cached.account ?: it.account,
+                chats = cached.chats,
+                contacts = cached.contacts,
+                contactsList = cached.contactsList,
+                groupMembers = cached.peers,
+            )
+        }
+    }
+
     private var connectJob: Job? = null
+
+    /**
+     * Records the unsent text of the open chat so it survives leaving the screen.
+     * Held in memory and flushed to storage shortly after typing stops (or at once
+     * when the chat closes), to avoid a write per keystroke.
+     */
+    fun setDraft(text: String) {
+        val chatId = _state.value.currentChat?.id ?: return
+        if (text.isBlank()) drafts.remove(chatId) else drafts[chatId] = text
+        draftFlushJob?.cancel()
+        draftFlushJob =
+            viewModelScope.launch {
+                delay(DRAFT_FLUSH_DELAY_MS)
+                persistDrafts()
+            }
+    }
+
+    private fun flushDrafts() {
+        draftFlushJob?.cancel()
+        persistDrafts()
+    }
+
+    /**
+     * Writes drafts to storage and publishes them for the chat list. Deliberately
+     * not done per keystroke: the list isn't on screen while typing, so a write
+     * (and a state update) once typing settles or the chat closes is enough.
+     */
+    private fun persistDrafts() {
+        cache.saveDrafts(drafts)
+        _state.update { it.copy(drafts = drafts.toMap()) }
+    }
+
+    /** Drops all locally stored data (snapshot + drafts). Used when the account goes away. */
+    private fun wipeLocalData() {
+        draftFlushJob?.cancel()
+        drafts.clear()
+        cache.clearAll()
+        outgoing.clear()
+        activeSends.values.forEach { it.cancel() }
+        activeSends.clear()
+    }
+
+    /**
+     * Forgets the cached conversation snapshot. Drafts (unsent user content) are
+     * kept, and the live session is untouched — the snapshot simply gets rewritten
+     * on the next sync or incoming message.
+     */
+    fun clearCache() {
+        cache.clearCache()
+        _state.update { it.copy(cacheSizeBytes = cache.sizeBytes(), notice = "Кэш очищен") }
+    }
+
+    /** Re-reads the cache size (the settings screen shows it). */
+    fun refreshCacheSize() = _state.update { it.copy(cacheSizeBytes = cache.sizeBytes()) }
 
     /**
      * Establishes the session and keeps retrying on transient failures (with
@@ -421,6 +631,7 @@ class AppViewModel(
                                 reconnecting = false,
                                 busy = false,
                                 error = null,
+                                syncedOnce = true,
                             )
                         }
                         resolveDialogTitles()
@@ -431,6 +642,7 @@ class AppViewModel(
                         if (msg.contains("вход", true) || msg.contains("авториз", true)) {
                             // Genuine auth rejection -> the token is dead, must re-login.
                             prefs.clear()
+                            wipeLocalData()
                             client.disconnect()
                             _state.update { AppState(screen = Screen.LOGIN, error = msg) }
                             return@launch
@@ -561,6 +773,7 @@ class AppViewModel(
                 onlineUsers = result.online,
                 busy = false,
                 error = null,
+                syncedOnce = true,
             )
         }
         resolveDialogTitles()
@@ -588,6 +801,7 @@ class AppViewModel(
                 screen = Screen.CHAT,
                 currentChat = chat,
                 messages = emptyList(),
+                draft = drafts[chat.id] ?: "",
                 openUnreadCount = chat.unreadCount,
                 loadingOlder = false,
                 noMoreOlder = false,
@@ -615,7 +829,8 @@ class AppViewModel(
     }
 
     fun backToChats() {
-        _state.update { it.copy(screen = Screen.CHATS, currentChat = null, messages = emptyList()) }
+        flushDrafts()
+        _state.update { it.copy(screen = Screen.CHATS, currentChat = null, messages = emptyList(), draft = "") }
     }
 
     fun selectTab(tab: Tab) = _state.update { it.copy(tab = tab) }
@@ -758,7 +973,7 @@ class AppViewModel(
         val title = name.trim()
         if (title.isEmpty()) return
         launchBusy {
-            val token = avatar?.let { client.uploadPhoto(it.bytes, it.fileName, it.mime).token }
+            val token = avatar?.let { client.uploadPhoto(it.content, it.fileName, it.mime).token }
             // Resolve selected address-book phones through the rate limiter (spaced).
             val resolved = mutableListOf<Long>()
             var rateLimited = false
@@ -922,7 +1137,8 @@ class AppViewModel(
     fun downloadCurrentMedia() {
         val v = _state.value.mediaViewer ?: return
         val url = v.url ?: return
-        downloadToDevice(url, suggestedMediaName(v), if (v.isVideo) "video/mp4" else "image/jpeg")
+        // The platform reports its own outcome (a toast); nothing here needs the result.
+        launchBusyless { downloadToDevice(url, suggestedMediaName(v), if (v.isVideo) "video/mp4" else "image/jpeg") }
     }
 
     /** Shares the media currently shown in the viewer to other apps (Android share sheet). */
@@ -1097,7 +1313,7 @@ class AppViewModel(
         val chat = _state.value.currentChat ?: return
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
-        val cid = nowMillis()
+        val cid = nextCid()
         val replyToId = _state.value.replyingTo?.id
         _state.update { it.copy(replyingTo = null) } // clear the reply banner on send
         launchBusyless {
@@ -1115,37 +1331,301 @@ class AppViewModel(
     }
 
     /**
-     * Uploads [items] (photos, videos and/or files) and sends them as a SINGLE message
-     * carrying all attaches, with an optional [caption]. Shows a
-     * [AppState.sendingAttachment] spinner while the uploads + send are in flight.
+     * Sends [items] (photos, videos and/or files) as a SINGLE message carrying all
+     * attaches, with an optional [caption].
+     *
+     * The bubble goes into the chat straight away with a thumbnail per item, and
+     * each item's progress ring fills as its upload runs — rather than hiding the
+     * whole batch behind one spinner until every byte is up. A single failed item
+     * no longer costs the whole batch: whatever uploaded is still sent, and the
+     * rest stays behind as a failed bubble that [retrySend] can pick up.
      */
     fun sendMedia(
         items: List<PickedMedia>,
         caption: String,
     ) {
         val chat = _state.value.currentChat ?: return
+        val myId = _state.value.account?.userId ?: return
         if (items.isEmpty()) return
         val replyToId = _state.value.replyingTo?.id
-        _state.update { it.copy(replyingTo = null, sendingAttachment = true) }
-        launchBusyless {
-            try {
-                val attaches =
-                    items.map { media ->
-                        when (media.kind) {
-                            PickedKind.PHOTO -> client.uploadPhoto(media.bytes, media.fileName, media.mime)
-                            PickedKind.VIDEO -> client.uploadVideo(media.bytes, media.fileName, media.mime)
-                            PickedKind.FILE -> client.uploadFile(media.bytes, media.fileName, media.mime)
+        // A message can only carry so many attachments (the official client caps it
+        // with a server-set `max-attach-count`, 10 by default), so a bigger pick goes
+        // out as several messages. The caption rides on the first one.
+        val sends =
+            items.chunked(MAX_ATTACHES_PER_MESSAGE).mapIndexed { chunkIndex, chunk ->
+                OutgoingSend(
+                    chatId = chat.id,
+                    cid = nextCid(),
+                    caption = if (chunkIndex == 0) caption.trim() else "",
+                    replyToId = if (chunkIndex == 0) replyToId else null,
+                    items = chunk,
+                )
+            }
+        sends.forEach { send -> outgoing[send.cid] = send }
+        _state.update { st ->
+            st.copy(
+                replyingTo = null,
+                pendingSends =
+                    sends.fold(st.pendingSends) { acc, send ->
+                        acc.plusPending(
+                            chat.id,
+                            Message(
+                                id = null,
+                                cid = send.cid,
+                                chatId = send.chatId,
+                                senderId = myId,
+                                text = send.caption,
+                                time = send.cid,
+                                pending = send.items.map { PendingAttach(it.content.previewModel, it.kind) },
+                            ),
+                        )
+                    },
+            )
+        }
+        startSend(sends)
+    }
+
+    /**
+     * Drops a pending send: cancels its upload if one is running, and takes the
+     * bubble off the chat. The way out of a send that won't go through.
+     */
+    fun discardPendingSend(message: Message) {
+        val cid = message.cid ?: return
+        if (message.id != null) return // a delivered message isn't ours to discard
+        activeSends.remove(cid)?.cancel()
+        outgoing.remove(cid)
+        _state.update {
+            it.copy(
+                pendingSends = it.pendingSends.minusPending(message.chatId, cid),
+                sendingAttachment = activeSends.isNotEmpty(),
+            )
+        }
+    }
+
+    /**
+     * Retries a bubble whose attachments failed. Items that had already uploaded are
+     * not sent up again, and the original cid is reused so a send the server did
+     * receive (but never acknowledged to us) is deduplicated rather than doubled.
+     */
+    fun retrySend(message: Message) {
+        val cid = message.cid ?: return
+        val send = outgoing[cid] ?: return
+        if (cid in activeSends) return // already on its way
+        mapPending(send.chatId, cid) { m ->
+            m.copy(
+                pending =
+                    m.pending.mapIndexed { i, p ->
+                        if (send.attaches.getOrNull(i) == null) {
+                            p.copy(state = UploadState.QUEUED, progress = 0f)
+                        } else {
+                            p
                         }
-                    }
-                val sent = client.sendMessage(chat.id, caption.trim(), nowMillis(), replyToId, attaches)
-                if (sent != null) {
-                    _state.update { s ->
-                        if (s.messages.any { it.id == sent.id }) s else s.copy(messages = s.messages + sent)
+                    },
+            )
+        }
+        _state.update { it.copy(error = null) }
+        startSend(listOf(send))
+    }
+
+    /**
+     * Runs [sends] one after another in a single job, so uploads take turns on the
+     * connection instead of fighting over it, and any of their bubbles can cancel it.
+     */
+    private fun startSend(sends: List<OutgoingSend>) {
+        val queue = sends.filter { it.cid !in activeSends }
+        if (queue.isEmpty()) return
+        // LAZY: the job must be registered before it runs, or a fast completion would
+        // tidy up entries that hadn't been added yet.
+        val job =
+            viewModelScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    queue.forEach { send -> performSend(send) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    _state.update { it.copy(error = e.message ?: "Ошибка отправки") }
+                } finally {
+                    queue.forEach { activeSends.remove(it.cid) }
+                    _state.update { it.copy(sendingAttachment = activeSends.isNotEmpty()) }
+                }
+            }
+        queue.forEach { activeSends[it.cid] = job }
+        _state.update { it.copy(sendingAttachment = true) }
+        job.start()
+    }
+
+    /** Uploads whatever [send] still needs, then delivers it. */
+    private suspend fun performSend(send: OutgoingSend) {
+        var failed = 0
+        send.items.forEachIndexed { index, media ->
+            if (send.attaches[index] != null) return@forEachIndexed // already up
+            updatePending(send.chatId, send.cid, index) {
+                it.copy(state = UploadState.UPLOADING, progress = 0f)
+            }
+            // Progress arrives per written buffer; only meaningful steps are
+            // published, so a big file doesn't cause a state update per chunk.
+            val onProgress: (Float) -> Unit = { fraction ->
+                updatePending(send.chatId, send.cid, index) { p ->
+                    if (fraction - p.progress >= PROGRESS_STEP || fraction >= 1f) {
+                        p.copy(progress = fraction)
+                    } else {
+                        p
                     }
                 }
-            } finally {
-                _state.update { it.copy(sendingAttachment = false) }
             }
+            try {
+                send.attaches[index] =
+                    when (media.kind) {
+                        PickedKind.PHOTO ->
+                            client.uploadPhoto(media.content, media.fileName, media.mime, onProgress = onProgress)
+                        PickedKind.VIDEO ->
+                            client.uploadVideo(media.content, media.fileName, media.mime, onProgress)
+                        PickedKind.FILE ->
+                            client.uploadFile(media.content, media.fileName, media.mime, onProgress)
+                    }
+                updatePending(send.chatId, send.cid, index) {
+                    it.copy(state = UploadState.DONE, progress = 1f)
+                }
+            } catch (e: CancellationException) {
+                // Discarded mid-upload: stop here rather than working through the rest.
+                throw e
+            } catch (e: Throwable) {
+                // One bad item must not sink the others.
+                failed++
+                updatePending(send.chatId, send.cid, index) { it.copy(state = UploadState.FAILED) }
+            }
+        }
+        val ready = send.attaches.filterNotNull()
+        if (ready.isEmpty()) {
+            // Nothing made it: the bubble stays, showing what failed.
+            _state.update { it.copy(error = "Не удалось загрузить вложения") }
+            return
+        }
+        val sent =
+            try {
+                deliver(send, ready, send.cid, send.caption)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // Uploaded, but the message itself didn't go out — the bubble has
+                // to say so rather than showing finished rings. The attaches are
+                // kept, so a retry goes straight to sending.
+                markPendingFailed(send.chatId, send.cid)
+                throw e
+            }
+        finishSend(send, sent, failed)
+    }
+
+    /**
+     * Sends [attaches] as one message — or, if the server says that is more than a
+     * message may carry, as two halves and so on down.
+     *
+     * The ceiling isn't published (the official client reads a `max-attach-count`
+     * from its server config, 10 by default) and this error may also be about total
+     * size rather than count, so it is discovered here instead of assumed. Only the
+     * first message keeps the caption.
+     */
+    private suspend fun deliver(
+        send: OutgoingSend,
+        attaches: List<OutAttach>,
+        cid: Long,
+        caption: String,
+        replyToId: String? = send.replyToId,
+    ): List<Message> =
+        try {
+            listOfNotNull(client.sendMessage(send.chatId, caption, cid, replyToId, attaches))
+        } catch (e: Throwable) {
+            if (attaches.size <= 1 || !isAttachLimitError(e)) throw e
+            // Caption and reply link stay with the first message of a split.
+            val half = attaches.size / 2
+            deliver(send, attaches.take(half), cid, caption, replyToId) +
+                deliver(send, attaches.drop(half), nextCid(), caption = "", replyToId = null)
+        }
+
+    /** True if [error] is the server refusing a message for carrying too much. */
+    private fun isAttachLimitError(error: Throwable): Boolean {
+        val text = error.message ?: return false
+        return text.contains("max-size-reached", ignoreCase = true) ||
+            text.contains("attachment.max", ignoreCase = true)
+    }
+
+    /**
+     * Retires [send]'s bubble now that its message is away. Items that never
+     * uploaded are left behind as their own failed bubble (under a fresh cid, since
+     * [send]'s belongs to the message just sent) so they can still be retried.
+     */
+    private fun finishSend(
+        send: OutgoingSend,
+        sent: List<Message>,
+        failedCount: Int,
+    ) {
+        outgoing.remove(send.cid)
+        val leftovers = send.items.filterIndexed { i, _ -> send.attaches[i] == null }
+        val leftover =
+            leftovers
+                .takeIf { it.isNotEmpty() }
+                ?.let { OutgoingSend(send.chatId, nextCid(), caption = "", replyToId = null, items = it) }
+                ?.also { outgoing[it.cid] = it }
+        val leftoverBubble =
+            leftover?.let { ls ->
+                Message(
+                    id = null,
+                    cid = ls.cid,
+                    chatId = ls.chatId,
+                    senderId = _state.value.account?.userId ?: 0L,
+                    text = "",
+                    time = ls.cid,
+                    pending = ls.items.map { PendingAttach(it.content.previewModel, it.kind, UploadState.FAILED) },
+                )
+            }
+        _state.update { s ->
+            val retired = s.pendingSends.minusPending(send.chatId, send.cid)
+            s.copy(
+                pendingSends = if (leftoverBubble == null) retired else retired.plusPending(send.chatId, leftoverBubble),
+                messages =
+                    if (s.currentChat?.id == send.chatId) {
+                        // Skip any the server already pushed to us.
+                        val known = s.messages.mapNotNull { it.id }.toSet()
+                        s.messages + sent.filter { it.id !in known }
+                    } else {
+                        s.messages
+                    },
+                notice = if (failedCount > 0) "Не отправлено вложений: $failedCount" else s.notice,
+            )
+        }
+    }
+
+    /** Marks every pending attachment of the local message [cid] as failed. */
+    private fun markPendingFailed(
+        chatId: Long,
+        cid: Long,
+    ) = mapPending(chatId, cid) { m -> m.copy(pending = m.pending.map { it.copy(state = UploadState.FAILED) }) }
+
+    /** Applies [transform] to the [index]-th pending attachment of local message [cid]. */
+    private fun updatePending(
+        chatId: Long,
+        cid: Long,
+        index: Int,
+        transform: (PendingAttach) -> PendingAttach,
+    ) = mapPending(chatId, cid) { m ->
+        if (index !in m.pending.indices) {
+            m
+        } else {
+            m.copy(pending = m.pending.mapIndexed { i, p -> if (i == index) transform(p) else p })
+        }
+    }
+
+    private fun mapPending(
+        chatId: Long,
+        cid: Long,
+        transform: (Message) -> Message,
+    ) {
+        _state.update { s ->
+            val current = s.pendingSends[chatId] ?: return@update s
+            s.copy(
+                pendingSends =
+                    s.pendingSends + (chatId to current.map { if (it.cid == cid) transform(it) else it }),
+            )
         }
     }
 
@@ -1176,7 +1656,7 @@ class AppViewModel(
         val fwdId = fwd?.id
         if (fwdId != null) {
             launchBusyless {
-                val sent = client.forwardMessage(chat.id, fwdId, fwd.chatId, nowMillis())
+                val sent = client.forwardMessage(chat.id, fwdId, fwd.chatId, nextCid())
                 if (sent != null) {
                     _state.update { s ->
                         if (s.messages.any { it.id == sent.id }) s else s.copy(messages = s.messages + sent)
@@ -1258,18 +1738,57 @@ class AppViewModel(
         }
     }
 
-    /** Downloads a file attachment via the system DownloadManager. */
-    fun downloadFile(
+    /**
+     * Opens a file attachment if it has already been saved to the device, and
+     * downloads it otherwise — so the same tap does the obvious thing, and a file
+     * fetched once can be opened again straight from the message.
+     */
+    fun openOrDownloadFile(
         message: Message,
         file: FileAttach,
     ) {
+        if (file.fileId in _state.value.downloadingFiles) return
         val msgId = message.id?.toLongOrNull() ?: return
         launchBusyless {
-            val url =
-                client.getFileUrl(message.chatId, msgId, file.fileId)
-                    ?: error("Не удалось получить ссылку на файл")
-            downloadToDevice(url, file.name, "application/octet-stream")
+            _state.value.downloadedFiles[file.fileId]?.let { existing ->
+                if (openDownloadedFile(existing, file.name)) return@launchBusyless
+                // Gone from the device (cleared Downloads, moved, revoked): forget it
+                // and fetch again, rather than leaving a button that does nothing.
+                forgetDownloadedFile(file.fileId)
+            }
+            _state.update { it.copy(downloadingFiles = it.downloadingFiles + (file.fileId to 0f)) }
+            try {
+                val url =
+                    client.getFileUrl(message.chatId, msgId, file.fileId)
+                        ?: error("Не удалось получить ссылку на файл")
+                // Progress goes to the row in the message; the platform stays quiet
+                // (no toast) so it doesn't cover the very indicator it duplicates.
+                val reference =
+                    downloadToDevice(url, file.name, "application/octet-stream") { fraction ->
+                        _state.update { st ->
+                            val shown = st.downloadingFiles[file.fileId] ?: 0f
+                            if (fraction - shown >= PROGRESS_STEP || fraction >= 1f) {
+                                st.copy(downloadingFiles = st.downloadingFiles + (file.fileId to fraction))
+                            } else {
+                                st
+                            }
+                        }
+                    }
+                if (reference != null) {
+                    val refs = _state.value.downloadedFiles + (file.fileId to reference)
+                    cache.saveDownloadedFiles(refs)
+                    _state.update { it.copy(downloadedFiles = refs) }
+                }
+            } finally {
+                _state.update { it.copy(downloadingFiles = it.downloadingFiles - file.fileId) }
+            }
         }
+    }
+
+    private fun forgetDownloadedFile(fileId: Long) {
+        val refs = _state.value.downloadedFiles - fileId
+        cache.saveDownloadedFiles(refs)
+        _state.update { it.copy(downloadedFiles = refs) }
     }
 
     /** Edits our own [msg] to [newText] (optimistically updates the bubble). */
@@ -1291,7 +1810,12 @@ class AppViewModel(
         msg: Message,
         forAll: Boolean,
     ) {
-        val id = msg.id ?: return
+        // A bubble that never made it to the server is deleted locally.
+        if (msg.id == null) {
+            discardPendingSend(msg)
+            return
+        }
+        val id = msg.id
         _state.update { s -> s.copy(messages = s.messages.filterNot { it.id == id }) }
         launchBusyless { client.deleteMessages(msg.chatId, listOf(id), forAll) }
     }
@@ -1380,6 +1904,7 @@ class AppViewModel(
 
     fun logout() {
         prefs.clear()
+        wipeLocalData()
         client.disconnect()
         client = originalClient // leave demo mode if we were in it
         demoPending = false
@@ -1487,6 +2012,39 @@ class AppViewModel(
         const val LOOKUP_LONG_WINDOW_MS = 3_600_000L
         const val LOOKUP_MAX_PER_LONG = 20
         const val RATE_LIMIT_MSG = "Слишком много проверок номеров. Подождите немного и повторите."
+
+        // Attachments per message. Mirrors the official client's `max-attach-count`
+        // default; the server can be stricter, which [deliver] discovers.
+        const val MAX_ATTACHES_PER_MESSAGE = 10
+
+        // Smallest upload-progress change worth publishing to the UI.
+        const val PROGRESS_STEP = 0.02f
+
+        // How long to wait after the last keystroke before writing a draft to storage.
+        const val DRAFT_FLUSH_DELAY_MS = 800L
+
+        // Minimum interval between warm-start snapshot writes.
+        const val CACHE_WRITE_THROTTLE_MS = 1_000L
+    }
+}
+
+/** Adds [message] to the pending-send list of [chatId]. */
+private fun Map<Long, List<Message>>.plusPending(
+    chatId: Long,
+    message: Message,
+): Map<Long, List<Message>> = this + (chatId to (this[chatId].orEmpty() + message))
+
+/** Removes the pending send with [cid] from [chatId], dropping the key when empty. */
+private fun Map<Long, List<Message>>.minusPending(
+    chatId: Long,
+    cid: Long,
+): Map<Long, List<Message>> {
+    val current = this[chatId] ?: return this
+    val remaining = current.filterNot { it.cid == cid }
+    return when {
+        remaining.size == current.size -> this
+        remaining.isEmpty() -> this - chatId
+        else -> this + (chatId to remaining)
     }
 }
 

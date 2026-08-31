@@ -5,6 +5,7 @@ import com.avenarius.app.model.Chat
 import com.avenarius.app.model.FileAttach
 import com.avenarius.app.model.LinkPreview
 import com.avenarius.app.model.MediaAttach
+import com.avenarius.app.model.MediaContent
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
@@ -14,17 +15,29 @@ import com.avenarius.app.model.ReplyInfo
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.ServiceEvent
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.model.previewLabel
 import com.avenarius.app.ui.nowMillis
 import io.ktor.client.HttpClient
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.onUpload
+import io.ktor.client.plugins.timeout
+import io.ktor.client.request.HttpRequestBuilder
+import io.ktor.client.request.forms.ChannelProvider
 import io.ktor.client.request.forms.formData
 import io.ktor.client.request.forms.submitFormWithBinaryData
 import io.ktor.client.request.headers
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
+import io.ktor.http.content.ByteArrayContent
+import io.ktor.http.content.OutgoingContent
 import io.ktor.http.isSuccess
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.readRemaining
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -33,6 +46,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.io.readByteArray
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -169,12 +183,17 @@ interface MaxApi {
         attaches: List<OutAttach> = emptyList(),
     ): Message?
 
-    /** Uploads a photo and returns the attach descriptor. [profile] = an avatar upload. */
+    /**
+     * Uploads a photo and returns the attach descriptor. [profile] = an avatar upload.
+     * [onProgress] is called with 0..1 as the body goes out, for a determinate
+     * progress ring on the staged thumbnail.
+     */
     suspend fun uploadPhoto(
-        bytes: ByteArray,
+        content: MediaContent,
         fileName: String,
         mime: String,
         profile: Boolean = false,
+        onProgress: ((Float) -> Unit)? = null,
     ): OutAttach.Photo
 
     /** Forwards message [messageId] (from chat [fromChatId]) into chat [toChatId]. */
@@ -209,16 +228,18 @@ interface MaxApi {
 
     /** Uploads a video (waits for server processing) and returns its attach descriptor. */
     suspend fun uploadVideo(
-        bytes: ByteArray,
+        content: MediaContent,
         fileName: String,
         mime: String,
+        onProgress: ((Float) -> Unit)? = null,
     ): OutAttach.Video
 
     /** Uploads an arbitrary file (waits for server processing) and returns its attach. */
     suspend fun uploadFile(
-        bytes: ByteArray,
+        content: MediaContent,
         fileName: String,
         mime: String,
+        onProgress: ((Float) -> Unit)? = null,
     ): OutAttach.File
 
     suspend fun markRead(
@@ -326,6 +347,37 @@ interface MaxApi {
 }
 
 /**
+ * A file name fit for the upload's `Content-Disposition`.
+ *
+ * The value goes into the header unquoted, exactly as the official client sends it:
+ * the server stores whatever follows `filename=`, so quoting it once made every
+ * uploaded document arrive called `"doc.pdf"` — quotes and all — which in turn hid
+ * its extension from the phone when opening it. Quotes and line breaks are stripped
+ * (the latter would also let a name inject headers).
+ */
+internal fun headerFileName(fileName: String): String =
+    fileName
+        // Cut at a line break rather than deleting it: that both stops a name from
+        // injecting a header and leaves something sensible behind.
+        .substringBefore('\r')
+        .substringBefore('\n')
+        .replace("\"", "")
+        .trim()
+        .ifBlank { "file" }
+
+/**
+ * Cleans a file name received from the server. Older uploads (ours included) were
+ * labelled with a quoted `filename=`, and those quotes became part of the stored
+ * name — so they are trimmed off here rather than reaching the UI, the saved file's
+ * name, or the extension that decides which app opens it.
+ */
+internal fun String.cleanFileName(): String = trim().removeSurrounding("\"").trim()
+
+/** [mime] as a content type, falling back to octet-stream if it doesn't parse. */
+private fun contentTypeOf(mime: String): ContentType =
+    runCatching { ContentType.parse(mime) }.getOrDefault(ContentType.Application.OctetStream)
+
+/**
  * A minimal client for the "Max" messenger MOBILE protocol.
  *
  * Unlike the web client (JSON over WebSocket, QR login only), the mobile protocol
@@ -336,12 +388,21 @@ interface MaxApi {
  * Everything here is platform-independent (commonMain) and shared by the Android
  * and desktop clients; only [TlsSocket] differs per platform.
  */
+
 class MaxClient : MaxApi {
     companion object {
         // Mirrors the official Android client / rumax. appVersion + buildNumber
         // are taken from the current MAX.apk (26.17.0 / 6713).
         const val APP_VERSION = "26.17.0"
         const val BUILD_NUMBER = 6713
+
+        // Only reached when a content provider doesn't report a size, so the upload
+        // has to be measured before it can be sent. Bounded so that path can't OOM.
+        private const val MAX_BUFFERED_UPLOAD_BYTES = 64 * 1024 * 1024
+
+        // Upload budgets: total per request, and the allowed gap between packets.
+        private const val UPLOAD_REQUEST_TIMEOUT_MS = 10 * 60 * 1000L
+        private const val UPLOAD_SOCKET_TIMEOUT_MS = 2 * 60 * 1000L
 
         // Opcodes (verified against PyMax protocol enums and rumax).
         private const val OP_HANDSHAKE = 6
@@ -390,7 +451,15 @@ class MaxClient : MaxApi {
 
     // Plain HTTP client for media upload/download (separate from the raw-socket
     // protocol transport). Uses the platform Ktor engine (OkHttp on Android).
-    private val http by lazy { HttpClient() }
+    private val http by lazy {
+        HttpClient {
+            install(HttpTimeout) {
+                connectTimeoutMillis = 30_000
+                socketTimeoutMillis = 60_000
+                requestTimeoutMillis = 60_000
+            }
+        }
+    }
 
     /** Temporary token from START_AUTH / a 2FA challenge, needed for the next step. */
     private var authToken: String? = null
@@ -512,12 +581,14 @@ class MaxClient : MaxApi {
         val id = c["id"]?.jsonPrimitive?.long ?: return null
         val type = c["type"]?.jsonPrimitive?.contentOrNullSafe()
         val rawTitle = c["title"]?.jsonPrimitive?.contentOrNullSafe()
+        // Parsed rather than read straight off `text`, so a photo/file/voice message
+        // gets a label instead of leaving the row blank (or, worse, showing whatever
+        // text came before it).
         val lastText =
-            c["lastMessage"]
-                ?.jsonObject
-                ?.get("text")
-                ?.jsonPrimitive
-                ?.contentOrNullSafe()
+            (c["lastMessage"] as? JsonObject)
+                ?.let { parseMessage(it, id) }
+                ?.previewLabel()
+                ?.ifBlank { null }
                 ?.let { localize(it) }
         val lastTime = c["lastEventTime"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
         val unread = c["newMessages"]?.jsonPrimitive?.intOrNullSafe() ?: 0
@@ -1122,10 +1193,11 @@ class MaxClient : MaxApi {
     }
 
     override suspend fun uploadPhoto(
-        bytes: ByteArray,
+        content: MediaContent,
         fileName: String,
         mime: String,
         profile: Boolean,
+        onProgress: ((Float) -> Unit)?,
     ): OutAttach.Photo {
         // 1) Ask the server for an upload URL (it embeds the photoId in its query).
         val data =
@@ -1148,16 +1220,20 @@ class MaxClient : MaxApi {
                 url = url,
                 formData =
                     formData {
+                        // Streamed from the source: a photo is never held in the heap.
                         append(
                             "file",
-                            bytes,
+                            ChannelProvider(content.size.takeIf { it >= 0 }) { content.openChannel() },
                             Headers.build {
                                 append(HttpHeaders.ContentType, mime)
                                 append(HttpHeaders.ContentDisposition, "filename=\"image.$ext\"")
                             },
                         )
                     },
-            )
+            ) {
+                applyUploadTimeouts()
+                reportProgress(onProgress)
+            }
         val token =
             Json
                 .parseToJsonElement(response.bodyAsText())
@@ -1198,9 +1274,10 @@ class MaxClient : MaxApi {
     }
 
     override suspend fun uploadVideo(
-        bytes: ByteArray,
+        content: MediaContent,
         fileName: String,
         mime: String,
+        onProgress: ((Float) -> Unit)?,
     ): OutAttach.Video {
         // 1) Request an upload slot: {info:[{url, videoId, token}]}.
         val data = transport.request(OP_VIDEO_UPLOAD, buildJsonObject { put("count", 1) })
@@ -1210,15 +1287,8 @@ class MaxClient : MaxApi {
         val url = info["url"]?.jsonPrimitive?.contentOrNullSafe() ?: error("Нет ссылки для загрузки видео")
         val videoId = info["videoId"]?.jsonPrimitive?.longOrNullSafe() ?: error("Сервер не вернул videoId")
         val token = info["token"]?.jsonPrimitive?.contentOrNullSafe() ?: error("Сервер не вернул токен видео")
-        // 2) Upload the bytes (single range covering the whole file).
-        val response =
-            http.post(url) {
-                headers {
-                    append(HttpHeaders.ContentDisposition, "attachment; filename=\"$fileName\"")
-                    append(HttpHeaders.ContentRange, "0-${bytes.size - 1}/${bytes.size}")
-                }
-                setBody(bytes)
-            }
+        // 2) Stream the content up (single range covering the whole file).
+        val response = putContent(url, fileName, mime, content, onProgress)
         if (!response.status.isSuccess()) error("Загрузка видео не удалась (${response.status.value})")
         // 3) Wait for the server to finish processing (NOTIF_ATTACH with our videoId).
         withTimeoutOrNull(60_000) { videoReadyFlow.first { it == videoId } }
@@ -1226,10 +1296,85 @@ class MaxClient : MaxApi {
         return OutAttach.Video(videoId, token)
     }
 
-    override suspend fun uploadFile(
-        bytes: ByteArray,
+    /**
+     * Uploads run far longer than an ordinary call: a big body takes a while to go
+     * out, and the CDN can be slow to answer once the last byte is in. The client's
+     * default 60s budget would cut those off ("socket timeout has expired"), which
+     * is why every upload request widens it.
+     */
+    private fun HttpRequestBuilder.applyUploadTimeouts() {
+        timeout {
+            requestTimeoutMillis = UPLOAD_REQUEST_TIMEOUT_MS
+            socketTimeoutMillis = UPLOAD_SOCKET_TIMEOUT_MS
+        }
+    }
+
+    /** Forwards body-transfer progress as a 0..1 fraction, when the size is known. */
+    private fun HttpRequestBuilder.reportProgress(onProgress: ((Float) -> Unit)?) {
+        if (onProgress == null) return
+        onUpload { sent, total ->
+            if (total != null && total > 0) onProgress((sent.toFloat() / total).coerceIn(0f, 1f))
+        }
+    }
+
+    /**
+     * POSTs [content] to a CDN upload slot, streaming it rather than materialising
+     * it in memory.
+     *
+     * The CDN wants a single Content-Range covering the whole file, which needs an
+     * exact length up front. When the platform couldn't report a size, the content
+     * is buffered first to measure it — capped, so an unknown-size monster fails
+     * with a message instead of an OutOfMemoryError.
+     */
+    private suspend fun putContent(
+        url: String,
         fileName: String,
         mime: String,
+        content: MediaContent,
+        onProgress: ((Float) -> Unit)? = null,
+    ): HttpResponse {
+        val declared = content.size
+        val body: OutgoingContent =
+            if (declared >= 0) {
+                object : OutgoingContent.ReadChannelContent() {
+                    override val contentType = contentTypeOf(mime)
+                    override val contentLength = declared
+
+                    override fun readFrom(): ByteReadChannel = content.openChannel()
+                }
+            } else {
+                // Read one byte past the cap: enough to know the content is too big,
+                // without pulling all of it in to find out.
+                val buffered =
+                    content
+                        .openChannel()
+                        .readRemaining(MAX_BUFFERED_UPLOAD_BYTES + 1L)
+                        .readByteArray()
+                if (buffered.size > MAX_BUFFERED_UPLOAD_BYTES) {
+                    error("Файл слишком большой для отправки")
+                }
+                ByteArrayContent(buffered, contentTypeOf(mime))
+            }
+        val length = body.contentLength ?: 0L
+        // The range header below can't describe an empty body, and the server has
+        // nothing to store anyway.
+        if (length <= 0L) error("Файл пуст")
+        return http.post(url) {
+            applyUploadTimeouts()
+            reportProgress(onProgress)
+            headers {
+                append(HttpHeaders.ContentDisposition, "attachment; filename=${headerFileName(fileName)}")
+                append(HttpHeaders.ContentRange, "0-${length - 1}/$length")
+            }
+            setBody(body)
+        }
+    }
+
+    override suspend fun uploadFile(
+        content: MediaContent,
+        fileName: String,
+        mime: String,
+        onProgress: ((Float) -> Unit)?,
     ): OutAttach.File {
         // Mirrors uploadVideo: {info:[{url, fileId, token}]} -> POST bytes -> await ready.
         val data = transport.request(OP_FILE_UPLOAD, buildJsonObject { put("count", 1) })
@@ -1238,14 +1383,7 @@ class MaxClient : MaxApi {
                 ?: error(data.serverMessage("Не удалось начать загрузку файла"))
         val url = info["url"]?.jsonPrimitive?.contentOrNullSafe() ?: error("Нет ссылки для загрузки файла")
         val fileId = info["fileId"]?.jsonPrimitive?.longOrNullSafe() ?: error("Сервер не вернул fileId")
-        val response =
-            http.post(url) {
-                headers {
-                    append(HttpHeaders.ContentDisposition, "attachment; filename=\"$fileName\"")
-                    append(HttpHeaders.ContentRange, "0-${bytes.size - 1}/${bytes.size}")
-                }
-                setBody(bytes)
-            }
+        val response = putContent(url, fileName, mime, content, onProgress)
         if (!response.status.isSuccess()) error("Загрузка файла не удалась (${response.status.value})")
         withTimeoutOrNull(60_000) { fileReadyFlow.first { it == fileId } }
             ?: error("Файл не был обработан сервером вовремя")
@@ -1494,7 +1632,13 @@ class MaxClient : MaxApi {
                     val fileId = a["fileId"]?.jsonPrimitive?.longOrNullSafe() ?: return@mapNotNull null
                     FileAttach(
                         fileId = fileId,
-                        name = a["name"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null } ?: "Файл",
+                        name =
+                            a["name"]
+                                ?.jsonPrimitive
+                                ?.contentOrNullSafe()
+                                ?.cleanFileName()
+                                ?.ifBlank { null }
+                                ?: "Файл",
                         size = a["size"]?.jsonPrimitive?.longOrNullSafe() ?: 0L,
                     )
                 }

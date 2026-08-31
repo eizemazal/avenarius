@@ -81,6 +81,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import coil3.compose.SubcomposeAsyncImage
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.FileAttach
 import com.avenarius.app.model.LinkPreview
@@ -88,9 +89,11 @@ import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
+import com.avenarius.app.model.PendingAttach
 import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.ServiceEvent
+import com.avenarius.app.model.UploadState
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.MediaViewer
 import com.avenarius.app.ui.PlatformBackHandler
@@ -123,8 +126,11 @@ internal fun ChatScreen(
     replyingTo: Message?,
     sendingAttachment: Boolean,
     stagedMedia: List<PickedMedia>,
+    /** The saved unsent text for this chat, restored into the input. */
+    initialDraft: String,
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
+    onDraftChange: (String) -> Unit,
     onSend: (String) -> Unit,
     onSendMedia: (List<PickedMedia>, String) -> Unit,
     onStagedConsumed: () -> Unit,
@@ -135,13 +141,22 @@ internal fun ChatScreen(
     onForward: (Message) -> Unit,
     onEditMessage: (Message, String) -> Unit,
     onDeleteMessage: (Message, Boolean) -> Unit,
-    onDownloadFile: (Message, FileAttach) -> Unit,
+    onRetrySend: (Message) -> Unit,
+    onDiscardSend: (Message) -> Unit,
+    onFileClick: (Message, FileAttach) -> Unit,
+    /** fileIds already saved to the device (shown as "open" rather than "download"). */
+    downloadedFiles: Set<Long>,
+    /** fileIds being fetched right now, with how far along each is (0..1). */
+    downloadingFiles: Map<Long, Float>,
     onCancelReply: () -> Unit,
     onDeleteChat: () -> Unit,
     onLeaveGroup: () -> Unit,
     onOpenGroup: () -> Unit,
 ) {
-    var draft by remember { mutableStateOf("") }
+    var draft by remember(chat?.id) { mutableStateOf(initialDraft) }
+    // What was typed before an edit took over the input, so cancelling an edit puts
+    // the draft back instead of clearing it.
+    var draftBeforeEdit by remember(chat?.id) { mutableStateOf("") }
     // The message currently being edited (input shows its text + an "editing" banner).
     var editing by remember(chat?.id) { mutableStateOf<Message?>(null) }
     // The message pending a delete confirmation.
@@ -282,7 +297,7 @@ internal fun ChatScreen(
                 if (editing != null) {
                     EditBanner(editing!!.text) {
                         editing = null
-                        draft = ""
+                        draft = draftBeforeEdit
                     }
                 } else if (replyingTo != null) {
                     ReplyBanner(replyingTo, contacts, myId, onCancelReply)
@@ -349,7 +364,12 @@ internal fun ChatScreen(
                         }
                         BasicTextField(
                             value = draft,
-                            onValueChange = { draft = it },
+                            onValueChange = {
+                                draft = it
+                                // While editing, the input holds the message being
+                                // edited — that must not overwrite the chat's draft.
+                                if (editing == null) onDraftChange(it)
+                            },
                             modifier = Modifier.weight(1f).padding(vertical = 10.dp),
                             textStyle =
                                 MaterialTheme.typography.bodyLarge.copy(
@@ -388,14 +408,20 @@ internal fun ChatScreen(
                                                 target != null -> {
                                                     onEditMessage(target, draft)
                                                     editing = null
+                                                    draft = draftBeforeEdit
                                                 }
                                                 pending.isNotEmpty() -> {
                                                     onSendMedia(pending, draft)
                                                     pending = emptyList()
+                                                    draft = ""
+                                                    onDraftChange("")
                                                 }
-                                                else -> onSend(draft)
+                                                else -> {
+                                                    onSend(draft)
+                                                    draft = ""
+                                                    onDraftChange("")
+                                                }
                                             }
-                                            draft = ""
                                         }
                                     } else {
                                         Modifier
@@ -482,7 +508,11 @@ internal fun ChatScreen(
                         onClick = { menuTarget = msg },
                         onSwipeReply = { onReply(msg) },
                         onReactionClick = { emoji -> onReact(msg, emoji) },
-                        onDownloadFile = { file -> onDownloadFile(msg, file) },
+                        onDownloadFile = { file -> onFileClick(msg, file) },
+                        downloadedFiles = downloadedFiles,
+                        downloadingFiles = downloadingFiles,
+                        onRetry = { onRetrySend(msg) },
+                        onDiscard = { onDiscardSend(msg) },
                     )
                 }
             }
@@ -510,6 +540,7 @@ internal fun ChatScreen(
                 menuTarget = null
             },
             onEdit = {
+                draftBeforeEdit = draft
                 editing = target
                 draft = target.text
                 menuTarget = null
@@ -581,6 +612,10 @@ private fun MessageRow(
     onSwipeReply: () -> Unit,
     onReactionClick: (String) -> Unit,
     onDownloadFile: (FileAttach) -> Unit,
+    downloadedFiles: Set<Long>,
+    downloadingFiles: Map<Long, Float>,
+    onRetry: () -> Unit,
+    onDiscard: () -> Unit,
 ) {
     // Swipe-to-reply: drag the row left; past the threshold a reply icon is revealed
     // (with a haptic tick) and releasing there starts a reply to this message.
@@ -677,12 +712,35 @@ private fun MessageRow(
                             ReplyQuote(replyAuthor ?: "—", reply.text, fg)
                             Spacer(Modifier.height(4.dp))
                         }
+                        msg.pending.forEach { item ->
+                            PendingThumbnail(item)
+                            Spacer(Modifier.height(4.dp))
+                        }
+                        if (msg.pending.isNotEmpty()) {
+                            val failed = msg.pending.any { it.state == UploadState.FAILED }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (failed) {
+                                    PendingAction(AppIcons.Retry, "Повторить отправку", fg, onRetry)
+                                    Spacer(Modifier.width(12.dp))
+                                }
+                                // Always available: an upload in flight can be abandoned,
+                                // and a failed one has to be dismissable.
+                                PendingAction(AppIcons.Close, "Отменить", fg, onDiscard)
+                            }
+                            Spacer(Modifier.height(2.dp))
+                        }
                         msg.media.forEach { media ->
                             MediaThumbnail(media, onClick = { onMediaClick(media, msg.id) })
                             Spacer(Modifier.height(4.dp))
                         }
                         msg.files.forEach { file ->
-                            FileAttachView(file, fg, onClick = { onDownloadFile(file) })
+                            FileAttachView(
+                                file = file,
+                                fg = fg,
+                                downloaded = file.fileId in downloadedFiles,
+                                progress = downloadingFiles[file.fileId],
+                                onClick = { onDownloadFile(file) },
+                            )
                             Spacer(Modifier.height(4.dp))
                         }
                         if (msg.text.isNotEmpty()) {
@@ -734,7 +792,8 @@ private fun StagedAttachments(
                         when (media.kind) {
                             PickedKind.PHOTO ->
                                 AsyncImage(
-                                    model = media.bytes,
+                                    // The URI/handle, not bytes: Coil decodes at thumbnail size.
+                                    model = media.content.previewModel,
                                     contentDescription = null,
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier.fillMaxSize(),
@@ -807,6 +866,9 @@ private fun LinkPreviewCard(
 private fun FileAttachView(
     file: FileAttach,
     fg: Color,
+    downloaded: Boolean,
+    /** Non-null while downloading: the fraction fetched so far. */
+    progress: Float?,
     onClick: () -> Unit,
 ) {
     Row(
@@ -821,12 +883,39 @@ private fun FileAttachView(
             Modifier.size(36.dp).clip(CircleShape).background(fg.copy(alpha = 0.15f)),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(AppIcons.Attach, contentDescription = null, tint = fg, modifier = Modifier.size(20.dp))
+            if (progress != null) {
+                // Determinate as soon as bytes are counted; the size isn't always known.
+                if (progress > 0f) {
+                    CircularProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = fg,
+                    )
+                } else {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = fg)
+                }
+            } else {
+                Icon(
+                    // A saved file offers to open; an unsaved one, to fetch.
+                    if (downloaded) AppIcons.Open else AppIcons.Attach,
+                    contentDescription = null,
+                    tint = fg,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
         Column {
             Text(file.name, style = MaterialTheme.typography.bodyMedium, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val action =
+                when {
+                    progress != null && progress > 0f -> "Загрузка… ${(progress * 100).toInt()}%"
+                    progress != null -> "Загрузка…"
+                    downloaded -> "Открыть"
+                    else -> "Скачать"
+                }
             Text(
-                "${formatFileSize(file.size)} · Скачать",
+                "${formatFileSize(file.size)} · $action",
                 style = MaterialTheme.typography.labelSmall,
                 color = fg.copy(alpha = 0.7f),
             )
@@ -1101,22 +1190,143 @@ private fun ContextMenuItem(
     }
 }
 
+/** A small icon + label action on a still-sending bubble (retry / cancel). */
+@Composable
+private fun PendingAction(
+    icon: Painter,
+    label: String,
+    fg: Color,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick).padding(vertical = 4.dp, horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = MaterialTheme.typography.labelLarge, color = fg)
+    }
+}
+
+/**
+ * An attachment that is still going up: its local thumbnail, dimmed, with a
+ * progress ring over it — or a retry-less failure marker if the upload broke.
+ */
+@Composable
+private fun PendingThumbnail(item: PendingAttach) {
+    val shape = RoundedCornerShape(10.dp)
+    val failed = item.state == UploadState.FAILED
+    Box(
+        Modifier.width(240.dp).heightIn(min = 120.dp, max = 320.dp).clip(shape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (item.kind == PickedKind.FILE) {
+            // Files have no image to show; the icon stands in for the thumbnail.
+            Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.surfaceVariant))
+            Icon(
+                AppIcons.Attach,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(40.dp),
+            )
+        } else {
+            AsyncImage(
+                model = item.preview,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+            )
+        }
+        // Scrim, so a light photo doesn't swallow the indicator.
+        Box(Modifier.matchParentSize().background(Color(0x66000000)))
+        when {
+            failed ->
+                Text("Не отправлено", style = MaterialTheme.typography.labelMedium, color = Color.White)
+            // A closed ring with a tick: this one is up, and the message is only
+            // waiting on its siblings.
+            item.state == UploadState.DONE ->
+                Box(contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(
+                        progress = { 1f },
+                        modifier = Modifier.size(32.dp),
+                        strokeWidth = 3.dp,
+                        color = Color.White,
+                    )
+                    Icon(
+                        AppIcons.Delivered,
+                        contentDescription = "Загружено",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            item.state == UploadState.UPLOADING && item.progress > 0f ->
+                CircularProgressIndicator(
+                    progress = { item.progress },
+                    modifier = Modifier.size(32.dp),
+                    strokeWidth = 3.dp,
+                    color = Color.White,
+                )
+            else ->
+                CircularProgressIndicator(
+                    modifier = Modifier.size(32.dp),
+                    strokeWidth = 3.dp,
+                    color = Color.White,
+                )
+        }
+    }
+}
+
+/**
+ * Fills a media tile while its image is being fetched (or if the fetch failed), so
+ * a message with several photos shows its layout and progress straight away rather
+ * than an empty bubble.
+ */
+@Composable
+private fun MediaTilePlaceholder(loading: Boolean) {
+    Box(
+        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (loading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(28.dp),
+                strokeWidth = 2.5.dp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Text(
+                "Не удалось загрузить",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
 @Composable
 private fun MediaThumbnail(
     media: MediaAttach,
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(10.dp)
-    var mod = Modifier.widthIn(max = 240.dp).heightIn(max = 320.dp).clip(shape)
-    if (media.width > 0 && media.height > 0) {
-        mod = Modifier.width(240.dp).aspectRatio(media.width.toFloat() / media.height).clip(shape)
-    }
+    // The server reports the dimensions, so the tile can take its final shape before
+    // the bytes arrive — no blank bubble, and no reflow once the image lands. Without
+    // them, fall back to a minimum height so the placeholder still has a box to fill.
+    var mod =
+        if (media.width > 0 && media.height > 0) {
+            Modifier.width(240.dp).aspectRatio(media.width.toFloat() / media.height)
+        } else {
+            Modifier.width(240.dp).heightIn(min = 140.dp, max = 320.dp)
+        }
+    mod = mod.clip(shape)
     Box(modifier = Modifier.clickable(onClick = onClick), contentAlignment = Alignment.Center) {
-        AsyncImage(
+        SubcomposeAsyncImage(
             model = media.url,
             contentDescription = if (media.type == MediaType.VIDEO) "Видео" else "Фото",
             contentScale = ContentScale.Crop,
             modifier = mod,
+            loading = { MediaTilePlaceholder(loading = true) },
+            error = { MediaTilePlaceholder(loading = false) },
         )
         if (media.type == MediaType.VIDEO) {
             Box(
