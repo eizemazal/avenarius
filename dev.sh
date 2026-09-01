@@ -13,8 +13,15 @@ fi
 ADB="${ANDROID_HOME:-}/platform-tools/adb"
 [[ -x "$ADB" ]] || ADB="$(command -v adb || true)"
 
-PKG="com.avenarius.app"
-ACTIVITY="$PKG/.MainActivity"
+# The debug build carries applicationIdSuffix ".dev" (see composeApp/build.gradle.kts),
+# so it installs alongside the production app as a separate package. Everything below
+# drives the DEV copy; export AVENARIUS_PKG=com.avenarius.app to target production.
+APP_ID="com.avenarius.app"
+PKG="${AVENARIUS_PKG:-$APP_ID.dev}"
+# The applicationId gets the suffix, the Activity class does not — hence the fully
+# qualified class name rather than "$PKG/.MainActivity", which pointed at the
+# production app and restarted that instead of the one just installed.
+ACTIVITY="$PKG/$APP_ID.MainActivity"
 APK="composeApp/build/outputs/apk/debug/composeApp-debug.apk"
 
 require_adb() { [[ -n "$ADB" && -x "$ADB" || -n "$(command -v adb || true)" ]] || { echo "adb not found (set ANDROID_HOME)"; exit 1; }; }

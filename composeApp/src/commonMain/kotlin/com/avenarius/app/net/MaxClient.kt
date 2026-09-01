@@ -279,6 +279,12 @@ interface MaxApi {
     /** Leaves/exits a group chat. */
     suspend fun leaveGroup(chatId: Long)
 
+    /**
+     * Joins the chat or channel behind an invite [link] and returns it, or null if
+     * the server accepted the request without describing the chat.
+     */
+    suspend fun joinByLink(link: String): Chat?
+
     /** Approves a web/desktop login by the token scanned from its QR code. */
     suspend fun approveQrLogin(qrLink: String)
 
@@ -439,6 +445,7 @@ class MaxClient : MaxApi {
         private const val OP_REACTION = 178 // MSG_REACTION: add/set a reaction
         private const val OP_CANCEL_REACTION = 179 // MSG_CANCEL_REACTION: remove our reaction
         private const val OP_DELETE_CHAT = 52 // CHAT_DELETE
+        private const val OP_CHAT_JOIN = 57 // CHAT_JOIN: join a chat/channel by its invite link
         private const val OP_LEAVE_CHAT = 58 // CHAT_LEAVE
         private const val OP_CHAT_MEMBERS = 59 // CHAT_MEMBERS: paginated member list
         private const val OP_CHAT_MEMBERS_UPDATE = 77 // CHAT_MEMBERS_UPDATE: add/remove members
@@ -1437,6 +1444,20 @@ class MaxClient : MaxApi {
                 put("forAll", forAll)
             },
         )
+    }
+
+    override suspend fun joinByLink(link: String): Chat? {
+        val payload = transport.request(OP_CHAT_JOIN, buildJsonObject { put("link", link) })
+        // The reply carries the chat on success. Its exact shape isn't documented, so
+        // both spellings are tried and a miss is not an error — the caller re-syncs and
+        // finds the chat by its link instead.
+        val chat =
+            (payload["chat"] as? JsonObject)
+                ?: (payload["chats"] as? JsonArray)?.firstOrNull()?.jsonObject
+        if (chat == null && payload["error"] != null) {
+            error(payload.serverMessage("Не удалось перейти по ссылке"))
+        }
+        return chat?.let { parseChat(it, emptyMap()) }
     }
 
     override suspend fun leaveGroup(chatId: Long) {

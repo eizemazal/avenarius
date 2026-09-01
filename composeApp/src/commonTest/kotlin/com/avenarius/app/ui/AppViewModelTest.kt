@@ -3,6 +3,7 @@ package com.avenarius.app.ui
 import com.avenarius.app.data.AppCache
 import com.avenarius.app.data.CachedSession
 import com.avenarius.app.data.InMemoryStorage
+import com.avenarius.app.data.MessageCache
 import com.avenarius.app.data.Prefs
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
@@ -135,7 +136,10 @@ private class FakeMaxClient : MaxApi {
         chatId: Long,
         fromTime: Long,
         count: Int,
-    ): List<Message> = history
+    ): List<Message> {
+        historyGate?.await()
+        return history
+    }
 
     var lastReplyToId: String? = null
     val reactionCalls = mutableListOf<Triple<Long, String, String?>>()
@@ -297,6 +301,16 @@ private class FakeMaxClient : MaxApi {
         lastDeleteForAll = forAll
     }
 
+    /** Chat handed back by [joinByLink]; null means "joined, but no chat described". */
+    var joinResult: Chat? = null
+
+    val joinedLinks = mutableListOf<String>()
+
+    override suspend fun joinByLink(link: String): Chat? {
+        joinedLinks += link
+        return joinResult
+    }
+
     override suspend fun leaveGroup(chatId: Long) {
         leftGroups += chatId
     }
@@ -361,6 +375,9 @@ private class FakeMaxClient : MaxApi {
         messageId: Long,
         videoId: Long,
     ): String? = null
+
+    /** When set, [fetchHistory] waits on it — lets a test see the pre-fetch state. */
+    var historyGate: CompletableDeferred<Unit>? = null
 
     /** URL handed back for a file attachment; null means "no link". */
     var fileUrl: String? = null
@@ -776,6 +793,186 @@ class AppViewModelTest {
             "the bubble should show the failure",
         )
         assertFalse(s.sendingAttachment)
+    }
+
+    @Test
+    fun theCacheSizeReadoutCountsMessageHistory() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        fake.history = listOf(Message(id = "9", cid = null, chatId = 1, senderId = 200, text = "с сервера", time = 9))
+        vm.openChat(chat)
+
+        vm.refreshCacheSize()
+
+        // The images live in Coil's cache, which isn't wired up in tests — but the
+        // data side must at least account for the history we just stored.
+        assertTrue(vm.state.value.dataCacheBytes > 0, "cached history should be counted")
+        assertEquals(0L, vm.state.value.imageCacheBytes, "no image cache in tests")
+    }
+
+    @Test
+    fun clearingTheCacheZeroesTheReadout() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        fake.history = listOf(Message(id = "9", cid = null, chatId = 1, senderId = 200, text = "с сервера", time = 9))
+        vm.openChat(chat)
+        vm.refreshCacheSize()
+        val before = vm.state.value.dataCacheBytes
+
+        vm.clearCache()
+
+        assertTrue(before > 0)
+        assertTrue(
+            vm.state.value.dataCacheBytes < before,
+            "the readout should drop once the cache is emptied",
+        )
+    }
+
+    // --- max.ru links ---
+
+    @Test
+    fun aLinkToAChatWeAreInJustOpensIt() {
+        val chat =
+            Chat(
+                id = 5,
+                title = "Группа",
+                lastMessageText = null,
+                lastEventTime = 1,
+                link = "https://max.ru/joinABC",
+            )
+        val vm = loggedIn(listOf(chat))
+
+        val handled = vm.openLink("https://max.ru/joinABC")
+
+        assertTrue(handled)
+        assertEquals(Screen.CHAT, vm.state.value.screen)
+        assertEquals(
+            5L,
+            vm.state.value.currentChat
+                ?.id,
+        )
+        assertTrue(fake.joinedLinks.isEmpty(), "no need to join a chat we're already in")
+    }
+
+    @Test
+    fun anUnknownLinkJoinsAndOpensTheChat() {
+        val vm = loggedIn()
+        fake.joinResult = Chat(id = 9, title = "Новый канал", lastMessageText = null, lastEventTime = 2)
+
+        val handled = vm.openLink("https://max.ru/someInvite")
+
+        assertTrue(handled)
+        assertEquals(listOf("max.ru/someInvite"), fake.joinedLinks)
+        assertEquals(
+            9L,
+            vm.state.value.currentChat
+                ?.id,
+        )
+        assertTrue(
+            vm.state.value.chats
+                .any { it.id == 9L },
+            "the joined chat belongs in the list",
+        )
+    }
+
+    @Test
+    fun aJoinThatDescribesNoChatFallsBackToASync() {
+        val joined =
+            Chat(id = 11, title = "Группа", lastMessageText = null, lastEventTime = 3, link = "https://max.ru/inv")
+        val vm = loggedIn()
+        fake.joinResult = null // server accepted, told us nothing
+        fake.chats = listOf(joined) // ...but a re-sync shows it
+
+        vm.openLink("https://max.ru/inv")
+
+        assertEquals(
+            11L,
+            vm.state.value.currentChat
+                ?.id,
+            "the chat should be found by its link after a sync",
+        )
+    }
+
+    @Test
+    fun callLinksSayCallsAreNotSupportedYet() {
+        val vm = loggedIn()
+
+        val handled = vm.openLink("https://max.ru/joincall/abc")
+
+        assertTrue(handled, "a call link is still ours to handle, not the browser's")
+        assertEquals("Звонки пока не поддерживаются", vm.state.value.notice)
+    }
+
+    @Test
+    fun otherLinksAreLeftToTheBrowser() {
+        val vm = loggedIn()
+        assertFalse(vm.openLink("https://example.com/page"))
+        assertEquals(Screen.CHATS, vm.state.value.screen)
+    }
+
+    @Test
+    fun aLinkOpenedBeforeSignInIsHandledAfterIt() {
+        // No token yet: the link has to wait for the session.
+        val vm = viewModel()
+        vm.openLink("https://max.ru/waiting")
+        assertTrue(fake.joinedLinks.isEmpty())
+
+        fake.joinResult = Chat(id = 3, title = "Позже", lastMessageText = null, lastEventTime = 1)
+        fake.codeResult = CodeResult.Success("tok")
+        vm.submitCode("123456")
+
+        assertEquals(listOf("max.ru/waiting"), fake.joinedLinks, "the link should be acted on once signed in")
+        assertEquals(
+            3L,
+            vm.state.value.currentChat
+                ?.id,
+        )
+    }
+
+    // --- cached history ---
+
+    private fun messageCache() = MessageCache(prefs.storage)
+
+    @Test
+    fun openingAChatShowsItsCachedMessagesBeforeTheFetch() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        messageCache().save(1, listOf(Message(id = "7", cid = null, chatId = 1, senderId = 200, text = "из кэша", time = 5)))
+        val vm = loggedIn(listOf(chat))
+        // Nothing comes back from the server, so what's on screen came from the cache.
+        fake.history = emptyList()
+        fake.historyGate = CompletableDeferred()
+
+        vm.openChat(chat)
+
+        assertEquals(
+            listOf("из кэша"),
+            vm.state.value.messages
+                .map { it.text },
+        )
+        fake.historyGate?.complete(Unit)
+    }
+
+    @Test
+    fun fetchedHistoryIsCachedForNextTime() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        fake.history = listOf(Message(id = "9", cid = null, chatId = 1, senderId = 200, text = "с сервера", time = 9))
+
+        vm.openChat(chat)
+
+        assertEquals(listOf("с сервера"), messageCache().load(1).map { it.text })
+    }
+
+    @Test
+    fun clearingTheCacheAlsoForgetsMessageHistory() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        fake.history = listOf(Message(id = "9", cid = null, chatId = 1, senderId = 200, text = "с сервера", time = 9))
+        vm.openChat(chat)
+
+        vm.clearCache()
+
+        assertTrue(messageCache().load(1).isEmpty())
     }
 
     // --- splitting, cancelling and ordering ---

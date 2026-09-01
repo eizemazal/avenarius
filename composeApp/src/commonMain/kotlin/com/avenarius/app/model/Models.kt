@@ -1,6 +1,7 @@
 package com.avenarius.app.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 
 /*
  * Domain models used by the UI. These are deliberately small and decoupled from
@@ -88,11 +89,14 @@ data class Chat(
 )
 
 /** Message delivery state for outgoing messages (server `status`). */
+@Serializable
 enum class MessageStatus { UNKNOWN, SENT, READ }
 
+@Serializable
 enum class MediaType { PHOTO, VIDEO }
 
 /** An image/video attachment we can show inline (by its CDN URL). */
+@Serializable
 data class MediaAttach(
     val type: MediaType,
     /** Image URL (PHOTO) or thumbnail URL (VIDEO). */
@@ -104,6 +108,7 @@ data class MediaAttach(
 )
 
 /** One emoji reaction bucket on a message: [emoji] with [count], [mine] if we reacted with it. */
+@Serializable
 data class Reaction(
     val emoji: String,
     val count: Int,
@@ -111,12 +116,14 @@ data class Reaction(
 )
 
 /** The quoted message a reply points at (server `link` of type REPLY). */
+@Serializable
 data class ReplyInfo(
     val senderId: Long,
     val text: String,
 )
 
 /** A file attachment on a received message (downloadable via FILE_DOWNLOAD). */
+@Serializable
 data class FileAttach(
     val fileId: Long,
     val name: String,
@@ -124,6 +131,7 @@ data class FileAttach(
 )
 
 /** A link/URL preview (server SHARE attach): title, description and an optional image. */
+@Serializable
 data class LinkPreview(
     val url: String,
     val title: String?,
@@ -136,6 +144,7 @@ data class LinkPreview(
  * "added X", "left", "changed the title", etc. [actorId] is who did it, [userIds]
  * the affected members (for add/remove), [title] the new title (for a title change).
  */
+@Serializable
 data class ServiceEvent(
     val event: String,
     val actorId: Long,
@@ -183,6 +192,7 @@ data class PendingAttach(
 )
 
 /** A single message inside a chat. */
+@Serializable
 data class Message(
     /** Server message id (string in the protocol). Null for messages we just sent locally. */
     val id: String?,
@@ -211,6 +221,10 @@ data class Message(
     /**
      * Attachments still uploading, on a message we created locally and have not yet
      * sent. Replaced by the server's copy (with real [media]) once the send lands.
+     *
+     * Not serialized: [PendingAttach.preview] is a live platform handle, and an
+     * unsent message isn't something to restore from a cache anyway.
      */
+    @Transient
     val pending: List<PendingAttach> = emptyList(),
 )

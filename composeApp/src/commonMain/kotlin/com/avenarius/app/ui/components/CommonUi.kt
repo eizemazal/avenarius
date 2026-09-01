@@ -53,13 +53,23 @@ internal fun LinkedText(
     text: String,
     style: TextStyle,
     color: Color,
+    /**
+     * Given a tapped URL, handles it in-app and returns true — used for Max links,
+     * which belong in the app rather than a browser. Anything it declines is opened
+     * externally as before.
+     */
+    onInternalLink: ((String) -> Boolean)? = null,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     // Open links via our safe handler so an unhandled scheme (mailto: with no email
     // app, etc.) can't crash the app.
     val uriHandler = LocalUriHandler.current
     val onLink =
-        LinkInteractionListener { link -> (link as? LinkAnnotation.Url)?.url?.let { uriHandler.openUriSafely(it) } }
+        LinkInteractionListener { link ->
+            (link as? LinkAnnotation.Url)?.url?.let { url ->
+                if (onInternalLink?.invoke(url) != true) uriHandler.openUriSafely(url)
+            }
+        }
     val annotated =
         remember(text, linkColor, onLink) {
             buildAnnotatedString {

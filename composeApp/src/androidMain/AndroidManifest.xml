@@ -43,6 +43,20 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
+            <!--
+              Open max.ru links in the app. No autoVerify: this is a third-party
+              client and can't publish assetlinks.json on max.ru, so Android offers
+              a choice rather than us claiming the domain outright.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="max.ru" />
+                <data android:scheme="https" android:host="*.max.ru" />
+                <data android:scheme="http" android:host="max.ru" />
+                <data android:scheme="http" android:host="*.max.ru" />
+            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />

@@ -12,4 +12,24 @@ internal class InMemoryStorage : AppStorage {
     ) {
         if (value == null) map.remove(key) else map[key] = value
     }
+
+    /** Blobs, kept separate from [map] exactly as the real implementations do. */
+    val blobs = mutableMapOf<String, String>()
+
+    override fun readBlob(name: String): String? = blobs[name]
+
+    override fun writeBlob(
+        name: String,
+        value: String,
+    ) {
+        blobs[name] = value
+    }
+
+    override fun deleteBlob(name: String) {
+        blobs.remove(name)
+    }
+
+    override fun deleteAllBlobs() = blobs.clear()
+
+    override fun blobsSizeBytes(): Long = blobs.values.sumOf { it.encodeToByteArray().size.toLong() }
 }

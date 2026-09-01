@@ -34,6 +34,13 @@ kotlin {
     sourceSets {
         val desktopMain by getting
 
+        // Both targets run on the JVM, so plain-JVM helpers (the file-backed blob
+        // storage behind AppStorage) are kept in one file and compiled into each,
+        // rather than copied into androidMain and desktopMain by hand.
+        val jvmSharedDir = "src/jvmShared/kotlin"
+        androidMain.get().kotlin.srcDir(jvmSharedDir)
+        desktopMain.kotlin.srcDir(jvmSharedDir)
+
         // commonMain = the code shared by Android AND desktop:
         // the Max protocol client, data models, repository, ViewModel and Compose UI.
         commonMain.dependencies {

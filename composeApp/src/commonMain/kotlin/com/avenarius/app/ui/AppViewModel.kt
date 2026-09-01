@@ -4,11 +4,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.avenarius.app.data.AppCache
 import com.avenarius.app.data.CachedSession
+import com.avenarius.app.data.MessageCache
 import com.avenarius.app.data.Prefs
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.DeviceContact
 import com.avenarius.app.model.FileAttach
+import com.avenarius.app.model.MaxLink
 import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
@@ -21,6 +23,7 @@ import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.model.parseMaxLink
 import com.avenarius.app.model.previewLabel
 import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.DemoMaxApi
@@ -31,6 +34,7 @@ import com.avenarius.app.ui.theme.prefValue
 import com.avenarius.app.ui.theme.themeModeOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -42,6 +46,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT, USER, SHARE_PICK, ABOUT, EDIT_PROFILE, GROUP }
 
@@ -145,8 +150,10 @@ data class AppState(
     val downloadedFiles: Map<Long, String> = emptyMap(),
     /** File attachments being fetched right now, as fileId -> fraction done (0..1). */
     val downloadingFiles: Map<Long, Float> = emptyMap(),
-    /** Approximate size of the on-disk cache, shown in settings. */
-    val cacheSizeBytes: Long = 0,
+    /** Size of the cached conversation data (snapshot, drafts, message history). */
+    val dataCacheBytes: Long = 0,
+    /** Size of Coil's on-disk thumbnail cache — usually the bulk of it. */
+    val imageCacheBytes: Long = 0,
     /**
      * Messages created locally whose attachments are still uploading, keyed by chat.
      *
@@ -181,6 +188,7 @@ class AppViewModel(
     // ViewModel must NOT create or tear it down — it's injected.
     realClient: MaxApi,
     private val cache: AppCache = AppCache(prefs.storage),
+    private val messageCache: MessageCache = MessageCache(prefs.storage),
 ) : ViewModel() {
     // Swappable: the demo login (Google Play review account) replaces this with an
     // offline [DemoMaxApi] so it never touches the real servers. [originalClient] is
@@ -196,6 +204,73 @@ class AppViewModel(
         prefs.theme = mode.prefValue()
         _state.update { it.copy(theme = mode) }
     }
+
+    /**
+     * Handles a link the user tapped (in a message) or opened from outside the app.
+     *
+     * A Max link is resolved in-app; anything else is left to the caller, which
+     * returns false so it can hand the URL to the browser.
+     */
+    fun openLink(url: String): Boolean {
+        when (val link = parseMaxLink(url) ?: return false) {
+            is MaxLink.JoinCall -> _state.update { it.copy(notice = "Звонки пока не поддерживаются") }
+            is MaxLink.Invite -> openInvite(link)
+        }
+        return true
+    }
+
+    /**
+     * Opens what an invite points at: a chat we are already in, or one the server
+     * lets us join.
+     */
+    private fun openInvite(invite: MaxLink.Invite) {
+        // Already a member? Then this is just a pointer to a chat we have.
+        knownChatFor(invite)?.let { chat ->
+            openChat(chat)
+            return
+        }
+        if (prefs.token == null) {
+            // Not signed in yet: remember it and act once the session is up.
+            pendingInvite = invite
+            return
+        }
+        launchBusy {
+            val joined = client.joinByLink(invite.link)
+            if (joined != null) {
+                _state.update { s ->
+                    val merged =
+                        if (s.chats.any { it.id == joined.id }) {
+                            s.chats.map { if (it.id == joined.id) joined else it }
+                        } else {
+                            s.chats + joined
+                        }
+                    s.copy(chats = merged.sortedByDescending { it.lastEventTime })
+                }
+                openChat(joined)
+                return@launchBusy
+            }
+            // The server accepted the join but didn't describe the chat: re-sync and
+            // find it by its link rather than guessing at the reply's shape. Awaited,
+            // so the lookup below sees the fresh list.
+            resync()
+            val found = knownChatFor(invite)
+            if (found != null) {
+                openChat(found)
+            } else {
+                _state.update { it.copy(notice = "Не удалось открыть ссылку") }
+            }
+        }
+    }
+
+    /** A chat we already have whose public link points at the same thing as [invite]. */
+    private fun knownChatFor(invite: MaxLink.Invite): Chat? =
+        _state.value.chats.firstOrNull { chat ->
+            val parsed = chat.link?.let { parseMaxLink(it) }
+            parsed is MaxLink.Invite && parsed.token == invite.token
+        }
+
+    // An invite that arrived before the session was up.
+    private var pendingInvite: MaxLink.Invite? = null
 
     /** Opens the "About" screen. */
     fun openAbout() = _state.update { it.copy(screen = Screen.ABOUT) }
@@ -490,6 +565,23 @@ class AppViewModel(
                     }
                 }
         }
+        // Keep each open chat's cached tail current. Driven off the state so every
+        // path is covered — history fetches, live pushes, edits, deletions — and
+        // throttled the same way as the session snapshot.
+        viewModelScope.launch {
+            _state
+                .map { s -> s.currentChat?.id?.let { id -> id to s.messages } }
+                .distinctUntilChanged()
+                .conflate()
+                .collect { open ->
+                    // An empty list is "not loaded yet" far more often than "this chat
+                    // is empty", so it is left alone rather than wiping a good cache.
+                    if (open != null && open.second.isNotEmpty() && !_state.value.demoMode) {
+                        messageCache.save(open.first, open.second)
+                        delay(CACHE_WRITE_THROTTLE_MS)
+                    }
+                }
+        }
         // Auto-login if we already have a token.
         if (prefs.token == null) {
             _state.update { it.copy(screen = Screen.LOGIN) }
@@ -582,6 +674,7 @@ class AppViewModel(
         draftFlushJob?.cancel()
         drafts.clear()
         cache.clearAll()
+        messageCache.clear()
         outgoing.clear()
         activeSends.values.forEach { it.cancel() }
         activeSends.clear()
@@ -594,11 +687,29 @@ class AppViewModel(
      */
     fun clearCache() {
         cache.clearCache()
-        _state.update { it.copy(cacheSizeBytes = cache.sizeBytes(), notice = "Кэш очищен") }
+        messageCache.clear()
+        _state.update { it.copy(notice = "Кэш очищен") }
+        refreshCacheSize()
+        // Emptying the image cache can mean deleting thousands of files, so it goes
+        // off the main thread — and the size is re-read once it's done.
+        viewModelScope.launch {
+            withContext(Dispatchers.Default) { ImageDiskCache.clear() }
+            refreshCacheSize()
+        }
     }
 
-    /** Re-reads the cache size (the settings screen shows it). */
-    fun refreshCacheSize() = _state.update { it.copy(cacheSizeBytes = cache.sizeBytes()) }
+    /**
+     * Re-reads what the caches hold (the settings screen shows it). Both parts are
+     * cheap to measure: the data side is a handful of files, and Coil tracks its own
+     * size rather than walking the directory.
+     */
+    fun refreshCacheSize() =
+        _state.update {
+            it.copy(
+                dataCacheBytes = cache.sizeBytes() + messageCache.sizeBytes(),
+                imageCacheBytes = ImageDiskCache.sizeBytes,
+            )
+        }
 
     /**
      * Establishes the session and keeps retrying on transient failures (with
@@ -777,6 +888,10 @@ class AppViewModel(
             )
         }
         resolveDialogTitles()
+        pendingInvite?.let { invite ->
+            pendingInvite = null
+            openInvite(invite)
+        }
         // If a notification asked us to open a specific chat, do it now.
         val pending = pendingOpenChatId
         if (pending != null) {
@@ -796,11 +911,13 @@ class AppViewModel(
     fun openChat(chat: Chat) {
         // Snapshot the unread count now (for the "new messages" divider), since
         // we're about to clear it by marking the chat read.
+        // Paint the cached tail straight away; the history fetch below replaces it.
+        val cached = messageCache.load(chat.id)
         _state.update {
             it.copy(
                 screen = Screen.CHAT,
                 currentChat = chat,
-                messages = emptyList(),
+                messages = cached,
                 draft = drafts[chat.id] ?: "",
                 openUnreadCount = chat.unreadCount,
                 loadingOlder = false,
@@ -814,6 +931,9 @@ class AppViewModel(
                     chat,
                 )
             _state.update { it.copy(messages = history) }
+            // Cached at once rather than waiting for the throttled collector: this is
+            // the authoritative copy, and it's what the next open will paint.
+            if (!_state.value.demoMode) messageCache.save(chat.id, history)
             resolveUnknownSenders(history)
             // Mark read on the server and clear the local unread badge.
             history.lastOrNull()?.let { last ->
@@ -1280,33 +1400,43 @@ class AppViewModel(
 
     /** Pull-to-refresh on the chat list: re-runs sync over the open connection. */
     fun refresh() {
-        val token = prefs.token ?: return
+        if (prefs.token == null) return
         _state.update { it.copy(refreshing = true) }
         viewModelScope.launch {
             try {
-                // The server allows sync (op 19) only ONCE per connection, so a
-                // refresh re-establishes a fresh session. This also recovers if the
-                // previous connection had dropped.
-                client.disconnect()
-                client.connect(prefs.deviceId, prefs.mtInstance)
-                val result = client.sync(token)
-                result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
-                _state.update {
-                    it.copy(
-                        chats = result.chats,
-                        account = result.account,
-                        contacts = result.contacts,
-                        contactsList = result.contactsList,
-                        onlineUsers = result.online,
-                        refreshing = false,
-                        error = null,
-                    )
-                }
-                resolveDialogTitles()
+                resync()
             } catch (e: Throwable) {
-                _state.update { it.copy(refreshing = false, error = e.message ?: "Ошибка обновления") }
+                _state.update { it.copy(error = e.message ?: "Ошибка обновления") }
+            } finally {
+                _state.update { it.copy(refreshing = false) }
             }
         }
+    }
+
+    /**
+     * Re-establishes the session and reloads the chat list, suspending until it is
+     * done — callers that need the fresh list (following an invite link, say) must be
+     * able to await it rather than read the state a moment too early.
+     */
+    private suspend fun resync() {
+        val token = prefs.token ?: return
+        // The server allows sync (op 19) only ONCE per connection, so this
+        // re-establishes a fresh session. It also recovers a dropped connection.
+        client.disconnect()
+        client.connect(prefs.deviceId, prefs.mtInstance)
+        val result = client.sync(token)
+        result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
+        _state.update {
+            it.copy(
+                chats = result.chats,
+                account = result.account,
+                contacts = result.contacts,
+                contactsList = result.contactsList,
+                onlineUsers = result.online,
+                error = null,
+            )
+        }
+        resolveDialogTitles()
     }
 
     fun sendMessage(text: String) {

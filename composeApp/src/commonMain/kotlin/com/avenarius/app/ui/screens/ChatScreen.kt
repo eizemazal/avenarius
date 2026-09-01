@@ -143,6 +143,8 @@ internal fun ChatScreen(
     onDeleteMessage: (Message, Boolean) -> Unit,
     onRetrySend: (Message) -> Unit,
     onDiscardSend: (Message) -> Unit,
+    /** Handles a tapped link in-app (Max links); false means "open externally". */
+    onLinkClick: (String) -> Boolean,
     onFileClick: (Message, FileAttach) -> Unit,
     /** fileIds already saved to the device (shown as "open" rather than "download"). */
     downloadedFiles: Set<Long>,
@@ -509,6 +511,7 @@ internal fun ChatScreen(
                         onSwipeReply = { onReply(msg) },
                         onReactionClick = { emoji -> onReact(msg, emoji) },
                         onDownloadFile = { file -> onFileClick(msg, file) },
+                        onLinkClick = onLinkClick,
                         downloadedFiles = downloadedFiles,
                         downloadingFiles = downloadingFiles,
                         onRetry = { onRetrySend(msg) },
@@ -612,6 +615,7 @@ private fun MessageRow(
     onSwipeReply: () -> Unit,
     onReactionClick: (String) -> Unit,
     onDownloadFile: (FileAttach) -> Unit,
+    onLinkClick: (String) -> Boolean,
     downloadedFiles: Set<Long>,
     downloadingFiles: Map<Long, Float>,
     onRetry: () -> Unit,
@@ -744,7 +748,7 @@ private fun MessageRow(
                             Spacer(Modifier.height(4.dp))
                         }
                         if (msg.text.isNotEmpty()) {
-                            LinkedText(msg.text, MaterialTheme.typography.bodyLarge, fg)
+                            LinkedText(msg.text, MaterialTheme.typography.bodyLarge, fg, onLinkClick)
                         }
                         msg.linkPreview?.let { preview -> LinkPreviewCard(preview, fg) }
                         // Footer line inside the bubble: reactions then time + delivery

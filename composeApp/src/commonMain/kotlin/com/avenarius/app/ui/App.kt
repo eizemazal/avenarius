@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.ImageLoader
 import coil3.compose.setSingletonImageLoaderFactory
+import coil3.disk.DiskCache
 import coil3.network.ktor3.KtorNetworkFetcherFactory
 import com.avenarius.app.ui.screens.AboutScreen
 import com.avenarius.app.ui.screens.ChatScreen
@@ -41,15 +42,33 @@ import com.avenarius.app.ui.screens.UserScreen
 import com.avenarius.app.ui.theme.AvenariusColorsDark
 import com.avenarius.app.ui.theme.AvenariusColorsLight
 import com.avenarius.app.ui.theme.ThemeMode
+import okio.Path.Companion.toPath
+
+/** Ceiling for the on-disk thumbnail cache. */
+private const val IMAGE_CACHE_MAX_BYTES = 256L * 1024 * 1024
 
 @Composable
 fun App(viewModel: AppViewModel) {
-    // Register Coil's Ktor-based network fetcher so AsyncImage can load CDN URLs.
+    // Register Coil's Ktor-based network fetcher so AsyncImage can load CDN URLs,
+    // and give it a disk cache: a custom ImageLoader has none by default, so every
+    // thumbnail was re-downloaded each time its chat was opened.
     setSingletonImageLoaderFactory { context ->
         ImageLoader
             .Builder(context)
             .components { add(KtorNetworkFetcherFactory()) }
-            .build()
+            .apply {
+                imageCacheDirectory()?.let { path ->
+                    diskCache {
+                        DiskCache
+                            .Builder()
+                            .directory(path.toPath())
+                            .maxSizeBytes(IMAGE_CACHE_MAX_BYTES)
+                            .build()
+                            // Published so settings can report and clear it.
+                            .also { ImageDiskCache.instance = it }
+                    }
+                }
+            }.build()
     }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val dark =
@@ -161,6 +180,7 @@ fun App(viewModel: AppViewModel) {
                                     onDeleteMessage = viewModel::deleteMessage,
                                     onRetrySend = viewModel::retrySend,
                                     onDiscardSend = viewModel::discardPendingSend,
+                                    onLinkClick = viewModel::openLink,
                                     onFileClick = viewModel::openOrDownloadFile,
                                     downloadedFiles = state.downloadedFiles.keys,
                                     downloadingFiles = state.downloadingFiles,

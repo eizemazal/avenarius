@@ -14,6 +14,29 @@ interface AppStorage {
         key: String,
         value: String?,
     )
+
+    // --- blobs ---------------------------------------------------------------
+    //
+    // The key/value side above is one document that each platform loads whole, so
+    // anything sizeable (cached message history) would be parsed at startup whether
+    // it was needed or not. Blobs are stored one file per name instead, so a chat's
+    // history costs a read only when that chat is opened.
+
+    /** The named blob's contents, or null if it isn't there (or can't be read). */
+    fun readBlob(name: String): String?
+
+    fun writeBlob(
+        name: String,
+        value: String,
+    )
+
+    fun deleteBlob(name: String)
+
+    /** Drops every blob. The key/value entries above are untouched. */
+    fun deleteAllBlobs()
+
+    /** Total size of all blobs, in bytes. */
+    fun blobsSizeBytes(): Long
 }
 
 /** Convenience accessors layered on top of the raw key/value store. */

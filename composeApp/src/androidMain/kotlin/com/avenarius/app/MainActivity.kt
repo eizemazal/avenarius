@@ -31,6 +31,9 @@ class MainActivity : ComponentActivity() {
     // URIs shared in from another app via ACTION_SEND(_MULTIPLE), awaiting handling.
     private val shareRequests = MutableStateFlow<List<Uri>?>(null)
 
+    // A max.ru link opened from outside the app (ACTION_VIEW), awaiting handling.
+    private val linkRequests = MutableStateFlow<String?>(null)
+
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* result ignored */ }
 
@@ -40,6 +43,7 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermissionIfNeeded()
         openChatRequests.value = intent.chatIdExtra()
         shareRequests.value = intent.shareUris()
+        linkRequests.value = intent.viewUrl()
 
         setContent {
             val vm: AppViewModel = viewModel { AppViewModel(Session.prefs, Session.client) }
@@ -94,6 +98,15 @@ class MainActivity : ComponentActivity() {
                 shareRequests.value = null
             }
 
+            // A max.ru link tapped in another app.
+            val pendingLink by linkRequests.collectAsStateWithLifecycle()
+            LaunchedEffect(pendingLink) {
+                pendingLink?.let {
+                    vm.openLink(it)
+                    linkRequests.value = null
+                }
+            }
+
             App(vm)
         }
     }
@@ -103,6 +116,7 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         openChatRequests.value = intent.chatIdExtra()
         intent.shareUris()?.let { shareRequests.value = it }
+        intent.viewUrl()?.let { linkRequests.value = it }
     }
 
     override fun onResume() {
@@ -119,6 +133,9 @@ class MainActivity : ComponentActivity() {
         val id = this?.getLongExtra(EXTRA_CHAT_ID, Long.MIN_VALUE) ?: Long.MIN_VALUE
         return if (id == Long.MIN_VALUE) null else id
     }
+
+    /** The URL of an ACTION_VIEW intent (a max.ru link opened from another app). */
+    private fun Intent?.viewUrl(): String? = this?.takeIf { it.action == Intent.ACTION_VIEW }?.data?.toString()
 
     /** Extracts shared content URIs from an ACTION_SEND / ACTION_SEND_MULTIPLE intent. */
     private fun Intent?.shareUris(): List<Uri>? =

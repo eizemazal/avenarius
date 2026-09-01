@@ -442,7 +442,8 @@ internal fun MainScreen(
                         account = state.account,
                         theme = state.theme,
                         demoMode = state.demoMode,
-                        cacheSizeBytes = state.cacheSizeBytes,
+                        dataCacheBytes = state.dataCacheBytes,
+                        imageCacheBytes = state.imageCacheBytes,
                         onSetTheme = vm::setTheme,
                         onConfirmWebLogin = vm::confirmWebLogin,
                         onOpenProfile = { state.account?.let { vm.openUser(it.userId) } },
@@ -619,7 +620,8 @@ private fun SettingsTab(
     account: Account?,
     theme: ThemeMode,
     demoMode: Boolean,
-    cacheSizeBytes: Long,
+    dataCacheBytes: Long,
+    imageCacheBytes: Long,
     onSetTheme: (ThemeMode) -> Unit,
     onConfirmWebLogin: (String) -> Unit,
     onOpenProfile: () -> Unit,
@@ -638,8 +640,9 @@ private fun SettingsTab(
             title = { Text("Очистить кэш?") },
             text = {
                 Text(
-                    "Сохранённые списки чатов и контактов будут удалены и загружены заново " +
-                        "при следующем обновлении. Сообщения и черновики не пострадают.",
+                    "Загруженные изображения, сохранённые списки чатов и история сообщений " +
+                        "будут удалены с устройства и загружены заново при необходимости. " +
+                        "Сами сообщения и черновики не пострадают.",
                 )
             },
             confirmButton = {
@@ -726,8 +729,18 @@ private fun SettingsTab(
         ) {
             Column(Modifier.weight(1f)) {
                 Text("Очистить кэш", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
+                // Split out, because the thumbnails are almost always the bulk of it
+                // and a single total made the number look implausibly small.
+                val summary =
+                    when {
+                        imageCacheBytes <= 0 && dataCacheBytes <= 0 -> "Кэш пуст"
+                        imageCacheBytes <= 0 -> "Данные ${formatBytes(dataCacheBytes)}"
+                        else ->
+                            "Изображения ${formatBytes(imageCacheBytes)} · " +
+                                "данные ${formatBytes(dataCacheBytes)}"
+                    }
                 Text(
-                    if (cacheSizeBytes > 0) "Сохранено ${formatBytes(cacheSizeBytes)}" else "Кэш пуст",
+                    summary,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

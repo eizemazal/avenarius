@@ -191,6 +191,8 @@ class DemoMaxApi : MaxApi {
         forAll: Boolean,
     ) = Unit
 
+    override suspend fun joinByLink(link: String): Chat? = null
+
     override suspend fun leaveGroup(chatId: Long) = Unit
 
     override suspend fun approveQrLogin(qrLink: String) = Unit
