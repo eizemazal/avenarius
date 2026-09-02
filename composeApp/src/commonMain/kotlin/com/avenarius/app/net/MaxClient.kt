@@ -15,6 +15,7 @@ import com.avenarius.app.model.ReplyInfo
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.ServiceEvent
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.model.VoiceAttach
 import com.avenarius.app.model.previewLabel
 import com.avenarius.app.ui.nowMillis
 import io.ktor.client.HttpClient
@@ -49,7 +50,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.io.readByteArray
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -226,6 +229,14 @@ interface MaxApi {
         photoToken: String?,
     )
 
+    /** Resolves the playable URL of a voice message, or null if the server has none. */
+    suspend fun getAudioUrl(
+        chatId: Long,
+        messageId: Long,
+        audioId: Long,
+        token: String? = null,
+    ): String?
+
     /** Uploads a video (waits for server processing) and returns its attach descriptor. */
     suspend fun uploadVideo(
         content: MediaContent,
@@ -233,6 +244,26 @@ interface MaxApi {
         mime: String,
         onProgress: ((Float) -> Unit)? = null,
     ): OutAttach.Video
+
+    /**
+     * Uploads a voice recording and returns its attach. Uses the same upload slot as
+     * video, asked for with the AUDIO media type.
+     */
+    suspend fun uploadVoice(
+        content: MediaContent,
+        durationSeconds: Int,
+        onProgress: ((Float) -> Unit)? = null,
+    ): OutAttach.Voice
+
+    /**
+     * Uploads a round video message. Same upload slot as video, asked for with the
+     * VIDEO_MESSAGE media type.
+     */
+    suspend fun uploadVideoNote(
+        content: MediaContent,
+        durationSeconds: Int,
+        onProgress: ((Float) -> Unit)? = null,
+    ): OutAttach.VideoNote
 
     /** Uploads an arbitrary file (waits for server processing) and returns its attach. */
     suspend fun uploadFile(
@@ -379,6 +410,58 @@ internal fun headerFileName(fileName: String): String =
  */
 internal fun String.cleanFileName(): String = trim().removeSurrounding("\"").trim()
 
+/**
+ * Picks a playable link out of an AUDIO_PLAY reply.
+ *
+ * The reply carries three of them — opus, m4a and mp3 (the official client's own
+ * response class names exactly those three) — but their key names aren't recoverable,
+ * since that parser is compiled away. So a link is identified by what it looks like
+ * rather than what it is called. m4a is preferred: it is the format Android's
+ * MediaPlayer handles most reliably, with mp3 next and opus last.
+ */
+internal fun JsonObject.audioLink(): String? {
+    val links = mutableListOf<String>()
+
+    fun collect(obj: JsonObject) {
+        obj.values.forEach { value ->
+            when (value) {
+                is JsonPrimitive -> value.contentOrNullSafe()?.let { if (it.startsWith("http")) links += it }
+                is JsonObject -> collect(value)
+                else -> Unit
+            }
+        }
+    }
+    collect(this)
+    return links.firstOrNull { it.contains(".m4a") }
+        ?: links.firstOrNull { it.contains(".mp3") }
+        ?: links.firstOrNull()
+}
+
+/**
+ * The `duration` of an audio attach, in seconds.
+ *
+ * The wire value is milliseconds. An earlier version guessed the unit from the
+ * magnitude, which misread every clip under 3.6 seconds — a two-second message came
+ * out as 33:20.
+ */
+private fun audioDurationSeconds(raw: Long?): Int = ((raw ?: 0L) / 1000).toInt()
+
+/**
+ * The server's amplitude sketch, normalised to 0..1.
+ *
+ * It arrives as a list of numbers whose scale isn't fixed, so it is scaled by its
+ * own peak — the shape is what the bubble draws, not the absolute values.
+ */
+private fun parseWaveform(raw: JsonElement?): List<Float> {
+    val values =
+        (raw as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNullSafe()?.toFloatOrNull() }
+            ?.takeIf { it.isNotEmpty() } ?: return emptyList()
+    val peak = values.max()
+    if (peak <= 0f) return emptyList()
+    return values.map { (it / peak).coerceIn(0f, 1f) }
+}
+
 /** [mime] as a content type, falling back to octet-stream if it doesn't parse. */
 private fun contentTypeOf(mime: String): ContentType =
     runCatching { ContentType.parse(mime) }.getOrDefault(ContentType.Application.OctetStream)
@@ -404,6 +487,13 @@ class MaxClient : MaxApi {
 
         // Only reached when a content provider doesn't report a size, so the upload
         // has to be measured before it can be sent. Bounded so that path can't OOM.
+        // VIDEO_UPLOAD's media types: 0 VIDEO, 1 VIDEO_MESSAGE, 2 AUDIO.
+        private const val UPLOAD_TYPE_VIDEO_MESSAGE = 1
+        private const val UPLOAD_TYPE_AUDIO = 2
+
+        // The attach's `videoType` marking a round video message.
+        private const val VIDEO_TYPE_VIDEO_NOTE = 1
+
         private const val MAX_BUFFERED_UPLOAD_BYTES = 64 * 1024 * 1024
 
         // Upload budgets: total per request, and the allowed gap between packets.
@@ -423,6 +513,7 @@ class MaxClient : MaxApi {
         private const val OP_CONTACT_BY_PHONE = 46
         private const val OP_FETCH_HISTORY = 49
         private const val OP_PUBLIC_SEARCH = 60
+        private const val OP_AUDIO_PLAY = 301 // AUDIO_PLAY: playback URL for a voice message
         private const val OP_VIDEO_PLAY = 83
         private const val OP_PHOTO_UPLOAD = 80 // PHOTO_UPLOAD: request a photo upload URL
         private const val OP_VIDEO_UPLOAD = 82 // VIDEO_UPLOAD: request a video upload URL
@@ -894,6 +985,26 @@ class MaxClient : MaxApi {
         return null
     }
 
+    override suspend fun getAudioUrl(
+        chatId: Long,
+        messageId: Long,
+        audioId: Long,
+        token: String?,
+    ): String? {
+        val payload =
+            transport.request(
+                OP_AUDIO_PLAY,
+                buildJsonObject {
+                    put("audioId", audioId)
+                    // Sent only when meaningful, matching the official client's builder.
+                    if (chatId != 0L) put("chatId", chatId)
+                    if (messageId > 0) put("messageId", messageId)
+                    if (!token.isNullOrBlank()) put("token", token)
+                },
+            )
+        return payload.audioLink()
+    }
+
     override suspend fun getFileUrl(
         chatId: Long,
         messageId: Long,
@@ -1088,6 +1199,31 @@ class MaxClient : MaxApi {
                                         addJsonObject {
                                             put("_type", "FILE")
                                             put("fileId", a.fileId)
+                                        }
+                                    is OutAttach.VideoNote ->
+                                        addJsonObject {
+                                            // Same VIDEO attach as a plain video; `videoType`
+                                            // is what makes it a round message. The value is
+                                            // inferred from the upload media types (0 VIDEO,
+                                            // 1 VIDEO_MESSAGE) — the attach enum's own numbers
+                                            // aren't recoverable from the official client.
+                                            put("_type", "VIDEO")
+                                            put("token", a.token)
+                                            put("videoType", VIDEO_TYPE_VIDEO_NOTE)
+                                            if (a.durationSeconds > 0) put("duration", a.durationSeconds * 1000L)
+                                        }
+                                    is OutAttach.Voice ->
+                                        addJsonObject {
+                                            // Shape per the official client's audio attach:
+                                            // the upload token stands in for an audioId on
+                                            // a fresh recording. `wave` is optional there
+                                            // and omitted here — it is a raw byte array in
+                                            // the protocol, and we have no confirmation of
+                                            // how it survives this transport.
+                                            put("_type", "AUDIO")
+                                            put("token", a.token)
+                                            // Milliseconds, matching what the server sends us.
+                                            if (a.durationSeconds > 0) put("duration", a.durationSeconds * 1000L)
                                         }
                                 }
                             }
@@ -1377,6 +1513,59 @@ class MaxClient : MaxApi {
         }
     }
 
+    override suspend fun uploadVideoNote(
+        content: MediaContent,
+        durationSeconds: Int,
+        onProgress: ((Float) -> Unit)?,
+    ): OutAttach.VideoNote {
+        val data =
+            transport.request(
+                OP_VIDEO_UPLOAD,
+                buildJsonObject {
+                    put("type", UPLOAD_TYPE_VIDEO_MESSAGE)
+                    put("count", 1)
+                },
+            )
+        val info =
+            data["info"]?.jsonArray?.firstOrNull()?.jsonObject
+                ?: error(data.serverMessage("Не удалось начать загрузку видеосообщения"))
+        val url = info["url"]?.jsonPrimitive?.contentOrNullSafe() ?: error("Нет ссылки для загрузки видеосообщения")
+        val token = info["token"]?.jsonPrimitive?.contentOrNullSafe() ?: error("Сервер не вернул токен видео")
+        val response = putContent(url, "video_note.mp4", "video/mp4", content, onProgress)
+        if (!response.status.isSuccess()) error("Загрузка видеосообщения не удалась (${response.status.value})")
+        return OutAttach.VideoNote(token = token, durationSeconds = durationSeconds)
+    }
+
+    override suspend fun uploadVoice(
+        content: MediaContent,
+        durationSeconds: Int,
+        onProgress: ((Float) -> Unit)?,
+    ): OutAttach.Voice {
+        // VIDEO_UPLOAD serves every media kind; `type` picks which. 2 = AUDIO, per the
+        // official client's upload request (0 VIDEO, 1 VIDEO_MESSAGE, 2 AUDIO).
+        val data =
+            transport.request(
+                OP_VIDEO_UPLOAD,
+                buildJsonObject {
+                    put("type", UPLOAD_TYPE_AUDIO)
+                    put("count", 1)
+                },
+            )
+        val info =
+            data["info"]?.jsonArray?.firstOrNull()?.jsonObject
+                ?: error(data.serverMessage("Не удалось начать загрузку аудио"))
+        val url = info["url"]?.jsonPrimitive?.contentOrNullSafe() ?: error("Нет ссылки для загрузки аудио")
+        val token = info["token"]?.jsonPrimitive?.contentOrNullSafe() ?: error("Сервер не вернул токен аудио")
+        val response = putContent(url, "voice.m4a", "audio/mp4", content, onProgress)
+        if (!response.status.isSuccess()) error("Загрузка аудио не удалась (${response.status.value})")
+        // No wait for a processing notification here, unlike video and file uploads:
+        // the server doesn't appear to announce audio, so waiting for one stalled every
+        // voice message for the full timeout with its progress ring already full. The
+        // caller retries the send briefly instead, which is quick when the clip is
+        // already usable.
+        return OutAttach.Voice(token = token, durationSeconds = durationSeconds)
+    }
+
     override suspend fun uploadFile(
         content: MediaContent,
         fileName: String,
@@ -1639,7 +1828,19 @@ class MaxClient : MaxApi {
                         a["thumbnail"]
                             ?.jsonPrimitive
                             ?.contentOrNullSafe()
-                            ?.let { MediaAttach(MediaType.VIDEO, it, w, h, a["videoId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L) }
+                            ?.let {
+                                MediaAttach(
+                                    type = MediaType.VIDEO,
+                                    url = it,
+                                    width = w,
+                                    height = h,
+                                    videoId = a["videoId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L,
+                                    // A round video message carries a videoType; an
+                                    // unexpected value simply renders as a plain video.
+                                    isVideoNote =
+                                        a["videoType"]?.jsonPrimitive?.intOrNullSafe() == VIDEO_TYPE_VIDEO_NOTE,
+                                )
+                            }
                     else -> null
                 }
             }
@@ -1664,13 +1865,27 @@ class MaxClient : MaxApi {
                     )
                 }
             }
+        val voice =
+            attaches.firstNotNullOfOrNull { el ->
+                val a = el.jsonObject
+                if (a["_type"]?.jsonPrimitive?.contentOrNullSafe() != "AUDIO") return@firstNotNullOfOrNull null
+                val audioId = a["audioId"]?.jsonPrimitive?.longOrNullSafe() ?: return@firstNotNullOfOrNull null
+                VoiceAttach(
+                    audioId = audioId,
+                    durationSeconds = audioDurationSeconds(a["duration"]?.jsonPrimitive?.longOrNullSafe()),
+                    waveform = parseWaveform(a["wave"]),
+                    token = a["token"]?.jsonPrimitive?.contentOrNullSafe(),
+                )
+            }
         // Non-renderable attaches still get a text label so they aren't invisible.
         // For SHARE we surface the actual URL/title so it renders as a tappable link.
         val mediaLabel =
             attaches.firstNotNullOfOrNull { el ->
                 val a = el.jsonObject
                 when (a["_type"]?.jsonPrimitive?.contentOrNullSafe()) {
-                    "AUDIO" -> "🎵 Голосовое сообщение"
+                    // Only as a stand-in: a voice attach we could parse gets a real
+                    // bubble instead, and its chat-list line comes from previewLabel().
+                    "AUDIO" -> if (voice == null) "🎵 Голосовое сообщение" else null
                     else -> null
                 }
             }
@@ -1750,6 +1965,7 @@ class MaxClient : MaxApi {
             forwardedFrom = forwardedFrom,
             linkPreview = linkPreview,
             service = service,
+            voice = voice,
         )
     }
 

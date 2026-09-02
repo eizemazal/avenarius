@@ -16,14 +16,17 @@ import com.avenarius.app.resources.edit
 import com.avenarius.app.resources.expand_content
 import com.avenarius.app.resources.forward
 import com.avenarius.app.resources.group
+import com.avenarius.app.resources.mic
 import com.avenarius.app.resources.more_vert
 import com.avenarius.app.resources.open_in_new
+import com.avenarius.app.resources.pause
 import com.avenarius.app.resources.play_arrow
 import com.avenarius.app.resources.refresh
 import com.avenarius.app.resources.reply
 import com.avenarius.app.resources.search
 import com.avenarius.app.resources.send
 import com.avenarius.app.resources.settings
+import com.avenarius.app.resources.video_chat
 import org.jetbrains.compose.resources.painterResource
 
 /**
@@ -45,7 +48,16 @@ object AppIcons {
     val Close: Painter @Composable get() = painterResource(Res.drawable.close)
     val Edit: Painter @Composable get() = painterResource(Res.drawable.edit)
     val Play: Painter @Composable get() = painterResource(Res.drawable.play_arrow)
+
+    /** Stop playing a voice message. */
+    val Pause: Painter @Composable get() = painterResource(Res.drawable.pause)
     val Attach: Painter @Composable get() = painterResource(Res.drawable.attach_file)
+
+    /** Record a voice message. */
+    val Mic: Painter @Composable get() = painterResource(Res.drawable.mic)
+
+    /** Record a round video message. */
+    val VideoNote: Painter @Composable get() = painterResource(Res.drawable.video_chat)
 
     /** Open an already-downloaded file in another app. */
     val Open: Painter @Composable get() = painterResource(Res.drawable.open_in_new)

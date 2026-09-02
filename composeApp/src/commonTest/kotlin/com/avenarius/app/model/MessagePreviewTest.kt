@@ -56,6 +56,19 @@ class MessagePreviewTest {
     }
 
     @Test
+    fun voiceMessagesAreLabelled() {
+        val voice = message().copy(voice = VoiceAttach(audioId = 1, durationSeconds = 7))
+        assertEquals("🎵 Голосовое сообщение", voice.previewLabel())
+    }
+
+    @Test
+    fun videoNotesAreLabelledSeparatelyFromVideos() {
+        val note = message(media = listOf(video().copy(isVideoNote = true)))
+        assertEquals("📹 Видеосообщение", note.previewLabel())
+        assertEquals("🎥 Видео", message(media = listOf(video())).previewLabel())
+    }
+
+    @Test
     fun anEmptyMessageHasNoPreview() {
         assertEquals("", message().previewLabel())
     }

@@ -12,6 +12,7 @@ import com.avenarius.app.model.DeviceContact
 import com.avenarius.app.model.FileAttach
 import com.avenarius.app.model.MaxLink
 import com.avenarius.app.model.MediaAttach
+import com.avenarius.app.model.MediaContent
 import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
@@ -20,6 +21,7 @@ import com.avenarius.app.model.PendingAttach
 import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.Reaction
+import com.avenarius.app.model.RecordedVoice
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.UserInfo
@@ -142,6 +144,11 @@ data class AppState(
     val demoMode: Boolean = false,
     /** Transient message shown as a snackbar (e.g. "web login confirmed"). */
     val notice: String? = null,
+    /**
+     * A URL the app couldn't handle itself and wants opened in a browser. The UI
+     * consumes it and calls [consumedExternalLink].
+     */
+    val openExternally: String? = null,
     /** The saved unsent text of the chat being opened (restored into the input). */
     val draft: String = "",
     /** Saved unsent text per chat id, previewed in the chat list ("Черновик: …"). */
@@ -164,6 +171,10 @@ data class AppState(
     val pendingSends: Map<Long, List<Message>> = emptyMap(),
     /** False until the first successful sync of this launch (drives the status bar text). */
     val syncedOnce: Boolean = false,
+    /** The voice message playing right now, if any. */
+    val playingVoice: PlayingVoice? = null,
+    /** The round video message playing right now, if any. */
+    val playingVideoNote: PlayingVideoNote? = null,
 ) {
     /**
      * The open chat's messages with its still-sending bubbles merged in.
@@ -189,6 +200,10 @@ class AppViewModel(
     realClient: MaxApi,
     private val cache: AppCache = AppCache(prefs.storage),
     private val messageCache: MessageCache = MessageCache(prefs.storage),
+    /** Pause before re-sending a recording the server wasn't ready for; 0 in tests. */
+    private val voiceSendRetryDelayMs: Long = VOICE_SEND_RETRY_DELAY_MS,
+    /** The audio player. Substituted in tests, which must not touch the real one. */
+    private val voicePlayer: VoicePlayback = VoiceAudio,
 ) : ViewModel() {
     // Swappable: the demo login (Google Play review account) replaces this with an
     // offline [DemoMaxApi] so it never touches the real servers. [originalClient] is
@@ -235,7 +250,20 @@ class AppViewModel(
             return
         }
         launchBusy {
-            val joined = client.joinByLink(invite.link)
+            val outcome = joinByAnyForm(invite)
+            val joined = outcome.getOrNull()
+            if (outcome.isFailure) {
+                // The server didn't recognise the invite in any form we know. Hand it
+                // to the browser rather than leaving a tap that appears to do nothing.
+                _state.update {
+                    it.copy(
+                        notice = "Ссылку не удалось открыть в приложении",
+                        openExternally = invite.url,
+                        error = null,
+                    )
+                }
+                return@launchBusy
+            }
             if (joined != null) {
                 _state.update { s ->
                     val merged =
@@ -257,10 +285,31 @@ class AppViewModel(
             if (found != null) {
                 openChat(found)
             } else {
-                _state.update { it.copy(notice = "Не удалось открыть ссылку") }
+                _state.update {
+                    it.copy(notice = "Ссылку не удалось открыть в приложении", openExternally = invite.url)
+                }
             }
         }
     }
+
+    /**
+     * Joins with whichever spelling of the invite the server accepts.
+     *
+     * The hash alone is what the official client sends, so it is tried first; the
+     * other forms cover a deployment that wants the whole link. Only if every form is
+     * refused does this fail — the caller then falls back to a browser.
+     */
+    private suspend fun joinByAnyForm(invite: MaxLink.Invite): Result<Chat?> {
+        var last: Result<Chat?> = Result.failure(IllegalStateException("Ссылка не найдена"))
+        for (form in listOf(invite.token, invite.url, invite.link).distinct()) {
+            last = runCatching { client.joinByLink(form) }
+            if (last.isSuccess) return last
+        }
+        return last
+    }
+
+    /** Called once the UI has opened [AppState.openExternally]. */
+    fun consumedExternalLink() = _state.update { it.copy(openExternally = null) }
 
     /** A chat we already have whose public link points at the same thing as [invite]. */
     private fun knownChatFor(invite: MaxLink.Invite): Chat? =
@@ -330,8 +379,24 @@ class AppViewModel(
         val caption: String,
         val replyToId: String?,
         val items: List<PickedMedia>,
+        /** Set instead of [items] when this send is one self-contained recording. */
+        val solo: SoloRecording? = null,
         /** Parallel to [items]; non-null once that item has uploaded. */
         val attaches: MutableList<OutAttach?> = MutableList(items.size) { null },
+    ) {
+        /** A solo send has one attachment, tracked separately from [attaches]. */
+        var soloAttach: OutAttach? = null
+    }
+
+    /**
+     * A recording sent on its own: a voice message or a round video message. They
+     * differ only in which upload they use and how they are drawn, so they share the
+     * send, retry and cancel machinery.
+     */
+    private class SoloRecording(
+        val content: MediaContent,
+        val durationSeconds: Int,
+        val isVideoNote: Boolean,
     )
 
     // Retry material for the bubbles in [AppState.pendingSends], keyed by cid.
@@ -949,6 +1014,8 @@ class AppViewModel(
     }
 
     fun backToChats() {
+        stopVoice()
+        _state.update { it.copy(playingVideoNote = null) }
         flushDrafts()
         _state.update { it.copy(screen = Screen.CHATS, currentChat = null, messages = emptyList(), draft = "") }
     }
@@ -1533,6 +1600,71 @@ class AppViewModel(
     }
 
     /**
+     * Sends a finished recording as a voice message.
+     *
+     * Uses the same optimistic bubble as any other attachment, so it appears at once
+     * with a progress ring and can be retried or discarded if the upload fails.
+     */
+    fun sendVoice(recorded: RecordedVoice) =
+        sendSolo(
+            SoloRecording(
+                content = recorded.content,
+                durationSeconds = recorded.durationSeconds,
+                isVideoNote = false,
+            ),
+        )
+
+    /**
+     * Sends [media] as a round video message rather than a plain video attachment.
+     */
+    fun sendVideoNote(media: PickedMedia) =
+        sendSolo(
+            SoloRecording(
+                content = media.content,
+                // The camera capture doesn't report a length; the server and the
+                // receiving client can work it out from the file.
+                durationSeconds = 0,
+                isVideoNote = true,
+            ),
+        )
+
+    private fun sendSolo(recording: SoloRecording) {
+        val chat = _state.value.currentChat ?: return
+        val myId = _state.value.account?.userId ?: return
+        val send =
+            OutgoingSend(
+                chatId = chat.id,
+                cid = nextCid(),
+                caption = "",
+                replyToId = _state.value.replyingTo?.id,
+                items = emptyList(),
+                solo = recording,
+            )
+        outgoing[send.cid] = send
+        _state.update {
+            it.copy(
+                replyingTo = null,
+                pendingSends =
+                    it.pendingSends.plusPending(
+                        chat.id,
+                        Message(
+                            id = null,
+                            cid = send.cid,
+                            chatId = send.chatId,
+                            senderId = myId,
+                            text = "",
+                            time = send.cid,
+                            // Its own thumbnail-less pending entry: the bubble shows a
+                            // ring while the clip goes up.
+                            pending = listOf(PendingAttach(preview = null, kind = PickedKind.FILE)),
+                        ),
+                    ),
+            )
+        }
+        startSend(listOf(send))
+    }
+
+    /**
      * Retries a bubble whose attachments failed. Items that had already uploaded are
      * not sent up again, and the original cid is reused so a send the server did
      * receive (but never acknowledged to us) is deduplicated rather than doubled.
@@ -1586,6 +1718,10 @@ class AppViewModel(
 
     /** Uploads whatever [send] still needs, then delivers it. */
     private suspend fun performSend(send: OutgoingSend) {
+        send.solo?.let { recording ->
+            performSoloSend(send, recording)
+            return
+        }
         var failed = 0
         send.items.forEachIndexed { index, media ->
             if (send.attaches[index] != null) return@forEachIndexed // already up
@@ -1644,6 +1780,85 @@ class AppViewModel(
                 throw e
             }
         finishSend(send, sent, failed)
+    }
+
+    /**
+     * Sends a recording, briefly retrying a refusal.
+     *
+     * A freshly uploaded clip is refused for a moment while the server finishes with
+     * it, and it doesn't announce when it's done — so the send is attempted again a
+     * couple of times with a short backoff. That is fast when the clip is already
+     * usable, and it is what the user was otherwise doing by hand. Three attempts at
+     * most: a genuine rejection should surface rather than hide behind retries.
+     *
+     * Every attempt reuses the same cid, so a send the server did receive is
+     * deduplicated rather than doubled.
+     */
+    private suspend fun deliverSolo(
+        send: OutgoingSend,
+        attach: OutAttach,
+    ): List<Message> {
+        var last: Throwable? = null
+        for (attempt in 0 until VOICE_SEND_ATTEMPTS) {
+            if (attempt > 0) delay(voiceSendRetryDelayMs * attempt)
+            try {
+                return deliver(send, listOf(attach), send.cid, caption = "")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                last = e
+                // Printed so the reason a fresh recording is refused can be read off
+                // logcat (`./dev.sh logs`). If it turns out not to be the server still
+                // ingesting the clip, this ladder is the wrong fix and should go.
+                println("Avenarius: voice send attempt ${attempt + 1} refused: ${e.message}")
+            }
+        }
+        throw last ?: IllegalStateException("Не удалось отправить голосовое сообщение")
+    }
+
+    /** Uploads a recording (if it isn't up already) and sends it. */
+    private suspend fun performSoloSend(
+        send: OutgoingSend,
+        recording: SoloRecording,
+    ) {
+        updatePending(send.chatId, send.cid, 0) { it.copy(state = UploadState.UPLOADING, progress = 0f) }
+        val attach =
+            send.soloAttach ?: run {
+                val onProgress: (Float) -> Unit = { fraction ->
+                    updatePending(send.chatId, send.cid, 0) { p ->
+                        if (fraction - p.progress >= PROGRESS_STEP || fraction >= 1f) {
+                            p.copy(progress = fraction)
+                        } else {
+                            p
+                        }
+                    }
+                }
+                try {
+                    if (recording.isVideoNote) {
+                        client.uploadVideoNote(recording.content, recording.durationSeconds, onProgress)
+                    } else {
+                        client.uploadVoice(recording.content, recording.durationSeconds, onProgress)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    markPendingFailed(send.chatId, send.cid)
+                    throw e
+                }
+            }
+        // Kept, so a retry after a failed send doesn't upload the clip again.
+        send.soloAttach = attach
+        updatePending(send.chatId, send.cid, 0) { it.copy(state = UploadState.DONE, progress = 1f) }
+        val sent =
+            try {
+                deliverSolo(send, attach)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                markPendingFailed(send.chatId, send.cid)
+                throw e
+            }
+        finishSend(send, sent, failedCount = 0)
     }
 
     /**
@@ -1915,6 +2130,123 @@ class AppViewModel(
         }
     }
 
+    /**
+     * Starts or stops a voice message. Tapping the one already playing stops it;
+     * tapping another switches to it, since only one clip plays at a time.
+     */
+    fun toggleVoice(message: Message) {
+        val voice = message.voice ?: return
+        val id = message.id ?: return
+        val current = _state.value.playingVoice
+        if (current?.messageId == id) {
+            // Same bubble: pause and resume in place. Stopping here would throw the
+            // position away, which is what made the pause button look like a rewind.
+            if (current.paused) {
+                voicePlayer.resume()
+                _state.update { it.copy(playingVoice = current.copy(paused = false)) }
+            } else {
+                voicePlayer.pause()
+                _state.update { it.copy(playingVoice = current.copy(paused = true)) }
+            }
+            return
+        }
+        voicePlayer.stop()
+        // A circle and a voice clip must not play over each other.
+        _state.update { it.copy(playingVoice = PlayingVoice(messageId = id), playingVideoNote = null) }
+        launchBusyless {
+            // Reported rather than swallowed: "no link in the reply" and "the server
+            // refused" need telling apart when this goes wrong.
+            val resolved =
+                runCatching {
+                    client.getAudioUrl(message.chatId, id.toLongOrNull() ?: 0L, voice.audioId, voice.token)
+                }
+            val url = resolved.getOrNull()
+            if (url == null) {
+                val reason =
+                    resolved.exceptionOrNull()?.message
+                        ?: "Сервер не вернул ссылку на аудио"
+                _state.update { it.copy(playingVoice = null, error = reason) }
+                return@launchBusyless
+            }
+            // The bubble may have been stopped (or another started) while we fetched.
+            if (_state.value.playingVoice?.messageId != id) return@launchBusyless
+            voicePlayer.play(
+                url = url,
+                // The player often can't tell how long a streamed clip is; the attach can.
+                durationHintMs = voice.durationSeconds * 1000L,
+                onStarted = {
+                    // A position of 0 (rather than null) is what tells the bubble it is
+                    // playing rather than still loading.
+                    _state.update { s ->
+                        val playing = s.playingVoice
+                        if (playing?.messageId != id) s else s.copy(playingVoice = playing.copy(progress = 0f))
+                    }
+                },
+                onProgress = { fraction ->
+                    _state.update { s ->
+                        val playing = s.playingVoice
+                        if (playing?.messageId != id) {
+                            s
+                        } else {
+                            s.copy(playingVoice = playing.copy(progress = fraction))
+                        }
+                    }
+                },
+                onFinished = {
+                    _state.update { s -> if (s.playingVoice?.messageId == id) s.copy(playingVoice = null) else s }
+                },
+            )
+        }
+    }
+
+    /** Jumps to [fraction] (0..1) of the voice message that is loaded. */
+    fun seekVoice(fraction: Float) {
+        val playing = _state.value.playingVoice ?: return
+        voicePlayer.seekTo(fraction)
+        // Moved at once so the bar follows the finger; the next tick confirms it.
+        _state.update { it.copy(playingVoice = playing.copy(progress = fraction.coerceIn(0f, 1f))) }
+    }
+
+    /**
+     * Starts or stops a round video message, played inside its own circle rather than
+     * in the full-screen viewer. Tapping the one already playing stops it.
+     */
+    fun toggleVideoNote(message: Message) {
+        val note = message.media.firstOrNull { it.isVideoNote } ?: return
+        val id = message.id ?: return
+        if (_state.value.playingVideoNote?.messageId == id) {
+            _state.update { it.copy(playingVideoNote = null) }
+            return
+        }
+        // Only one thing plays at a time.
+        stopVoice()
+        _state.update { it.copy(playingVideoNote = PlayingVideoNote(messageId = id)) }
+        launchBusyless {
+            val resolved =
+                runCatching { client.getVideoUrl(message.chatId, id.toLongOrNull() ?: 0L, note.videoId) }
+            val url = resolved.getOrNull()
+            if (url == null) {
+                _state.update {
+                    it.copy(
+                        playingVideoNote = null,
+                        error = resolved.exceptionOrNull()?.message ?: "Не удалось воспроизвести видеосообщение",
+                    )
+                }
+                return@launchBusyless
+            }
+            // It may have been stopped (or another started) while the URL was fetched.
+            _state.update { s ->
+                if (s.playingVideoNote?.messageId != id) s else s.copy(playingVideoNote = PlayingVideoNote(id, url))
+            }
+        }
+    }
+
+    /** Stops voice playback, if any. */
+    fun stopVoice() {
+        voicePlayer.stop()
+        _state.update { it.copy(playingVoice = null) }
+    }
+
     private fun forgetDownloadedFile(fileId: Long) {
         val refs = _state.value.downloadedFiles - fileId
         cache.saveDownloadedFiles(refs)
@@ -2128,7 +2460,7 @@ class AppViewModel(
     // NOTE: we intentionally do NOT disconnect in onCleared — the client is
     // app-scoped and kept alive by the background service. Only logout disconnects.
 
-    private companion object {
+    companion object {
         // Offline demo account for Google Play review (no real server access).
         const val DEMO_PHONE = "+79990000000"
         const val DEMO_CODE = "00000"
@@ -2147,6 +2479,16 @@ class AppViewModel(
         // default; the server can be stricter, which [deliver] discovers.
         const val MAX_ATTACHES_PER_MESSAGE = 10
 
+        // Backoff step before re-sending a recording the server wasn't ready for:
+        // the second attempt waits one step, the third waits two.
+        //
+        // 700ms, not less: at 250ms the ladder sometimes ran out before the server was
+        // ready and the send failed outright. The visible cost is a brief pause with a
+        // full progress ring, which is the better trade.
+        const val VOICE_SEND_RETRY_DELAY_MS = 700L
+
+        const val VOICE_SEND_ATTEMPTS = 3
+
         // Smallest upload-progress change worth publishing to the UI.
         const val PROGRESS_STEP = 0.02f
 
@@ -2157,6 +2499,27 @@ class AppViewModel(
         const val CACHE_WRITE_THROTTLE_MS = 1_000L
     }
 }
+
+/** The voice message currently playing, and how far through it is. */
+data class PlayingVoice(
+    /** Server id of the message whose bubble is playing. */
+    val messageId: String,
+    /**
+     * Position as 0..1, or null while the clip is still being fetched and started —
+     * which is what distinguishes "loading" from "playing" in the bubble.
+     */
+    val progress: Float? = null,
+    /** Held at its position rather than playing. The clip is still loaded. */
+    val paused: Boolean = false,
+)
+
+/** The round video message playing in place, and the stream it plays. */
+data class PlayingVideoNote(
+    /** Server id of the message whose circle is playing. */
+    val messageId: String,
+    /** The playable stream, or null while it is being resolved. */
+    val url: String? = null,
+)
 
 /** Adds [message] to the pending-send list of [chatId]. */
 private fun Map<Long, List<Message>>.plusPending(

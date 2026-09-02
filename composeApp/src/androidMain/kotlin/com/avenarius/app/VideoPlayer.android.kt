@@ -9,6 +9,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 
 @UnstableApi
@@ -16,6 +17,7 @@ import androidx.media3.ui.PlayerView
 actual fun VideoPlayer(
     url: String,
     modifier: Modifier,
+    crop: Boolean,
 ) {
     val context = LocalContext.current
     val player =
@@ -34,7 +36,15 @@ actual fun VideoPlayer(
         factory = { ctx ->
             PlayerView(ctx).apply {
                 this.player = player
-                useController = true
+                // A cropped player is the round message: its own controls would be
+                // clipped by the circle, and a tap already stops playback.
+                useController = !crop
+                resizeMode =
+                    if (crop) {
+                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    } else {
+                        AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    }
             }
         },
     )

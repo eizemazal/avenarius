@@ -105,6 +105,11 @@ data class MediaAttach(
     val height: Int,
     /** For VIDEO: the id needed to resolve the playable stream (opcode 83). */
     val videoId: Long = 0,
+    /**
+     * A round video message ("video note") rather than a plain video, from the
+     * attach's `videoType`. Only changes how it is drawn.
+     */
+    val isVideoNote: Boolean = false,
 )
 
 /** One emoji reaction bucket on a message: [emoji] with [count], [mine] if we reacted with it. */
@@ -120,6 +125,22 @@ data class Reaction(
 data class ReplyInfo(
     val senderId: Long,
     val text: String,
+)
+
+/**
+ * A voice message (an AUDIO attach), played via AUDIO_PLAY.
+ *
+ * [waveform] is the server's amplitude sketch, already normalised to 0..1 — empty
+ * when it didn't send one, in which case the bubble draws a flat bar.
+ */
+@Serializable
+data class VoiceAttach(
+    val audioId: Long,
+    /** Length in seconds, or 0 when the server didn't say. */
+    val durationSeconds: Int,
+    val waveform: List<Float> = emptyList(),
+    /** Playback token, when the attach carries one — some clips need it to resolve. */
+    val token: String? = null,
 )
 
 /** A file attachment on a received message (downloadable via FILE_DOWNLOAD). */
@@ -166,6 +187,8 @@ fun Message.previewLabel(): String =
     when {
         text.isNotBlank() -> text
         service != null -> service.message ?: "Служебное сообщение"
+        voice != null -> "🎵 Голосовое сообщение"
+        media.any { it.isVideoNote } -> "📹 Видеосообщение"
         media.any { it.type == MediaType.VIDEO } -> "🎥 Видео"
         media.isNotEmpty() -> "📷 Фото"
         files.isNotEmpty() -> "📎 " + files.first().name
@@ -218,6 +241,8 @@ data class Message(
     val linkPreview: LinkPreview? = null,
     /** Set when this is a group service/system message (rendered as a centered chip). */
     val service: ServiceEvent? = null,
+    /** Set when this message is a voice recording. */
+    val voice: VoiceAttach? = null,
     /**
      * Attachments still uploading, on a message we created locally and have not yet
      * sent. Replaced by the server's copy (with real [media]) once the send lands.

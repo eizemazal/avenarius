@@ -17,9 +17,11 @@ import com.avenarius.app.model.OutAttach
 import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.Reaction
+import com.avenarius.app.model.RecordedVoice
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.model.VoiceAttach
 import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
@@ -167,6 +169,12 @@ private class FakeMaxClient : MaxApi {
     /** When set, [sendMessage] throws it. */
     var sendFailure: Throwable? = null
 
+    /** Number of sends to refuse before accepting one (server-side processing lag). */
+    var sendFailuresRemaining = 0
+
+    /** Every call to [sendMessage], accepted or not. */
+    var sendAttempts = 0
+
     override suspend fun sendMessage(
         chatId: Long,
         text: String,
@@ -174,8 +182,13 @@ private class FakeMaxClient : MaxApi {
         replyToId: String?,
         attaches: List<OutAttach>,
     ): Message? {
+        sendAttempts++
         sendGate?.await()
         sendFailure?.let { throw it }
+        if (sendFailuresRemaining > 0) {
+            sendFailuresRemaining--
+            error("errors.send-message.attachment.not-ready")
+        }
         if (attaches.size > maxAttachesAccepted) {
             error("errors.send-message.attachment.max-size-reached")
         }
@@ -264,6 +277,35 @@ private class FakeMaxClient : MaxApi {
         return OutAttach.Video(videoId = 1L, token = "fake-token")
     }
 
+    /** Recordings handed to [uploadVoice], with their reported length. */
+    val uploadedVoices = mutableListOf<Int>()
+
+    var voiceUploadFailure: Throwable? = null
+
+    val uploadedVideoNotes = mutableListOf<Int>()
+
+    override suspend fun uploadVideoNote(
+        content: MediaContent,
+        durationSeconds: Int,
+        onProgress: ((Float) -> Unit)?,
+    ): OutAttach.VideoNote {
+        uploadedVideoNotes += durationSeconds
+        content.openChannel().toByteArray()
+        return OutAttach.VideoNote(token = "note-token", durationSeconds = durationSeconds)
+    }
+
+    override suspend fun uploadVoice(
+        content: MediaContent,
+        durationSeconds: Int,
+        onProgress: ((Float) -> Unit)?,
+    ): OutAttach.Voice {
+        content.openChannel().toByteArray()
+        voiceUploadFailure?.let { throw it }
+        uploadedVoices += durationSeconds
+        onProgress?.invoke(1f)
+        return OutAttach.Voice(token = "voice-token", durationSeconds = durationSeconds)
+    }
+
     override suspend fun uploadFile(
         content: MediaContent,
         fileName: String,
@@ -306,8 +348,12 @@ private class FakeMaxClient : MaxApi {
 
     val joinedLinks = mutableListOf<String>()
 
+    /** Only this spelling of a link is accepted; others are refused like the server. */
+    var acceptedJoinForm: String? = null
+
     override suspend fun joinByLink(link: String): Chat? {
         joinedLinks += link
+        acceptedJoinForm?.let { if (link != it) error("Ссылка не найдена") }
         return joinResult
     }
 
@@ -374,7 +420,10 @@ private class FakeMaxClient : MaxApi {
         chatId: Long,
         messageId: Long,
         videoId: Long,
-    ): String? = null
+    ): String? {
+        videoRequests += videoId
+        return videoUrl
+    }
 
     /** When set, [fetchHistory] waits on it — lets a test see the pre-fetch state. */
     var historyGate: CompletableDeferred<Unit>? = null
@@ -383,6 +432,30 @@ private class FakeMaxClient : MaxApi {
     var fileUrl: String? = null
 
     val fileUrlRequests = mutableListOf<Long>()
+
+    /** URL handed back for a voice message; null means "no link". */
+    var audioUrl: String? = null
+
+    val audioRequests = mutableListOf<Long>()
+
+    /** When set, [getAudioUrl] waits on it — holds the bubble in its loading state. */
+    var audioGate: CompletableDeferred<Unit>? = null
+
+    /** URL handed back for a video; null means "no link". */
+    var videoUrl: String? = null
+
+    val videoRequests = mutableListOf<Long>()
+
+    override suspend fun getAudioUrl(
+        chatId: Long,
+        messageId: Long,
+        audioId: Long,
+        token: String?,
+    ): String? {
+        audioRequests += audioId
+        audioGate?.await()
+        return audioUrl
+    }
 
     override suspend fun getFileUrl(
         chatId: Long,
@@ -413,10 +486,53 @@ private class CountingContent(
     }
 }
 
+/**
+ * Stand-in for the platform player. The real desktop one hands the clip to the
+ * system, which opened a browser tab per test run.
+ */
+private class FakeVoicePlayer : VoicePlayback {
+    val played = mutableListOf<String>()
+    val seeks = mutableListOf<Float>()
+    var pauses = 0
+    var resumes = 0
+    var stops = 0
+
+    /** Set to have [play] report that audio started (and then progress/finish). */
+    var autoStart = false
+
+    override fun play(
+        url: String,
+        durationHintMs: Long,
+        onStarted: () -> Unit,
+        onProgress: (Float) -> Unit,
+        onFinished: () -> Unit,
+    ) {
+        played += url
+        if (autoStart) onStarted()
+    }
+
+    override fun pause() {
+        pauses++
+    }
+
+    override fun resume() {
+        resumes++
+    }
+
+    override fun seekTo(fraction: Float) {
+        seeks += fraction
+    }
+
+    override fun stop() {
+        stops++
+    }
+}
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class AppViewModelTest {
     private lateinit var fake: FakeMaxClient
     private lateinit var prefs: Prefs
+    private lateinit var player: FakeVoicePlayer
 
     @BeforeTest
     fun setUp() {
@@ -424,13 +540,22 @@ class AppViewModelTest {
         // runs launched work eagerly so each call's effects are visible at once.
         Dispatchers.setMain(UnconfinedTestDispatcher())
         fake = FakeMaxClient()
+        player = FakeVoicePlayer()
         prefs = Prefs(InMemoryStorage())
     }
 
     @AfterTest
     fun tearDown() = Dispatchers.resetMain()
 
-    private fun viewModel() = AppViewModel(prefs, fake)
+    private fun viewModel() =
+        AppViewModel(
+            prefs,
+            fake,
+            // Zero, so the voice-send retry doesn't park on a delay the unconfined
+            // test dispatcher never advances.
+            voiceSendRetryDelayMs = 0,
+            voicePlayer = player,
+        )
 
     /** Logs in (token preset) and returns a ViewModel already on the CHATS screen. */
     private fun loggedIn(chats: List<Chat> = emptyList()): AppViewModel {
@@ -828,6 +953,422 @@ class AppViewModelTest {
         )
     }
 
+    // --- voice messages ---
+
+    private fun voiceMessage(id: String = "7") =
+        Message(
+            id = id,
+            cid = null,
+            chatId = 1,
+            senderId = 200,
+            text = "",
+            time = 5,
+            voice = VoiceAttach(audioId = 42, durationSeconds = 7, waveform = listOf(0.2f, 1f)),
+        )
+
+    @Test
+    fun playingAVoiceMessageResolvesItsUrl() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.audioUrl = "https://cdn/voice.m4a"
+
+        vm.toggleVoice(voiceMessage())
+
+        assertEquals(listOf(42L), fake.audioRequests)
+        assertEquals(listOf("https://cdn/voice.m4a"), player.played, "the clip has to reach the player")
+        assertNull(vm.state.value.error)
+    }
+
+    @Test
+    fun leavingTheChatStopsThePlayerItself() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.audioUrl = "https://cdn/voice.m4a"
+        player.autoStart = true
+        vm.toggleVoice(voiceMessage())
+
+        vm.onBack()
+
+        assertTrue(player.stops > 0, "the player must be stopped, not just the state cleared")
+    }
+
+    @Test
+    fun tappingAPlayingMessagePausesItRatherThanStopping() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.audioUrl = "https://cdn/voice.m4a"
+        fake.audioGate = CompletableDeferred() // hold it "loaded" for the test
+        vm.toggleVoice(voiceMessage())
+
+        vm.toggleVoice(voiceMessage())
+
+        // Still loaded, just held: the position has to survive a pause.
+        val paused = vm.state.value.playingVoice
+        assertEquals("7", paused?.messageId)
+        assertTrue(paused?.paused == true)
+        assertEquals(1, player.pauses, "the player has to be paused, not stopped")
+        fake.audioGate?.complete(Unit)
+    }
+
+    @Test
+    fun tappingAPausedMessageResumesIt() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.audioUrl = "https://cdn/voice.m4a"
+        fake.audioGate = CompletableDeferred()
+        vm.toggleVoice(voiceMessage())
+        vm.toggleVoice(voiceMessage()) // pause
+
+        vm.toggleVoice(voiceMessage()) // resume
+
+        assertTrue(
+            vm.state.value.playingVoice
+                ?.paused == false,
+        )
+        assertEquals(1, player.resumes)
+        fake.audioGate?.complete(Unit)
+    }
+
+    @Test
+    fun seekingWorksWhilePaused() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.audioUrl = "https://cdn/voice.m4a"
+        fake.audioGate = CompletableDeferred()
+        vm.toggleVoice(voiceMessage())
+        vm.toggleVoice(voiceMessage()) // pause
+
+        vm.seekVoice(0.25f)
+
+        assertEquals(listOf(0.25f), player.seeks, "the seek has to reach the player")
+        val state = vm.state.value.playingVoice
+        assertEquals(0.25f, state?.progress)
+        assertTrue(state?.paused == true, "seeking must not silently resume")
+        fake.audioGate?.complete(Unit)
+    }
+
+    @Test
+    fun aVoiceMessageWithNoUrlReportsInsteadOfHanging() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.audioUrl = null
+
+        vm.toggleVoice(voiceMessage())
+
+        assertNull(vm.state.value.playingVoice, "the bubble must not be left spinning")
+        assertEquals("Сервер не вернул ссылку на аудио", vm.state.value.error)
+    }
+
+    @Test
+    fun leavingTheChatStopsPlayback() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.audioUrl = "https://cdn/voice.m4a"
+        vm.toggleVoice(voiceMessage())
+
+        vm.onBack()
+
+        assertNull(vm.state.value.playingVoice)
+    }
+
+    @Test
+    fun aBubbleIsLoadingUntilPlaybackStarts() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.audioUrl = "https://cdn/voice.m4a"
+        fake.audioGate = CompletableDeferred() // still resolving the link
+
+        vm.toggleVoice(voiceMessage())
+
+        val playing = vm.state.value.playingVoice
+        assertEquals("7", playing?.messageId)
+        assertNull(playing?.progress, "a null position is what marks the bubble as still loading")
+        fake.audioGate?.complete(Unit)
+    }
+
+    @Test
+    fun seekingMovesThePositionAtOnce() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.audioUrl = "https://cdn/voice.m4a"
+        fake.audioGate = CompletableDeferred()
+        vm.toggleVoice(voiceMessage())
+
+        vm.seekVoice(0.5f)
+
+        // Reflected without waiting for the player, so the bar tracks the finger.
+        assertEquals(
+            0.5f,
+            vm.state.value.playingVoice
+                ?.progress,
+        )
+        fake.audioGate?.complete(Unit)
+    }
+
+    @Test
+    fun seekingWithNothingPlayingIsHarmless() {
+        val vm = loggedIn()
+        vm.seekVoice(0.5f)
+        assertNull(vm.state.value.playingVoice)
+    }
+
+    // --- sending a voice message ---
+
+    private fun recorded(seconds: Int = 5) = RecordedVoice(content = CountingContent(), durationSeconds = seconds)
+
+    @Test
+    fun aRecordingIsUploadedAndSent() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+
+        vm.sendVoice(recorded(seconds = 12))
+
+        assertEquals(listOf(12), fake.uploadedVoices)
+        assertEquals(
+            listOf(OutAttach.Voice(token = "voice-token", durationSeconds = 12)),
+            fake.lastAttaches,
+            "the message should carry the voice attach",
+        )
+        assertTrue(
+            vm.state.value.pendingSends
+                .isEmpty(),
+            "the bubble retires once sent",
+        )
+    }
+
+    @Test
+    fun aRecordingAppearsAsABubbleWhileItUploads() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.sendGate = CompletableDeferred()
+
+        vm.sendVoice(recorded())
+
+        val bubble =
+            vm.state.value.visibleMessages
+                .single { it.id == null }
+        assertEquals(1, bubble.pending.size, "a voice send needs its own progress entry")
+        fake.sendGate?.complete(Unit)
+    }
+
+    @Test
+    fun aFailedVoiceUploadLeavesARetryableBubble() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.voiceUploadFailure = RuntimeException("нет сети")
+
+        vm.sendVoice(recorded())
+
+        val bubble =
+            vm.state.value.visibleMessages
+                .single { it.id == null }
+        assertEquals(UploadState.FAILED, bubble.pending.single().state)
+
+        // Retrying uploads again and gets it away.
+        fake.voiceUploadFailure = null
+        vm.retrySend(bubble)
+
+        assertTrue(
+            vm.state.value.pendingSends
+                .isEmpty(),
+        )
+        assertEquals(1, fake.uploadedVoices.size)
+    }
+
+    @Test
+    fun aRetryAfterAFailedVoiceSendDoesNotReuploadTheClip() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.sendFailure = RuntimeException("чат закрыт")
+
+        vm.sendVoice(recorded())
+        val bubble =
+            vm.state.value.visibleMessages
+                .single { it.id == null }
+        fake.sendFailure = null
+        vm.retrySend(bubble)
+
+        assertEquals(1, fake.uploadedVoices.size, "the clip was already up; only the send is retried")
+        assertTrue(
+            vm.state.value.pendingSends
+                .isEmpty(),
+        )
+    }
+
+    @Test
+    fun aRecordingRefusedTwiceStillGetsThrough() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        // Refused twice while the server finishes with the clip; the third try lands.
+        fake.sendFailuresRemaining = 2
+
+        vm.sendVoice(recorded())
+
+        assertTrue(
+            vm.state.value.pendingSends
+                .isEmpty(),
+            "the send should recover on its own",
+        )
+        assertEquals(1, fake.uploadedVoices.size, "the clip is uploaded once, not per attempt")
+    }
+
+    @Test
+    fun aRecordingRefusedEveryTimeEndsAsAFailedBubble() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        // A real rejection must surface rather than be retried away.
+        fake.sendFailuresRemaining = 99
+
+        vm.sendVoice(recorded())
+
+        val bubble =
+            vm.state.value.visibleMessages
+                .single { it.id == null }
+        assertEquals(UploadState.FAILED, bubble.pending.single().state)
+        assertEquals(3, fake.sendAttempts, "retries are bounded, not endless")
+    }
+
+    @Test
+    fun aRecordingRefusedOnceIsSentWithoutTheUserRetrying() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        // The server refuses the first send while it finishes processing the clip.
+        fake.sendFailuresRemaining = 1
+
+        vm.sendVoice(recorded())
+
+        assertTrue(
+            vm.state.value.pendingSends
+                .isEmpty(),
+            "the send should recover on its own",
+        )
+        assertEquals(1, fake.uploadedVoices.size, "the clip is uploaded once, not per attempt")
+    }
+
+    // --- video messages ---
+
+    private fun videoNoteMessage(id: String = "8") =
+        Message(
+            id = id,
+            cid = null,
+            chatId = 1,
+            senderId = 200,
+            text = "",
+            time = 6,
+            media = listOf(MediaAttach(MediaType.VIDEO, "https://cdn/t.jpg", 200, 200, videoId = 55, isVideoNote = true)),
+        )
+
+    @Test
+    fun aVideoNotePlaysInPlaceRatherThanInTheViewer() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.videoUrl = "https://cdn/note.mp4"
+
+        vm.toggleVideoNote(videoNoteMessage())
+
+        assertEquals(listOf(55L), fake.videoRequests)
+        assertEquals(
+            "https://cdn/note.mp4",
+            vm.state.value.playingVideoNote
+                ?.url,
+        )
+        assertNull(vm.state.value.mediaViewer, "the full-screen viewer must not open")
+    }
+
+    @Test
+    fun tappingAPlayingVideoNoteStopsIt() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.videoUrl = "https://cdn/note.mp4"
+        vm.toggleVideoNote(videoNoteMessage())
+
+        vm.toggleVideoNote(videoNoteMessage())
+
+        assertNull(vm.state.value.playingVideoNote)
+    }
+
+    @Test
+    fun aVoiceMessageAndACircleDoNotPlayTogether() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.videoUrl = "https://cdn/note.mp4"
+        fake.audioUrl = "https://cdn/voice.m4a"
+        fake.audioGate = CompletableDeferred()
+        vm.toggleVideoNote(videoNoteMessage())
+
+        vm.toggleVoice(voiceMessage())
+
+        assertNull(vm.state.value.playingVideoNote, "starting a voice clip stops the circle")
+        fake.audioGate?.complete(Unit)
+    }
+
+    @Test
+    fun aVideoNoteWithNoStreamReportsInsteadOfSpinning() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.videoUrl = null
+
+        vm.toggleVideoNote(videoNoteMessage())
+
+        assertNull(vm.state.value.playingVideoNote)
+        assertEquals("Не удалось воспроизвести видеосообщение", vm.state.value.error)
+    }
+
+    @Test
+    fun aVideoNoteIsUploadedAsOneAndSentOnItsOwn() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+
+        vm.sendVideoNote(PickedMedia(CountingContent(), "video/mp4", "clip.mp4", PickedKind.VIDEO))
+
+        assertEquals(1, fake.uploadedVideoNotes.size, "the clip goes through the video-message upload")
+        assertTrue(fake.uploaded.isEmpty(), "not through the plain video upload")
+        assertEquals(1, fake.lastAttaches.size)
+        assertTrue(
+            vm.state.value.pendingSends
+                .isEmpty(),
+            "the bubble retires once sent",
+        )
+    }
+
+    @Test
+    fun aVideoNoteShowsAnOptimisticBubbleWhileItUploads() {
+        val chat = Chat(id = 1, title = "Аня", lastMessageText = null, lastEventTime = 1)
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.sendGate = CompletableDeferred()
+
+        vm.sendVideoNote(PickedMedia(CountingContent(), "video/mp4", "clip.mp4", PickedKind.VIDEO))
+
+        assertEquals(
+            1,
+            vm.state.value.visibleMessages
+                .count { it.id == null },
+        )
+        fake.sendGate?.complete(Unit)
+    }
+
     // --- max.ru links ---
 
     @Test
@@ -862,7 +1403,7 @@ class AppViewModelTest {
         val handled = vm.openLink("https://max.ru/someInvite")
 
         assertTrue(handled)
-        assertEquals(listOf("max.ru/someInvite"), fake.joinedLinks)
+        assertEquals(listOf("someInvite"), fake.joinedLinks)
         assertEquals(
             9L,
             vm.state.value.currentChat
@@ -921,12 +1462,62 @@ class AppViewModelTest {
         fake.codeResult = CodeResult.Success("tok")
         vm.submitCode("123456")
 
-        assertEquals(listOf("max.ru/waiting"), fake.joinedLinks, "the link should be acted on once signed in")
+        assertEquals(listOf("waiting"), fake.joinedLinks, "the link should be acted on once signed in")
         assertEquals(
             3L,
             vm.state.value.currentChat
                 ?.id,
         )
+    }
+
+    @Test
+    fun theInviteHashIsWhatIsSentFirst() {
+        val vm = loggedIn()
+        fake.joinResult = Chat(id = 9, title = "Группа", lastMessageText = null, lastEventTime = 2)
+
+        vm.openLink("https://max.ru/join/SOMEHASH")
+
+        // The official client reduces a link to a single path segment, so the hash is
+        // the first thing tried — not "max.ru/join/SOMEHASH".
+        assertEquals(listOf("SOMEHASH"), fake.joinedLinks)
+        assertEquals(
+            9L,
+            vm.state.value.currentChat
+                ?.id,
+        )
+    }
+
+    @Test
+    fun otherLinkFormsAreTriedIfTheHashIsRefused() {
+        val vm = loggedIn()
+        fake.acceptedJoinForm = "https://max.ru/join/SOMEHASH" // this server wants the URL
+        fake.joinResult = Chat(id = 9, title = "Группа", lastMessageText = null, lastEventTime = 2)
+
+        vm.openLink("https://max.ru/join/SOMEHASH")
+
+        assertEquals(listOf("SOMEHASH", "https://max.ru/join/SOMEHASH"), fake.joinedLinks)
+        assertEquals(
+            9L,
+            vm.state.value.currentChat
+                ?.id,
+        )
+        assertNull(vm.state.value.openExternally, "it worked, so nothing goes to the browser")
+    }
+
+    @Test
+    fun anInviteTheServerRefusesFallsBackToTheBrowser() {
+        val vm = loggedIn()
+        fake.acceptedJoinForm = "nothing matches this"
+
+        vm.openLink("https://max.ru/join/SOMEHASH")
+
+        // Every form was refused, so the tap must still lead somewhere.
+        assertEquals(3, fake.joinedLinks.size, "hash, url and host/path should all be tried")
+        assertEquals("https://max.ru/join/SOMEHASH", vm.state.value.openExternally)
+        assertEquals("Ссылку не удалось открыть в приложении", vm.state.value.notice)
+
+        vm.consumedExternalLink()
+        assertNull(vm.state.value.openExternally)
     }
 
     // --- cached history ---

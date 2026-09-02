@@ -12,10 +12,19 @@ sealed interface MaxLink {
      * CHAT / CHANNEL / USER), so the server is asked to resolve it.
      */
     data class Invite(
-        /** The link as the server wants it, without scheme or query. */
-        val link: String,
-        /** The last path segment, for matching against a chat we already know. */
+        /**
+         * The invite's hash — the last path segment.
+         *
+         * This is what the protocol wants: the official client's link router
+         * (`ru.ok.messages.utils.Links`) reduces a link to a single path segment (the
+         * one after the `join` prefix) and sends that. It also identifies the invite
+         * when matching against a chat we already have.
+         */
         val token: String,
+        /** Host plus path, without scheme or query — a fallback form for the server. */
+        val link: String,
+        /** The URL exactly as the user tapped it, for opening in a browser. */
+        val url: String,
     ) : MaxLink
 
     /** A call invite — `https://max.ru/joincall/<id>`. Calls aren't implemented yet. */
@@ -51,7 +60,7 @@ fun parseMaxLink(url: String): MaxLink? {
         return MaxLink.JoinCall(id)
     }
     // Everything else is an invite of some kind; the server decides what it points at.
-    return MaxLink.Invite(link = "$host/$path", token = segments.last())
+    return MaxLink.Invite(token = segments.last(), link = "$host/$path", url = trimmed)
 }
 
 /** True for max.ru / oneme.ru and their subdomains. */

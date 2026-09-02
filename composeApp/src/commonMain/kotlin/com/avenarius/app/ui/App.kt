@@ -17,16 +17,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.ImageLoader
 import coil3.compose.setSingletonImageLoaderFactory
 import coil3.disk.DiskCache
 import coil3.network.ktor3.KtorNetworkFetcherFactory
+import com.avenarius.app.ui.components.openUriSafely
 import com.avenarius.app.ui.screens.AboutScreen
 import com.avenarius.app.ui.screens.ChatScreen
 import com.avenarius.app.ui.screens.CodeScreen
@@ -71,6 +74,15 @@ fun App(viewModel: AppViewModel) {
             }.build()
     }
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // A link the app couldn't resolve itself goes to the browser, so a tap never ends
+    // in silence.
+    val uriHandler = LocalUriHandler.current
+    LaunchedEffect(state.openExternally) {
+        state.openExternally?.let { url ->
+            uriHandler.openUriSafely(url)
+            viewModel.consumedExternalLink()
+        }
+    }
     val dark =
         when (state.theme) {
             ThemeMode.SYSTEM -> isSystemInDarkTheme()
@@ -181,6 +193,13 @@ fun App(viewModel: AppViewModel) {
                                     onRetrySend = viewModel::retrySend,
                                     onDiscardSend = viewModel::discardPendingSend,
                                     onLinkClick = viewModel::openLink,
+                                    onSendVoice = viewModel::sendVoice,
+                                    onSendVideoNote = viewModel::sendVideoNote,
+                                    onVoiceClick = viewModel::toggleVoice,
+                                    onVoiceSeek = viewModel::seekVoice,
+                                    playingVoice = state.playingVoice,
+                                    onVideoNoteClick = viewModel::toggleVideoNote,
+                                    playingVideoNote = state.playingVideoNote,
                                     onFileClick = viewModel::openOrDownloadFile,
                                     downloadedFiles = state.downloadedFiles.keys,
                                     downloadingFiles = state.downloadingFiles,

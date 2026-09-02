@@ -14,6 +14,7 @@ import java.net.URI
 actual fun VideoPlayer(
     url: String,
     modifier: Modifier,
+    crop: Boolean,
 ) {
     // Desktop has no bundled player here — hand the video to the system browser/player.
     LaunchedEffect(url) {

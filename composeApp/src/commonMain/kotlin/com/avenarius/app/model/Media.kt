@@ -48,6 +48,17 @@ class PickedMedia(
     val size: Long get() = content.size
 }
 
+/**
+ * A finished recording, ready to upload.
+ *
+ * [content] is a handle to the file on disk (never its bytes — see [MediaContent]),
+ * so a long recording costs nothing in memory while it waits to be sent.
+ */
+class RecordedVoice(
+    val content: MediaContent,
+    val durationSeconds: Int,
+)
+
 /** An uploaded attachment, ready to be referenced in a sent message's `attaches`. */
 sealed interface OutAttach {
     data class Photo(
@@ -61,5 +72,17 @@ sealed interface OutAttach {
 
     data class File(
         val fileId: Long,
+    ) : OutAttach
+
+    /** A voice message: the upload token plus how long it runs. */
+    data class Voice(
+        val token: String,
+        val durationSeconds: Int,
+    ) : OutAttach
+
+    /** A round video message (a "video note"), as opposed to a plain video. */
+    data class VideoNote(
+        val token: String,
+        val durationSeconds: Int,
     ) : OutAttach
 }

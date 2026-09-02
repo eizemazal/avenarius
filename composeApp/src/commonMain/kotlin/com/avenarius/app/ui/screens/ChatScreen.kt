@@ -1,9 +1,11 @@
 package com.avenarius.app.ui.screens
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,6 +55,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
@@ -92,11 +96,15 @@ import com.avenarius.app.model.MessageStatus
 import com.avenarius.app.model.PendingAttach
 import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
+import com.avenarius.app.model.RecordedVoice
 import com.avenarius.app.model.ServiceEvent
 import com.avenarius.app.model.UploadState
+import com.avenarius.app.model.VoiceAttach
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.MediaViewer
 import com.avenarius.app.ui.PlatformBackHandler
+import com.avenarius.app.ui.PlayingVideoNote
+import com.avenarius.app.ui.PlayingVoice
 import com.avenarius.app.ui.VideoPlayer
 import com.avenarius.app.ui.cameraCaptureSupported
 import com.avenarius.app.ui.components.Avatar
@@ -108,6 +116,9 @@ import com.avenarius.app.ui.rememberCameraPhotoLauncher
 import com.avenarius.app.ui.rememberCameraVideoLauncher
 import com.avenarius.app.ui.rememberFilePickLauncher
 import com.avenarius.app.ui.rememberPhotoPickLauncher
+import com.avenarius.app.ui.rememberVoiceRecorder
+import com.avenarius.app.ui.voiceRecordingSupported
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -145,6 +156,20 @@ internal fun ChatScreen(
     onDiscardSend: (Message) -> Unit,
     /** Handles a tapped link in-app (Max links); false means "open externally". */
     onLinkClick: (String) -> Boolean,
+    /** Sends a finished recording. */
+    onSendVoice: (RecordedVoice) -> Unit,
+    /** Sends a captured clip as a round video message. */
+    onSendVideoNote: (PickedMedia) -> Unit,
+    /** Starts/stops the voice message in a bubble. */
+    onVoiceClick: (Message) -> Unit,
+    /** Scrubs the playing voice message to a 0..1 position. */
+    onVoiceSeek: (Float) -> Unit,
+    /** The voice message currently loaded, if any. */
+    playingVoice: PlayingVoice?,
+    /** Starts/stops the round video message in a bubble. */
+    onVideoNoteClick: (Message) -> Unit,
+    /** The round video message playing right now, if any. */
+    playingVideoNote: PlayingVideoNote?,
     onFileClick: (Message, FileAttach) -> Unit,
     /** fileIds already saved to the device (shown as "open" rather than "download"). */
     downloadedFiles: Set<Long>,
@@ -168,8 +193,26 @@ internal fun ChatScreen(
     val pickFromGallery = rememberPhotoPickLauncher { pending = pending + it }
     val takePhoto = rememberCameraPhotoLauncher { pending = pending + it }
     val takeVideo = rememberCameraVideoLauncher { pending = pending + it }
+    val recordVideoNote = rememberCameraVideoLauncher { onSendVideoNote(it) }
     val pickFile = rememberFilePickLauncher { pending = pending + it }
     var attachMenu by remember { mutableStateOf(false) }
+    // Voice recording: tap the mic to start, then send or discard. Deliberately not
+    // hold-to-record — a press-and-hold inside a scrolling list is the same gesture
+    // fight that the voice bubble's scrubbing lost.
+    var recording by remember(chat?.id) { mutableStateOf(false) }
+    var recordedSeconds by remember(chat?.id) { mutableIntStateOf(0) }
+    val recorder =
+        rememberVoiceRecorder { recorded ->
+            recording = false
+            onSendVoice(recorded)
+        }
+    LaunchedEffect(recording) {
+        recordedSeconds = 0
+        while (recording) {
+            delay(1000)
+            recordedSeconds++
+        }
+    }
     // Media shared in from another app (Screen.SHARE_PICK) lands here once the chat opens.
     LaunchedEffect(stagedMedia) {
         if (stagedMedia.isNotEmpty()) {
@@ -316,20 +359,42 @@ internal fun ChatScreen(
                             .fillMaxWidth()
                             .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
                 ) {
-                    val canSend = (draft.isNotBlank() || pending.isNotEmpty()) && !sendingAttachment
+                    val canSend = recording || ((draft.isNotBlank() || pending.isNotEmpty()) && !sendingAttachment)
                     Row(
                         Modifier.padding(start = 4.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
                         verticalAlignment = Alignment.Bottom,
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Box {
-                            IconButton(onClick = { attachMenu = true }, modifier = Modifier.size(40.dp)) {
+                        if (recording) {
+                            IconButton(
+                                onClick = {
+                                    recording = false
+                                    recorder.cancel()
+                                },
+                                modifier = Modifier.size(40.dp),
+                            ) {
                                 Icon(
-                                    AppIcons.Attach,
-                                    contentDescription = "Прикрепить",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    AppIcons.Delete,
+                                    contentDescription = "Отменить запись",
+                                    tint = MaterialTheme.colorScheme.error,
                                     modifier = Modifier.size(22.dp),
                                 )
+                            }
+                        }
+                        Box {
+                            IconButton(
+                                onClick = { attachMenu = true },
+                                enabled = !recording,
+                                modifier = Modifier.size(if (recording) 0.dp else 40.dp),
+                            ) {
+                                if (!recording) {
+                                    Icon(
+                                        AppIcons.Attach,
+                                        contentDescription = "Прикрепить",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                }
                             }
                             DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
                                 DropdownMenuItem(
@@ -364,37 +429,83 @@ internal fun ChatScreen(
                                 }
                             }
                         }
-                        BasicTextField(
-                            value = draft,
-                            onValueChange = {
-                                draft = it
-                                // While editing, the input holds the message being
-                                // edited — that must not overwrite the chat's draft.
-                                if (editing == null) onDraftChange(it)
-                            },
-                            modifier = Modifier.weight(1f).padding(vertical = 10.dp),
-                            textStyle =
-                                MaterialTheme.typography.bodyLarge.copy(
+                        if (recording) {
+                            Row(
+                                Modifier.weight(1f).padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Box(
+                                    Modifier.size(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error),
+                                )
+                                Text(
+                                    "Запись… ${recordedSeconds / 60}:${(recordedSeconds % 60).toString().padStart(2, '0')}",
+                                    style = MaterialTheme.typography.bodyLarge,
                                     color = MaterialTheme.colorScheme.onSurface,
-                                ),
-                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                            // Auto-capitalize sentences, like other messengers.
-                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                            maxLines = 5,
-                            decorationBox = { inner ->
-                                if (draft.isEmpty()) {
-                                    Text(
-                                        if (pending.isNotEmpty()) "Подпись…" else "Сообщение",
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                                inner()
-                            },
-                        )
+                                )
+                            }
+                        }
+                        if (!recording) {
+                            BasicTextField(
+                                value = draft,
+                                onValueChange = {
+                                    draft = it
+                                    // While editing, the input holds the message being
+                                    // edited — that must not overwrite the chat's draft.
+                                    if (editing == null) onDraftChange(it)
+                                },
+                                modifier = Modifier.weight(1f).padding(vertical = 10.dp),
+                                textStyle =
+                                    MaterialTheme.typography.bodyLarge.copy(
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    ),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                // Auto-capitalize sentences, like other messengers.
+                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                                maxLines = 5,
+                                decorationBox = { inner ->
+                                    if (draft.isEmpty()) {
+                                        Text(
+                                            if (pending.isNotEmpty()) "Подпись…" else "Сообщение",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    inner()
+                                },
+                            )
+                        }
+                        // Recording buttons instead of send when there is nothing typed.
+                        if (voiceRecordingSupported && !recording && !canSend) {
+                            IconButton(
+                                onClick = { recordVideoNote() },
+                                modifier = Modifier.size(40.dp),
+                            ) {
+                                Icon(
+                                    AppIcons.VideoNote,
+                                    contentDescription = "Записать видеосообщение",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    recording = true
+                                    recorder.start()
+                                },
+                                modifier = Modifier.size(40.dp),
+                            ) {
+                                Icon(
+                                    AppIcons.Mic,
+                                    contentDescription = "Записать голосовое сообщение",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                        }
                         Box(
                             Modifier
-                                .size(40.dp)
+                                .size(if (voiceRecordingSupported && !recording && !canSend) 0.dp else 40.dp)
                                 .clip(CircleShape)
                                 .background(
                                     if (canSend) {
@@ -405,6 +516,11 @@ internal fun ChatScreen(
                                 ).then(
                                     if (canSend) {
                                         Modifier.clickable {
+                                            if (recording) {
+                                                // Hands the take to onRecorded, which sends it.
+                                                recorder.stop()
+                                                return@clickable
+                                            }
                                             val target = editing
                                             when {
                                                 target != null -> {
@@ -512,6 +628,11 @@ internal fun ChatScreen(
                         onReactionClick = { emoji -> onReact(msg, emoji) },
                         onDownloadFile = { file -> onFileClick(msg, file) },
                         onLinkClick = onLinkClick,
+                        onVoiceClick = { onVoiceClick(msg) },
+                        onVoiceSeek = onVoiceSeek,
+                        voiceState = playingVoice?.takeIf { it.messageId == msg.id },
+                        onVideoNoteClick = { onVideoNoteClick(msg) },
+                        videoNoteState = playingVideoNote?.takeIf { it.messageId == msg.id },
                         downloadedFiles = downloadedFiles,
                         downloadingFiles = downloadingFiles,
                         onRetry = { onRetrySend(msg) },
@@ -616,6 +737,13 @@ private fun MessageRow(
     onReactionClick: (String) -> Unit,
     onDownloadFile: (FileAttach) -> Unit,
     onLinkClick: (String) -> Boolean,
+    onVoiceClick: () -> Unit,
+    onVoiceSeek: (Float) -> Unit,
+    /** Non-null when this message is the one loaded in the player. */
+    voiceState: PlayingVoice?,
+    onVideoNoteClick: () -> Unit,
+    /** Non-null when this message's circle is the one playing. */
+    videoNoteState: PlayingVideoNote?,
     downloadedFiles: Set<Long>,
     downloadingFiles: Map<Long, Float>,
     onRetry: () -> Unit,
@@ -649,32 +777,34 @@ private fun MessageRow(
                         scaleY = progress
                     },
         )
+        val swipeToReply =
+            Modifier.pointerInput(rowKey) {
+                detectHorizontalDragGestures(
+                    onDragEnd = {
+                        if (offsetX.value <= -triggerPx) onSwipeReply()
+                        triggered = false
+                        scope.launch { offsetX.animateTo(0f) }
+                    },
+                    onDragCancel = {
+                        triggered = false
+                        scope.launch { offsetX.animateTo(0f) }
+                    },
+                ) { _, dragAmount ->
+                    val target = (offsetX.value + dragAmount).coerceIn(-maxPx, 0f)
+                    if (!triggered && target <= -triggerPx) {
+                        triggered = true
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    } else if (triggered && target > -triggerPx) {
+                        triggered = false
+                    }
+                    scope.launch { offsetX.snapTo(target) }
+                }
+            }
         Row(
             Modifier
                 .fillMaxWidth()
                 .offset { IntOffset(offsetX.value.roundToInt(), 0) }
-                .pointerInput(rowKey) {
-                    detectHorizontalDragGestures(
-                        onDragEnd = {
-                            if (offsetX.value <= -triggerPx) onSwipeReply()
-                            triggered = false
-                            scope.launch { offsetX.animateTo(0f) }
-                        },
-                        onDragCancel = {
-                            triggered = false
-                            scope.launch { offsetX.animateTo(0f) }
-                        },
-                    ) { _, dragAmount ->
-                        val target = (offsetX.value + dragAmount).coerceIn(-maxPx, 0f)
-                        if (!triggered && target <= -triggerPx) {
-                            triggered = true
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        } else if (triggered && target > -triggerPx) {
-                            triggered = false
-                        }
-                        scope.launch { offsetX.snapTo(target) }
-                    }
-                },
+                .then(swipeToReply),
             horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start,
         ) {
             // Avatars are only meaningful in group chats; in a 1:1 dialog the only
@@ -683,8 +813,31 @@ private fun MessageRow(
                 if (startsRun) Avatar(senderName, senderAvatar, 32.dp, onClick = onAvatarClick) else Spacer(Modifier.size(32.dp))
                 Spacer(Modifier.width(6.dp))
             }
-            val bg = if (isMine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-            val fg = if (isMine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+            // A message that is nothing but a round video gets no bubble: the circle
+            // floats on the conversation, the way other messengers draw them.
+            val bareVideoNote =
+                msg.text.isBlank() &&
+                    msg.voice == null &&
+                    msg.files.isEmpty() &&
+                    msg.linkPreview == null &&
+                    msg.replyTo == null &&
+                    msg.pending.isEmpty() &&
+                    msg.media.size == 1 &&
+                    msg.media.single().isVideoNote
+            val bg =
+                when {
+                    bareVideoNote -> Color.Transparent
+                    isMine -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.surfaceVariant
+                }
+            // Without a bubble behind it, the footer sits on the chat background, so it
+            // can't use the on-bubble colour.
+            val fg =
+                when {
+                    bareVideoNote -> MaterialTheme.colorScheme.onSurfaceVariant
+                    isMine -> MaterialTheme.colorScheme.onPrimary
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
             Column(horizontalAlignment = if (isMine) Alignment.End else Alignment.Start) {
                 Box(
                     Modifier
@@ -692,7 +845,10 @@ private fun MessageRow(
                         .clip(RoundedCornerShape(14.dp))
                         .background(bg)
                         .clickable(onClick = onClick)
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                        .padding(
+                            horizontal = if (bareVideoNote) 0.dp else 12.dp,
+                            vertical = if (bareVideoNote) 0.dp else 6.dp,
+                        ),
                 ) {
                     Column {
                         if (isGroup && !isMine && startsRun) {
@@ -734,7 +890,23 @@ private fun MessageRow(
                             Spacer(Modifier.height(2.dp))
                         }
                         msg.media.forEach { media ->
-                            MediaThumbnail(media, onClick = { onMediaClick(media, msg.id) })
+                            if (media.isVideoNote) {
+                                // Played in place, inside its circle — not in the
+                                // full-screen rectangular viewer.
+                                VideoNoteView(media, videoNoteState, onVideoNoteClick)
+                            } else {
+                                MediaThumbnail(media, onClick = { onMediaClick(media, msg.id) })
+                            }
+                            Spacer(Modifier.height(4.dp))
+                        }
+                        msg.voice?.let { voice ->
+                            VoiceMessageView(
+                                voice = voice,
+                                fg = fg,
+                                state = voiceState,
+                                onClick = onVoiceClick,
+                                onSeek = onVoiceSeek,
+                            )
                             Spacer(Modifier.height(4.dp))
                         }
                         msg.files.forEach { file ->
@@ -865,7 +1037,130 @@ private fun LinkPreviewCard(
     }
 }
 
-/** A downloadable file attachment row inside a message bubble (tap to download). */
+/**
+ * A voice message: play/pause, the server's waveform (bars already played are
+ * filled), and the length. Tap along the bar to jump within the clip.
+ */
+@Composable
+private fun VoiceMessageView(
+    voice: VoiceAttach,
+    fg: Color,
+    state: PlayingVoice?,
+    onClick: () -> Unit,
+    onSeek: (Float) -> Unit,
+) {
+    // Loaded in the player (playing or paused) — the clip has a position to keep.
+    val loaded = state != null
+    val progress = state?.progress
+    val shown = progress ?: 0f
+    Row(
+        Modifier.padding(vertical = 4.dp, horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(fg.copy(alpha = 0.15f))
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            when {
+                // Fetching the clip: nothing to show but a spinner.
+                loaded && progress == null ->
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = fg)
+                loaded && state?.paused == false ->
+                    Icon(AppIcons.Pause, contentDescription = "Пауза", tint = fg, modifier = Modifier.size(20.dp))
+                else ->
+                    Icon(AppIcons.Play, contentDescription = "Воспроизвести", tint = fg, modifier = Modifier.size(20.dp))
+            }
+        }
+        // Tap to jump; no drag handler here on purpose. A horizontal drag detector on
+        // this bar competed with the chat's vertical scroll and with the row's
+        // swipe-to-reply, which made both unreliable. A tap-only detector consumes
+        // nothing until the finger lifts in place, so scrolling and swiping still
+        // belong to the list and the row.
+        //
+        // The touch area is taller than the drawn bar: a 28dp strip is a hard target,
+        // and missing it hit the bubble instead.
+        val seekByTap =
+            if (!loaded) {
+                Modifier
+            } else {
+                Modifier.pointerInput(Unit) {
+                    detectTapGestures { offset ->
+                        onSeek((offset.x / size.width.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f))
+                    }
+                }
+            }
+        Box(
+            Modifier.width(140.dp).height(40.dp).then(seekByTap),
+            contentAlignment = Alignment.Center,
+        ) {
+            Waveform(voice.waveform, shown, fg, Modifier.fillMaxWidth().height(28.dp))
+        }
+        Text(
+            // Counts up while playing, like every other player.
+            formatVoiceDuration(
+                if (loaded && voice.durationSeconds > 0) {
+                    (voice.durationSeconds * shown).toInt()
+                } else {
+                    voice.durationSeconds
+                },
+            ),
+            style = MaterialTheme.typography.labelSmall,
+            color = fg.copy(alpha = 0.7f),
+        )
+    }
+}
+
+/** The amplitude sketch, with the played part filled in. A flat bar if we have none. */
+@Composable
+private fun Waveform(
+    samples: List<Float>,
+    progress: Float,
+    fg: Color,
+    modifier: Modifier,
+) {
+    val bars =
+        remember(samples) {
+            if (samples.isEmpty()) List(WAVEFORM_BARS) { 0.35f } else samples.resample(WAVEFORM_BARS)
+        }
+    Canvas(modifier) {
+        val slot = size.width / bars.size
+        val barWidth = (slot * 0.55f).coerceAtLeast(1f)
+        bars.forEachIndexed { index, level ->
+            val height = (size.height * level).coerceAtLeast(2f)
+            val played = (index + 1f) / bars.size <= progress
+            drawRect(
+                color = if (played) fg else fg.copy(alpha = 0.4f),
+                topLeft = Offset(x = index * slot, y = (size.height - height) / 2f),
+                size = Size(barWidth, height),
+            )
+        }
+    }
+}
+
+/** Averages [this] down (or stretches it up) to exactly [count] bars. */
+private fun List<Float>.resample(count: Int): List<Float> {
+    if (isEmpty()) return List(count) { 0f }
+    return List(count) { i ->
+        val start = i * size / count
+        val end = ((i + 1) * size / count).coerceAtLeast(start + 1).coerceAtMost(size)
+        subList(start, end).average().toFloat()
+    }
+}
+
+/** "0:07" / "1:23". */
+private fun formatVoiceDuration(seconds: Int): String {
+    val safe = seconds.coerceAtLeast(0)
+    return "${safe / 60}:${(safe % 60).toString().padStart(2, '0')}"
+}
+
+private const val WAVEFORM_BARS = 28
+
+/** A downloadable file attachment row inside a message bubble (tap to download/open). */
 @Composable
 private fun FileAttachView(
     file: FileAttach,
@@ -1279,6 +1574,54 @@ private fun PendingThumbnail(item: PendingAttach) {
         }
     }
 }
+
+/**
+ * A round video message: its thumbnail until tapped, then the video playing inside
+ * the same circle.
+ */
+@Composable
+private fun VideoNoteView(
+    media: MediaAttach,
+    state: PlayingVideoNote?,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier.size(VIDEO_NOTE_SIZE).clip(CircleShape).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        val url = state?.url
+        if (url != null) {
+            VideoPlayer(url, Modifier.matchParentSize(), crop = true)
+        } else {
+            SubcomposeAsyncImage(
+                model = media.url,
+                contentDescription = "Видеосообщение",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+                loading = { MediaTilePlaceholder(loading = true) },
+                error = { MediaTilePlaceholder(loading = false) },
+            )
+            if (state != null) {
+                // Tapped, waiting for the stream.
+                CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp, color = Color.White)
+            } else {
+                Box(
+                    Modifier.size(44.dp).clip(CircleShape).background(Color(0x88000000)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        AppIcons.Play,
+                        contentDescription = "Воспроизвести",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+private val VIDEO_NOTE_SIZE = 200.dp
 
 /**
  * Fills a media tile while its image is being fetched (or if the fetch failed), so

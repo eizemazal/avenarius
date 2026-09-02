@@ -138,6 +138,18 @@ class DemoMaxApi : MaxApi {
         onProgress: ((Float) -> Unit)?,
     ): OutAttach.Video = OutAttach.Video(0L, "demo")
 
+    override suspend fun uploadVideoNote(
+        content: MediaContent,
+        durationSeconds: Int,
+        onProgress: ((Float) -> Unit)?,
+    ): OutAttach.VideoNote = OutAttach.VideoNote(token = "demo", durationSeconds = durationSeconds)
+
+    override suspend fun uploadVoice(
+        content: MediaContent,
+        durationSeconds: Int,
+        onProgress: ((Float) -> Unit)?,
+    ): OutAttach.Voice = OutAttach.Voice(token = "demo", durationSeconds = durationSeconds)
+
     override suspend fun uploadFile(
         content: MediaContent,
         fileName: String,
@@ -244,6 +256,13 @@ class DemoMaxApi : MaxApi {
         chatId: Long,
         messageId: Long,
         videoId: Long,
+    ): String? = null
+
+    override suspend fun getAudioUrl(
+        chatId: Long,
+        messageId: Long,
+        audioId: Long,
+        token: String?,
     ): String? = null
 
     override suspend fun getFileUrl(

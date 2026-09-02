@@ -10,19 +10,40 @@ class MaxLinkTest {
     fun inviteLinksAreRecognised() {
         val link = parseMaxLink("https://max.ru/joinABC123")
         assertTrue(link is MaxLink.Invite)
-        assertEquals("max.ru/joinABC123", link.link)
         assertEquals("joinABC123", link.token)
+        assertEquals("max.ru/joinABC123", link.link)
+        assertEquals("https://max.ru/joinABC123", link.url)
+    }
+
+    @Test
+    fun theHashOfAJoinLinkIsTheSegmentAfterJoin() {
+        // What the protocol wants: a single path segment, not the whole link.
+        val link = parseMaxLink("https://max.ru/join/SOMEHASH")
+        assertTrue(link is MaxLink.Invite)
+        assertEquals("SOMEHASH", link.token)
+        assertEquals("https://max.ru/join/SOMEHASH", link.url)
     }
 
     @Test
     fun schemeAndWwwAndQueryDoNotMatter() {
-        val expected = parseMaxLink("https://max.ru/abc")
-        assertEquals(expected, parseMaxLink("http://max.ru/abc"))
-        assertEquals(expected, parseMaxLink("https://www.max.ru/abc"))
-        assertEquals(expected, parseMaxLink("https://max.ru/abc?utm=1"))
-        assertEquals(expected, parseMaxLink("https://max.ru/abc#top"))
-        assertEquals(expected, parseMaxLink("  https://max.ru/abc  "))
-        assertEquals(expected, parseMaxLink("https://MAX.RU/abc"))
+        // The token and host/path are what the server sees, so those must agree
+        // however the link was written.
+        val forms =
+            listOf(
+                "https://max.ru/abc",
+                "http://max.ru/abc",
+                "https://www.max.ru/abc",
+                "https://max.ru/abc?utm=1",
+                "https://max.ru/abc#top",
+                "  https://max.ru/abc  ",
+                "https://MAX.RU/abc",
+            )
+        for (form in forms) {
+            val link = parseMaxLink(form)
+            assertTrue(link is MaxLink.Invite, form)
+            assertEquals("abc", link.token, form)
+            assertEquals("max.ru/abc", link.link, form)
+        }
     }
 
     @Test
