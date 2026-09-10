@@ -999,6 +999,27 @@ class MaxClient : MaxApi {
         return contact.displayName()
     }
 
+    /**
+     * Batch-resolves users by id via CONTACT_INFO. Since app 26.31.0 the login reply no
+     * longer includes contacts inline, [sync] uses this to fetch the people we have
+     * dialogs with (for titles and the Contacts page). Chunked to keep each request small.
+     */
+    private suspend fun fetchContactsByIds(ids: List<Long>): List<UserInfo> {
+        if (ids.isEmpty()) return emptyList()
+        val out = ArrayList<UserInfo>(ids.size)
+        ids.chunked(100).forEach { chunk ->
+            val payload =
+                transport.request(
+                    OP_CONTACT_INFO,
+                    buildJsonObject {
+                        put("contactIds", buildJsonArray { chunk.forEach { add(it) } })
+                    },
+                )
+            payload["contacts"]?.jsonArray.orEmptyList().mapNotNullTo(out) { parseUser(it.jsonObject) }
+        }
+        return out
+    }
+
     /** Resolves a playable video URL (best available MP4, else HLS) for a VIDEO attach. */
     override suspend fun getVideoUrl(
         chatId: Long,
@@ -1079,34 +1100,41 @@ class MaxClient : MaxApi {
 
         payload["error"]?.let { error(payload.serverMessage("Ошибка синхронизации")) }
 
-        // --- my profile ---
-        val contact = payload["profile"]?.jsonObject?.get("contact")?.jsonObject
-        val myId = contact?.get("id")?.jsonPrimitive?.long ?: 0L
+        val rawChats = payload["chats"]?.jsonArray.orEmptyList().map { it.jsonObject }
+
+        // As of app 26.31.0 the login reply no longer carries our own profile or the
+        // contact list inline — only chats. So we derive our own id from the chats and
+        // fetch the people we talk to by id.
+        //
+        // myId: our own account is the participant common to our DIALOGs (present in the
+        // most of them). Robust for any account with a couple of one-to-one chats.
+        val dialogParticipantIds =
+            rawChats
+                .filter { it["type"]?.jsonPrimitive?.contentOrNullSafe() == "DIALOG" }
+                .map { c -> c["participants"]?.jsonObject?.keys?.mapNotNull { it.toLongOrNull() } ?: emptyList() }
+        val freq = HashMap<Long, Int>()
+        dialogParticipantIds.forEach { set -> set.forEach { id -> freq[id] = (freq[id] ?: 0) + 1 } }
+        val myId = freq.maxByOrNull { it.value }?.key ?: 0L
+        this.myId = myId // parseChat resolves dialog partners against this
+
+        // Names for the id->name map (dialog titles) and the Contacts page: fetch the
+        // dialog partners (and ourselves, for the account card) by id.
+        val fetched = fetchContactsByIds((dialogParticipantIds.flatten() + myId).distinct().filter { it != 0L })
+        val names = fetched.associate { it.id to it.name }.toMutableMap()
+        val me = fetched.firstOrNull { it.id == myId }
         val account =
             Account(
                 userId = myId,
-                firstName = contact.firstName() ?: "Я",
-                lastName = contact.lastName(),
-                avatarUrl = contact?.avatarUrl(),
+                firstName = me?.name ?: "Я",
+                lastName = null,
+                avatarUrl = me?.avatarUrl,
             )
-
-        // --- contacts: full info for the Contacts page + id->name for dialog titles ---
-        val contactsList =
-            payload["contacts"]
-                ?.jsonArray
-                .orEmptyList()
-                .mapNotNull { parseUser(it.jsonObject) }
-                .sortedBy { it.name.lowercase() }
-        val names = contactsList.associate { it.id to it.name }.toMutableMap()
-
-        this.myId = myId // remembered so NOTIF_CHAT pushes can resolve dialog titles
+        val contactsList = fetched.filter { it.id != myId }.sortedBy { it.name.lowercase() }
 
         // --- chats ---
         val chats =
-            payload["chats"]
-                ?.jsonArray
-                .orEmptyList()
-                .mapNotNull { parseChat(it.jsonObject, names) }
+            rawChats
+                .mapNotNull { parseChat(it, names) }
                 .sortedByDescending { it.lastEventTime }
 
         // presence = {userId: {seen: <unixSec>, status: <int>}} — a user is online
