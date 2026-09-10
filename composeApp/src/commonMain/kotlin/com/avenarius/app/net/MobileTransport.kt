@@ -118,6 +118,30 @@ class MobileTransport(
     }
 
     /**
+     * Like [request], but sends a pre-encoded payload with an explicit protocol [ver] and
+     * length-flag byte. The login-code AUTH_REQUEST must mirror the official client's
+     * framing (ver=10, flag 0x01, a `f0 7c`-prefixed body carrying the binary `mode`
+     * attestation) — a shape [MsgPack] and the default framing can't produce.
+     */
+    suspend fun requestRaw(
+        opcode: Int,
+        ver: Int,
+        flag: Int,
+        payload: ByteArray,
+        timeoutMs: Long = 30_000,
+    ): JsonObject {
+        if (!connected) error("Нет соединения с сервером")
+        val deferred = CompletableDeferred<JsonObject>()
+        writeLock.withLock {
+            seq = (seq + 1) and 0xff
+            val mySeq = seq
+            pendingLock.withLock { pending[mySeq] = deferred }
+            socket.write(encodeRawFrame(ver = ver, seq = mySeq, opcode = opcode, flag = flag, payload = payload))
+        }
+        return withTimeout(timeoutMs) { deferred.await() }
+    }
+
+    /**
      * Sends a one-way frame and does NOT wait for a reply. Used for fire-and-forget
      * telemetry (e.g. the opcode-5 LOG event) that the server doesn't meaningfully
      * answer: registering a pending waiter for it would only leak until timeout.
@@ -232,6 +256,27 @@ class MobileTransport(
         frame[8] = (len ushr 8).toByte()
         frame[9] = len.toByte()
         body.copyInto(frame, 10)
+        return frame
+    }
+
+    /** Frames an already-encoded [payload] with an explicit [ver] and length-flag byte. */
+    private fun encodeRawFrame(
+        ver: Int,
+        seq: Int,
+        opcode: Int,
+        flag: Int,
+        payload: ByteArray,
+    ): ByteArray {
+        val frame = ByteArray(10 + payload.size)
+        frame[0] = ver.toByte()
+        frame[3] = seq.toByte()
+        frame[4] = (opcode ushr 8).toByte()
+        frame[5] = opcode.toByte()
+        frame[6] = flag.toByte()
+        frame[7] = (payload.size ushr 16).toByte()
+        frame[8] = (payload.size ushr 8).toByte()
+        frame[9] = payload.size.toByte()
+        payload.copyInto(frame, 10)
         return frame
     }
 }

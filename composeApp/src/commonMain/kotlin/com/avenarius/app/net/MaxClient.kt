@@ -480,10 +480,12 @@ private fun contentTypeOf(mime: String): ContentType =
 
 class MaxClient : MaxApi {
     companion object {
-        // Mirrors the official Android client / rumax. appVersion + buildNumber
-        // are taken from the current MAX.apk (26.17.0 / 6713).
-        const val APP_VERSION = "26.17.0"
-        const val BUILD_NUMBER = 6713
+        // Mirrors the official Android client / rumax. appVersion + buildNumber are
+        // taken from the current MAX.apk and gated by the server ("Приложение устарело"
+        // otherwise). Bump these together with the AuthAttest integrity hashes whenever
+        // Max forces an update. (26.31.0 / 6822)
+        const val APP_VERSION = "26.31.0"
+        const val BUILD_NUMBER = 6822
 
         // Only reached when a content provider doesn't report a size, so the upload
         // has to be measured before it can be sent. Bounded so that path can't OOM.
@@ -561,6 +563,10 @@ class MaxClient : MaxApi {
 
     /** Temporary token from START_AUTH / a 2FA challenge, needed for the next step. */
     private var authToken: String? = null
+
+    /** The current session's SMS-attestation inputs, captured at [connect]. */
+    private var callsSeed: Long? = null
+    private var sessionDeviceId: String? = null
 
     /** Stream of newly received messages (server push, opcode 128). */
     private val _incoming = MutableSharedFlow<Message>(extraBufferCapacity = 64)
@@ -807,26 +813,35 @@ class MaxClient : MaxApi {
         if (transport.isConnected) return
         transport.connect()
 
-        transport.request(
-            OP_HANDSHAKE,
-            buildJsonObject {
-                put("clientSessionId", 1)
-                put("mt_instanceid", mtInstance)
-                putJsonObject("userAgent") {
-                    put("deviceType", "ANDROID")
-                    put("appVersion", APP_VERSION)
-                    put("osVersion", "Android 13")
-                    put("timezone", "Europe/Moscow")
-                    put("screen", "130dpi 130dpi 600x874")
-                    put("pushDeviceType", "GCM")
-                    put("locale", "ru")
-                    put("buildNumber", BUILD_NUMBER)
-                    put("deviceName", "unknown Generic Android-x86_64")
-                    put("deviceLocale", "ru")
-                }
-                put("deviceId", deviceId)
-            },
-        )
+        val handshake =
+            transport.request(
+                OP_HANDSHAKE,
+                buildJsonObject {
+                    put("clientSessionId", 1)
+                    put("mt_instanceid", mtInstance)
+                    putJsonObject("userAgent") {
+                        put("deviceType", "ANDROID")
+                        put("appVersion", APP_VERSION)
+                        put("osVersion", "Android 13")
+                        put("timezone", "Europe/Moscow")
+                        put("screen", "130dpi 130dpi 600x874")
+                        put("pushDeviceType", "GCM")
+                        put("locale", "ru")
+                        put("buildNumber", BUILD_NUMBER)
+                        put("deviceName", "unknown Generic Android-x86_64")
+                        put("deviceLocale", "ru")
+                        // The server picks which app-integrity hash to validate the SMS
+                        // attestation (`mode`) against from this arch; it must match the
+                        // one baked into AuthAttest (arm64-v8a).
+                        put("arch", "arm64-v8a")
+                    }
+                    put("deviceId", deviceId)
+                },
+            )
+        // Kept for the login-code attestation: `mode` is bound to this session's
+        // server-issued callsSeed plus our deviceId (see startAuth / AuthAttest).
+        callsSeed = handshake["callsSeed"]?.jsonPrimitive?.longOrNullSafe()
+        sessionDeviceId = deviceId
         transport.startPing()
     }
 
@@ -836,17 +851,37 @@ class MaxClient : MaxApi {
     // Authentication
     // ---------------------------------------------------------------------
 
-    /** Requests an SMS code. Returns the expected code length; throws on refusal. */
+    /**
+     * Requests an SMS code. Returns the expected code length; throws on refusal.
+     *
+     * The server only dispatches an SMS when the AUTH_REQUEST carries a valid `mode`
+     * attestation ([AuthAttest]) bound to this session's callsSeed and our deviceId, and
+     * only when the request is framed like the official client (ver=10, the `f0 7c`
+     * payload prefix) — hence the raw send rather than [MobileTransport.request]. Without
+     * both, the server still returns a token but no code arrives.
+     */
     override suspend fun startAuth(phone: String): Int {
+        val seed = callsSeed
+        val device = sessionDeviceId
         val payload =
-            transport.request(
-                OP_START_AUTH,
-                buildJsonObject {
-                    put("phone", phone)
-                    put("type", "START_AUTH")
-                    put("language", "ru")
-                },
-            )
+            if (seed != null && device != null) {
+                val mode = AuthAttest.mode(seed, device)
+                transport.requestRaw(
+                    OP_START_AUTH,
+                    ver = 10,
+                    flag = 0x01,
+                    payload = AuthAttest.startAuthPayload(mode, phone),
+                )
+            } else {
+                // No session seed (shouldn't happen post-connect) — best-effort plain request.
+                transport.request(
+                    OP_START_AUTH,
+                    buildJsonObject {
+                        put("phone", phone)
+                        put("type", "START_AUTH")
+                    },
+                )
+            }
         authToken = payload["token"]?.jsonPrimitive?.contentOrNullSafe()
         if (authToken == null) error(payload.serverMessage("Не удалось отправить код"))
         return payload["codeLength"]?.jsonPrimitive?.int ?: 6
