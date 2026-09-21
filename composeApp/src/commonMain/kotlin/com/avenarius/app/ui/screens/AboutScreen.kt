@@ -25,7 +25,7 @@ import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.components.openUriSafely
 
 private const val GITHUB_URL = "https://github.com/eizemazal/avenarius"
-private const val APP_VERSION = "1.0.6"
+private const val APP_VERSION = "1.0.7"
 
 /** "About" screen: app name, version, and a link to the project's GitHub page. */
 @OptIn(ExperimentalMaterial3Api::class)

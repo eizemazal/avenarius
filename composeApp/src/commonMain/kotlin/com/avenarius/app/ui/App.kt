@@ -184,6 +184,7 @@ fun App(viewModel: AppViewModel) {
                                     onLoadOlder = viewModel::loadOlder,
                                     onBack = viewModel::backToChats,
                                     onStartCall = viewModel::startCall,
+                                    onToggleMute = viewModel::toggleMuteCurrentChat,
                                     onDraftChange = viewModel::setDraft,
                                     onSend = viewModel::sendMessage,
                                     onSendMedia = viewModel::sendMedia,

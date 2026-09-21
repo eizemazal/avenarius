@@ -45,6 +45,7 @@ object Session {
 data class ChatBrief(
     val title: String,
     val isDialog: Boolean,
+    val muted: Boolean = false,
 )
 
 class AvenariusApp : Application() {

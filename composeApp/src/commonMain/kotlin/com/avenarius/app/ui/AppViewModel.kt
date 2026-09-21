@@ -2369,6 +2369,19 @@ class AppViewModel(
         launchBusyless { client.setReaction(chatId, id, target) }
     }
 
+    /** Mutes/unmutes notifications for the open chat (optimistic; persisted server-side). */
+    fun toggleMuteCurrentChat() {
+        val chat = _state.value.currentChat ?: return
+        val newMuted = !chat.muted
+        _state.update { s ->
+            s.copy(
+                currentChat = s.currentChat?.copy(muted = newMuted),
+                chats = s.chats.map { if (it.id == chat.id) it.copy(muted = newMuted) else it },
+            )
+        }
+        viewModelScope.launch { runCatching { client.setChatMuted(chat.id, newMuted) } }
+    }
+
     /** Deletes the current 1:1 chat (removes it locally and returns to the list). */
     fun deleteCurrentChat() {
         val chat = _state.value.currentChat ?: return

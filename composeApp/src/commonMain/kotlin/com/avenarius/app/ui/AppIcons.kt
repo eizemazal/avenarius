@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.painter.Painter
 import com.avenarius.app.resources.Res
 import com.avenarius.app.resources.arrow_back
+import com.avenarius.app.resources.arrow_downward
 import com.avenarius.app.resources.attach_file
 import com.avenarius.app.resources.call
 import com.avenarius.app.resources.call_end
@@ -89,6 +90,8 @@ object AppIcons {
     val Settings: Painter @Composable get() = painterResource(Res.drawable.settings)
 
     // Calls: chat-header buttons and in-call controls.
+    // Jump-to-latest button in the chat.
+    val ScrollDown: Painter @Composable get() = painterResource(Res.drawable.arrow_downward)
     val Call: Painter @Composable get() = painterResource(Res.drawable.call)
     val VideoCall: Painter @Composable get() = painterResource(Res.drawable.video_chat)
     val CallEnd: Painter @Composable get() = painterResource(Res.drawable.call_end)

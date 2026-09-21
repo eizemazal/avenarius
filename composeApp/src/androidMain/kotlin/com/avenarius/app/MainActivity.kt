@@ -58,7 +58,7 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(state.currentChat?.id) { Session.openChatId = state.currentChat?.id }
             LaunchedEffect(state.contacts) { Session.contacts = state.contacts }
             LaunchedEffect(state.chats) {
-                Session.chatInfo = state.chats.associate { it.id to ChatBrief(it.title, it.isDialog) }
+                Session.chatInfo = state.chats.associate { it.id to ChatBrief(it.title, it.isDialog, it.muted) }
             }
 
             // Keep the foreground service (and thus the live connection) running

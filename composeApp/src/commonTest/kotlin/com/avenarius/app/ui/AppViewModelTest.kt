@@ -127,6 +127,15 @@ private class FakeMaxClient : MaxApi {
 
     override suspend fun hangupCall(conversationId: String) = Unit
 
+    var mutedChats = mutableSetOf<Long>()
+
+    override suspend fun setChatMuted(
+        chatId: Long,
+        muted: Boolean,
+    ) {
+        if (muted) mutedChats.add(chatId) else mutedChats.remove(chatId)
+    }
+
     override fun disconnect() {
         disconnectCount++
         isConnected = false

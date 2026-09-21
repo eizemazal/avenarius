@@ -86,6 +86,8 @@ data class Chat(
     val canWrite: Boolean = true,
     /** Whether the signed-in user may add members (admins-only in some groups/channels). */
     val canAddMembers: Boolean = false,
+    /** True when notifications for this chat are muted (`dontDisturbUntil` != 0). */
+    val muted: Boolean = false,
 )
 
 /** Message delivery state for outgoing messages (server `status`). */

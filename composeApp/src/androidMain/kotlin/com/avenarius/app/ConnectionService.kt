@@ -92,6 +92,8 @@ class ConnectionService : Service() {
         if (Session.appInForeground) return
 
         val info = Session.chatInfo[msg.chatId]
+        // Respect the per-chat mute setting — no notifications for muted conversations.
+        if (info?.muted == true) return
         val sender = resolveName(msg.senderId)
         val (title, body) =
             if (info == null || info.isDialog) {

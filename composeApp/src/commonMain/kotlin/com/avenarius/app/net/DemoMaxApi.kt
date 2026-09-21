@@ -101,6 +101,11 @@ class DemoMaxApi : MaxApi {
 
     override suspend fun hangupCall(conversationId: String) = Unit
 
+    override suspend fun setChatMuted(
+        chatId: Long,
+        muted: Boolean,
+    ) = Unit
+
     override suspend fun startAuth(phone: String): Int = 5
 
     override suspend fun checkCode(code: String): CodeResult = CodeResult.Success("demo")

@@ -187,6 +187,12 @@ interface MaxApi {
     /** Ends or declines the call [conversationId] on the Max socket (fire-and-forget). */
     suspend fun hangupCall(conversationId: String)
 
+    /** Mutes or unmutes notifications for [chatId] (server `dontDisturbUntil`). */
+    suspend fun setChatMuted(
+        chatId: Long,
+        muted: Boolean,
+    )
+
     suspend fun startAuth(phone: String): Int
 
     suspend fun checkCode(code: String): CodeResult
@@ -548,6 +554,7 @@ class MaxClient : MaxApi {
         private const val OP_START_AUTH = 17
         private const val OP_CHECK_CODE = 18
         private const val OP_SYNC = 19
+        private const val OP_CHAT_SETTINGS = 22 // set per-chat settings (e.g. dontDisturbUntil mute)
         private const val OP_REGISTER = 23
         private const val OP_CONTACT_INFO = 32
         private const val OP_CONTACT_UPDATE = 34
@@ -872,6 +879,9 @@ class MaxClient : MaxApi {
             link = link,
             canWrite = canWrite,
             canAddMembers = canAddMembers,
+            // Mute state isn't on the chat object; it comes from the sync's config.chats
+            // map and is applied in sync(). Defaults to false here.
+            muted = false,
         )
     }
 
@@ -962,6 +972,25 @@ class MaxClient : MaxApi {
                 buildJsonObject { put("conversationId", conversationId) },
             )
         }
+    }
+
+    override suspend fun setChatMuted(
+        chatId: Long,
+        muted: Boolean,
+    ) {
+        // dontDisturbUntil: -1 = muted forever, 0 = notifications on.
+        transport.request(
+            OP_CHAT_SETTINGS,
+            buildJsonObject {
+                putJsonObject("settings") {
+                    putJsonObject("chats") {
+                        putJsonObject(chatId.toString()) {
+                            put("dontDisturbUntil", if (muted) -1 else 0)
+                        }
+                    }
+                }
+            },
+        )
     }
 
     /**
@@ -1265,6 +1294,18 @@ class MaxClient : MaxApi {
 
         val rawChats = payload["chats"]?.jsonArray.orEmptyList().map { it.jsonObject }
 
+        // Per-chat notification settings live under config.chats.<id>.dontDisturbUntil
+        // (0 = notifications on; -1 or a future epoch-ms = muted).
+        val mutedChatIds =
+            (payload["config"] as? JsonObject)
+                ?.get("chats")
+                ?.jsonObject
+                ?.entries
+                ?.mapNotNull { (id, v) ->
+                    val dnd = (v as? JsonObject)?.get("dontDisturbUntil")?.jsonPrimitive?.longOrNullSafe() ?: 0L
+                    if (dnd != 0L) id.toLongOrNull() else null
+                }?.toSet() ?: emptySet()
+
         // As of app 26.31.0 the login reply no longer carries our own profile or the
         // contact list inline — only chats. So we derive our own id from the chats and
         // fetch the people we talk to by id.
@@ -1298,6 +1339,7 @@ class MaxClient : MaxApi {
         val chats =
             rawChats
                 .mapNotNull { parseChat(it, names) }
+                .map { if (it.id in mutedChatIds) it.copy(muted = true) else it }
                 .sortedByDescending { it.lastEventTime }
 
         // presence = {userId: {seen: <unixSec>, status: <int>}} — a user is online

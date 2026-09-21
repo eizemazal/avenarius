@@ -54,6 +54,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -112,6 +113,7 @@ import com.avenarius.app.ui.components.CenteredSpinner
 import com.avenarius.app.ui.components.LinkedText
 import com.avenarius.app.ui.components.openUriSafely
 import com.avenarius.app.ui.formatClock
+import com.avenarius.app.ui.formatDay
 import com.avenarius.app.ui.rememberCameraPhotoLauncher
 import com.avenarius.app.ui.rememberCameraVideoLauncher
 import com.avenarius.app.ui.rememberFilePickLauncher
@@ -143,6 +145,8 @@ internal fun ChatScreen(
     onBack: () -> Unit,
     /** Starts a call with the dialog partner ([userId], [isVideo]). */
     onStartCall: (userId: Long, isVideo: Boolean) -> Unit,
+    /** Toggles muting notifications for this chat. */
+    onToggleMute: () -> Unit,
     onDraftChange: (String) -> Unit,
     onSend: (String) -> Unit,
     onSendMedia: (List<PickedMedia>, String) -> Unit,
@@ -319,6 +323,13 @@ internal fun ChatScreen(
                         Icon(AppIcons.More, contentDescription = "Меню")
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text(if (chat?.muted == true) "Включить уведомления" else "Отключить уведомления") },
+                            onClick = {
+                                menuOpen = false
+                                onToggleMute()
+                            },
+                        )
                         DropdownMenuItem(
                             text = { Text(if (isDialog) "Удалить чат" else "Выйти из группы") },
                             onClick = {
@@ -648,6 +659,56 @@ internal fun ChatScreen(
                         onRetry = { onRetrySend(msg) },
                         onDiscard = { onDiscardSend(msg) },
                     )
+                }
+            }
+
+            // Floating date chip (top-center): the day of the top-most visible message,
+            // shown only while scrolling and fading out when the list settles.
+            val topTime by remember { derivedStateOf { messages.getOrNull(listState.firstVisibleItemIndex)?.time } }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = listState.isScrollInProgress && topTime != null,
+                enter = androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.fadeOut(),
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f),
+                    tonalElevation = 3.dp,
+                ) {
+                    Text(
+                        topTime?.let { formatDay(it) } ?: "",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+
+            // Jump-to-latest button (bottom-right), shown only when scrolled up off the newest.
+            val scrollScope = rememberCoroutineScope()
+            val notAtBottom by remember { derivedStateOf { listState.canScrollForward } }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = notAtBottom,
+                enter = androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.fadeOut(),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 16.dp),
+            ) {
+                Surface(
+                    onClick = {
+                        scrollScope.launch { listState.animateScrollToItem(messages.lastIndex.coerceAtLeast(0)) }
+                    },
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    tonalElevation = 4.dp,
+                    modifier = Modifier.size(44.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            AppIcons.ScrollDown,
+                            contentDescription = "К последним сообщениям",
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
                 }
             }
         }
