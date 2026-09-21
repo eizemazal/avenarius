@@ -1,8 +1,11 @@
 package com.avenarius.app.net
 
 import com.avenarius.app.model.Account
+import com.avenarius.app.model.CallKind
+import com.avenarius.app.model.CallSetup
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.FileAttach
+import com.avenarius.app.model.IncomingCall
 import com.avenarius.app.model.LinkPreview
 import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaContent
@@ -65,6 +68,8 @@ import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+import kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.Uuid
 
 /** A server push that [messageIds] were deleted in [chatId] (NOTIF_MSG_DELETE). */
 data class MessageDeletion(
@@ -146,6 +151,9 @@ interface MaxApi {
 
     /** Messages the other party deleted (NOTIF_MSG_DELETE) — drop them from the chat. */
     val deletions: SharedFlow<MessageDeletion>
+
+    /** Inbound calls ringing (NOTIF_CALL_START) — show the incoming-call UI. */
+    val incomingCalls: SharedFlow<IncomingCall>
     val drops: SharedFlow<Unit>
     val isConnected: Boolean
 
@@ -155,6 +163,29 @@ interface MaxApi {
     )
 
     fun disconnect()
+
+    /**
+     * STAGE 1 of placing a call: sends VIDEO_CHAT_START_ACTIVE for a 1:1 call with
+     * [peerId] and returns the [CallSetup] (SFU endpoints + ICE credentials) parsed
+     * from the reply. The caller then opens the media session (STAGE 2).
+     */
+    suspend fun startCall(
+        peerId: Long,
+        isVideo: Boolean,
+    ): CallSetup
+
+    /**
+     * STAGE 1 of accepting an inbound call: the callee also sends VIDEO_CHAT_START_ACTIVE
+     * for [conversationId] to obtain its own [CallSetup], then joins the SFU.
+     */
+    suspend fun acceptCall(
+        conversationId: String,
+        peerId: Long,
+        isVideo: Boolean,
+    ): CallSetup
+
+    /** Ends or declines the call [conversationId] on the Max socket (fire-and-forget). */
+    suspend fun hangupCall(conversationId: String)
 
     suspend fun startAuth(phone: String): Int
 
@@ -487,6 +518,14 @@ class MaxClient : MaxApi {
         const val APP_VERSION = "26.31.0"
         const val BUILD_NUMBER = 6822
 
+        // Calls-SDK descriptor sent in VIDEO_CHAT_START_ACTIVE's `internalParams`.
+        // Constants pinned from a real Android call (see "max-calls-feasibility" note).
+        private const val CALLS_SDK_VERSION = "0.3.2.2"
+        private const val CALLS_CLIENT_APP_KEY = "CGPGAGLGDIHBABABA"
+        private const val CALLS_PROTOCOL_VERSION = 5
+        private const val CALLS_CAPABILITIES = "3c03f"
+        private const val CALLS_FALLBACK_DEVICE_ID = "994d1bc966a3b2ce"
+
         // Only reached when a content provider doesn't report a size, so the upload
         // has to be measured before it can be sent. Bounded so that path can't OOM.
         // VIDEO_UPLOAD's media types: 0 VIDEO, 1 VIDEO_MESSAGE, 2 AUDIO.
@@ -544,6 +583,12 @@ class MaxClient : MaxApi {
         private const val OP_CHAT_MEMBERS_UPDATE = 77 // CHAT_MEMBERS_UPDATE: add/remove members
         private const val OP_MSG_DELETE = 66 // MSG_DELETE
         private const val OP_MSG_EDIT = 67 // MSG_EDIT
+
+        // ----- Calls (voice/video). See model/Call.kt and the "max-calls-feasibility" note. -----
+        // VIDEO_CHAT_START_ACTIVE: place a 1:1 call; reply carries the SFU endpoints + ICE creds.
+        private const val OP_VIDEO_CHAT_START_ACTIVE = 78
+        const val OP_NOTIF_CALL_START = 137 // server push: an inbound call is ringing
+        private const val OP_VIDEO_CHAT_HANGUP = 167 // end/decline a call on the Max socket
     }
 
     private val transport = MobileTransport()
@@ -599,6 +644,10 @@ class MaxClient : MaxApi {
     /** Stream of message deletions by the other party (server push, opcode 142). */
     private val _deletions = MutableSharedFlow<MessageDeletion>(extraBufferCapacity = 64)
     override val deletions: SharedFlow<MessageDeletion> = _deletions
+
+    /** Stream of inbound calls ringing (server push, opcode 137). */
+    private val _incomingCalls = MutableSharedFlow<IncomingCall>(extraBufferCapacity = 8)
+    override val incomingCalls: SharedFlow<IncomingCall> = _incomingCalls
 
     override val isConnected: Boolean get() = transport.isConnected
 
@@ -662,9 +711,49 @@ class MaxClient : MaxApi {
                             }
                         if (chatId != null && ids.isNotEmpty()) _deletions.emit(MessageDeletion(chatId, ids))
                     }
+                    OP_NOTIF_CALL_START -> {
+                        clog("NOTIF_CALL_START(137) raw: $payload")
+                        parseIncomingCall(payload)?.let { _incomingCalls.emit(it) }
+                    }
                 }
             }
         }
+    }
+
+    /**
+     * Parses a NOTIF_CALL_START push into an [IncomingCall]. The exact field layout is
+     * best-effort (pinned from the CALL_HISTORY / call-message shapes we captured) and
+     * tolerant of missing fields — refine against a live inbound capture.
+     */
+    private fun parseIncomingCall(payload: JsonObject): IncomingCall? {
+        val conversationId =
+            payload["conversationId"]?.jsonPrimitive?.contentOrNullSafe()
+                ?: payload["callId"]?.jsonPrimitive?.contentOrNullSafe()
+                ?: return null
+        val callerId =
+            payload["callerId"]?.jsonPrimitive?.longOrNullSafe()
+                ?: payload["initiatorId"]?.jsonPrimitive?.longOrNullSafe()
+                ?: 0L
+        val chatId = payload["chatId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
+        // The `vcp` blob (len:base64(LZ4(JSON))) carries the callee's SFU params.
+        val setup =
+            payload["vcp"]?.jsonPrimitive?.contentOrNullSafe()?.let {
+                runCatching { parseVcp(conversationId, it) }.getOrNull()
+            }
+        val isVideo =
+            setup?.let { payload["type"]?.jsonPrimitive?.contentOrNullSafe() == "VIDEO" }
+                ?: (
+                    payload["isVideo"]?.jsonPrimitive?.contentOrNullSafe() == "true" ||
+                        payload["type"]?.jsonPrimitive?.contentOrNullSafe() == "VIDEO" ||
+                        payload["callType"]?.jsonPrimitive?.contentOrNullSafe() == "VIDEO"
+                )
+        return IncomingCall(
+            conversationId = conversationId,
+            callerId = callerId,
+            chatId = chatId,
+            kind = if (isVideo) CallKind.VIDEO else CallKind.AUDIO,
+            setup = setup,
+        )
     }
 
     /**
@@ -846,6 +935,80 @@ class MaxClient : MaxApi {
     }
 
     override fun disconnect() = transport.disconnect()
+
+    // ---------------------------------------------------------------------
+    // Calls (STAGE 1 — call setup over the Max socket)
+    // ---------------------------------------------------------------------
+
+    @OptIn(ExperimentalUuidApi::class)
+    override suspend fun startCall(
+        peerId: Long,
+        isVideo: Boolean,
+    ): CallSetup {
+        val conversationId = Uuid.random().toString()
+        return videoChatStartActive(conversationId, listOf(peerId), isVideo)
+    }
+
+    override suspend fun acceptCall(
+        conversationId: String,
+        peerId: Long,
+        isVideo: Boolean,
+    ): CallSetup = videoChatStartActive(conversationId, listOf(peerId), isVideo)
+
+    override suspend fun hangupCall(conversationId: String) {
+        runCatching {
+            transport.notify(
+                OP_VIDEO_CHAT_HANGUP,
+                buildJsonObject { put("conversationId", conversationId) },
+            )
+        }
+    }
+
+    /**
+     * Sends VIDEO_CHAT_START_ACTIVE (opcode 78) and parses the reply's
+     * `internalCallerParams` JSON into a [CallSetup]. `internalParams` mirrors the
+     * genuine client's calls-SDK descriptor (constants pinned from a real call).
+     */
+    private suspend fun videoChatStartActive(
+        conversationId: String,
+        calleeIds: List<Long>,
+        isVideo: Boolean,
+    ): CallSetup {
+        val internalParams =
+            buildJsonObject {
+                put("platform", "ANDROID")
+                put("sdkVersion", CALLS_SDK_VERSION)
+                put("clientAppKey", CALLS_CLIENT_APP_KEY)
+                put("deviceId", sessionDeviceId ?: CALLS_FALLBACK_DEVICE_ID)
+                put("protocolVersion", CALLS_PROTOCOL_VERSION)
+                put("onlyAdminCanRecord", false)
+                put("waitForAdmin", false)
+                put("capabilities", CALLS_CAPABILITIES)
+            }.toString()
+
+        val reply =
+            transport.request(
+                OP_VIDEO_CHAT_START_ACTIVE,
+                buildJsonObject {
+                    put("conversationId", conversationId)
+                    putJsonArray("calleeIds") { calleeIds.forEach { add(it) } }
+                    put("internalParams", internalParams)
+                    put("isVideo", isVideo)
+                },
+            )
+        return parseCallSetup(conversationId, reply)
+    }
+
+    /** Parses the VIDEO_CHAT_START_ACTIVE reply (its `internalCallerParams` JSON string). */
+    private fun parseCallSetup(
+        conversationId: String,
+        reply: JsonObject,
+    ): CallSetup {
+        val raw =
+            reply["internalCallerParams"]?.jsonPrimitive?.contentOrNullSafe()
+                ?: error(reply.serverMessage("Не удалось начать звонок"))
+        return parseInternalCallerParams(conversationId, raw)
+    }
 
     // ---------------------------------------------------------------------
     // Authentication
@@ -1977,6 +2140,37 @@ class MaxClient : MaxApi {
                     message = controlText?.ifBlank { null },
                 )
             }
+        // A CALL attach is a call-history entry: {callType, hangupType, duration(ms), contactIds}.
+        // It carries no text, so without a label the bubble renders empty.
+        val callLabel =
+            attaches
+                .firstNotNullOfOrNull { el ->
+                    el.jsonObject.takeIf { it["_type"]?.jsonPrimitive?.contentOrNullSafe() == "CALL" }
+                }?.let { a ->
+                    val isVideo = a["callType"]?.jsonPrimitive?.contentOrNullSafe() == "VIDEO"
+                    val kind = if (isVideo) "видеозвонок" else "звонок"
+                    val durMs = a["duration"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
+                    val outgoing = (obj["sender"]?.jsonPrimitive?.longOrNullSafe() ?: 0L) == myId
+                    when {
+                        durMs > 0 -> {
+                            val secs = durMs / 1000
+                            val mmss = "${secs / 60}:${(secs % 60).toString().padStart(2, '0')}"
+                            (if (outgoing) "Исходящий $kind" else "Входящий $kind") + " · $mmss"
+                        }
+                        outgoing -> "Отменённый $kind"
+                        else -> "Пропущенный $kind"
+                    }.replaceFirstChar { it.uppercase() }
+                }
+        // A call entry renders as a centered system chip (see [service]), never an
+        // editable/repliable bubble — so it does NOT go into the message text.
+        val callService =
+            callLabel?.let {
+                ServiceEvent(
+                    event = "call",
+                    actorId = obj["sender"]?.jsonPrimitive?.longOrNullSafe() ?: 0L,
+                    message = it,
+                )
+            }
         val text =
             buildString {
                 append(if (baseText.isNotEmpty()) baseText else (controlText ?: ""))
@@ -2009,8 +2203,11 @@ class MaxClient : MaxApi {
                         text = localize(q["text"]?.jsonPrimitive?.contentOrNullSafe() ?: "").ifBlank { "Вложение" },
                     )
                 }
+        // A CONTROL service event takes precedence; otherwise a call entry is its own
+        // service chip.
+        val effectiveService = service ?: callService
         // Skip empty service messages with no text, no media and no id.
-        if (text.isEmpty() && media.isEmpty() && files.isEmpty() && linkPreview == null && service == null && id == null) {
+        if (text.isEmpty() && media.isEmpty() && files.isEmpty() && linkPreview == null && effectiveService == null && id == null) {
             return null
         }
         return Message(
@@ -2027,7 +2224,7 @@ class MaxClient : MaxApi {
             files = files,
             forwardedFrom = forwardedFrom,
             linkPreview = linkPreview,
-            service = service,
+            service = effectiveService,
             voice = voice,
         )
     }

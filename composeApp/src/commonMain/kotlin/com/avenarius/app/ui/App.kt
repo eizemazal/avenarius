@@ -29,12 +29,16 @@ import coil3.ImageLoader
 import coil3.compose.setSingletonImageLoaderFactory
 import coil3.disk.DiskCache
 import coil3.network.ktor3.KtorNetworkFetcherFactory
+import com.avenarius.app.model.CallDirection
+import com.avenarius.app.model.CallStatus
 import com.avenarius.app.ui.components.openUriSafely
 import com.avenarius.app.ui.screens.AboutScreen
+import com.avenarius.app.ui.screens.CallScreen
 import com.avenarius.app.ui.screens.ChatScreen
 import com.avenarius.app.ui.screens.CodeScreen
 import com.avenarius.app.ui.screens.EditProfileScreen
 import com.avenarius.app.ui.screens.GroupScreen
+import com.avenarius.app.ui.screens.IncomingCallOverlay
 import com.avenarius.app.ui.screens.LoginScreen
 import com.avenarius.app.ui.screens.MainScreen
 import com.avenarius.app.ui.screens.MediaViewerOverlay
@@ -179,6 +183,7 @@ fun App(viewModel: AppViewModel) {
                                     initialDraft = state.draft,
                                     onLoadOlder = viewModel::loadOlder,
                                     onBack = viewModel::backToChats,
+                                    onStartCall = viewModel::startCall,
                                     onDraftChange = viewModel::setDraft,
                                     onSend = viewModel::sendMessage,
                                     onSendMedia = viewModel::sendMedia,
@@ -246,6 +251,26 @@ fun App(viewModel: AppViewModel) {
                         onShare = viewModel::shareCurrentMedia,
                         onClose = viewModel::closeMedia,
                     )
+                }
+                // Call UI, layered above everything: incoming-call prompt or the in-call screen.
+                state.call?.let { call ->
+                    if (call.status == CallStatus.RINGING && call.direction == CallDirection.INCOMING) {
+                        IncomingCallOverlay(
+                            call = call,
+                            onAccept = viewModel::acceptCall,
+                            onDecline = viewModel::declineCall,
+                        )
+                    } else {
+                        CallScreen(
+                            call = call,
+                            engine = viewModel.currentCallEngine(),
+                            onHangup = viewModel::hangupCall,
+                            onToggleMic = viewModel::toggleCallMic,
+                            onToggleCamera = viewModel::toggleCallCamera,
+                            onSwitchCamera = viewModel::switchCallCamera,
+                            onDismiss = viewModel::dismissCall,
+                        )
+                    }
                 }
             }
         }

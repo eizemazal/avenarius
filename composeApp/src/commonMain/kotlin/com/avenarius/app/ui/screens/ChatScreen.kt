@@ -141,6 +141,8 @@ internal fun ChatScreen(
     initialDraft: String,
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
+    /** Starts a call with the dialog partner ([userId], [isVideo]). */
+    onStartCall: (userId: Long, isVideo: Boolean) -> Unit,
     onDraftChange: (String) -> Unit,
     onSend: (String) -> Unit,
     onSendMedia: (List<PickedMedia>, String) -> Unit,
@@ -305,6 +307,14 @@ internal fun ChatScreen(
                     IconButton(onClick = onBack) { Icon(AppIcons.Back, contentDescription = "Назад") }
                 },
                 actions = {
+                    if (isDialog && otherUserId != null && otherUserId >= 0) {
+                        IconButton(onClick = { onStartCall(otherUserId, false) }) {
+                            Icon(AppIcons.Call, contentDescription = "Аудиозвонок")
+                        }
+                        IconButton(onClick = { onStartCall(otherUserId, true) }) {
+                            Icon(AppIcons.VideoCall, contentDescription = "Видеозвонок")
+                        }
+                    }
                     IconButton(onClick = { menuOpen = true }) {
                         Icon(AppIcons.More, contentDescription = "Меню")
                     }
@@ -1806,7 +1816,7 @@ private fun serviceMessageText(
         "unpin" -> "$actor открепил(а) сообщение"
         "hello" -> "$actor теперь в MAX"
         "joinByLink" -> "$actor присоединил(ся/ась) по ссылке"
-        "call" -> "Звонок"
+        "call" -> service.message ?: "Звонок"
         // "system" (e.g. the "Теперь в MAX!" greeting) and any unmapped event carry
         // ready-made server text — prefer it over a generic fallback.
         else -> service.message ?: "$actor обновил(а) чат"

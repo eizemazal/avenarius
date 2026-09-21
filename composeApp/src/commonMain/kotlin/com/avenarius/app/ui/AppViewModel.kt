@@ -7,6 +7,7 @@ import com.avenarius.app.data.CachedSession
 import com.avenarius.app.data.MessageCache
 import com.avenarius.app.data.Prefs
 import com.avenarius.app.model.Account
+import com.avenarius.app.model.CallState
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.DeviceContact
 import com.avenarius.app.model.FileAttach
@@ -27,6 +28,8 @@ import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.model.parseMaxLink
 import com.avenarius.app.model.previewLabel
+import com.avenarius.app.net.CallEngine
+import com.avenarius.app.net.CallSession
 import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.DemoMaxApi
 import com.avenarius.app.net.FoundUser
@@ -175,6 +178,8 @@ data class AppState(
     val playingVoice: PlayingVoice? = null,
     /** The round video message playing right now, if any. */
     val playingVideoNote: PlayingVideoNote? = null,
+    /** The in-progress voice/video call (ringing, dialing, or active), or null. */
+    val call: CallState? = null,
 ) {
     /**
      * The open chat's messages with its still-sending bubbles merged in.
@@ -211,6 +216,12 @@ class AppViewModel(
     private val originalClient: MaxApi = realClient
     private var client: MaxApi = realClient
 
+    /** Orchestrates voice/video calls (STAGE 1 + STAGE 2 + WebRTC). */
+    private val callSession = CallSession(realClient, ::nowMillis)
+
+    /** The live media engine, for the call screen's video renderers. */
+    fun currentCallEngine(): CallEngine? = callSession.engine
+
     private val _state = MutableStateFlow(AppState(theme = themeModeOf(prefs.theme)))
     val state: StateFlow<AppState> = _state.asStateFlow()
 
@@ -228,11 +239,48 @@ class AppViewModel(
      */
     fun openLink(url: String): Boolean {
         when (val link = parseMaxLink(url) ?: return false) {
-            is MaxLink.JoinCall -> _state.update { it.copy(notice = "Звонки пока не поддерживаются") }
+            is MaxLink.JoinCall -> _state.update { it.copy(notice = "Групповые звонки по ссылке пока не поддерживаются") }
             is MaxLink.Invite -> openInvite(link)
         }
         return true
     }
+
+    // ---------------------------------------------------------------------
+    // Calls
+    // ---------------------------------------------------------------------
+
+    /** Places an outgoing call to [userId]. Ignored in demo mode. */
+    fun startCall(
+        userId: Long,
+        isVideo: Boolean,
+    ) {
+        if (_state.value.demoMode) {
+            _state.update { it.copy(notice = "Звонки недоступны в демо-режиме") }
+            return
+        }
+        val chatId = _state.value.currentChat?.id ?: userId
+        val name = _state.value.contacts[userId] ?: _state.value.currentChat?.title
+        val avatar =
+            _state.value.contactsList
+                .firstOrNull { it.id == userId }
+                ?.avatarUrl
+        callSession.placeCall(userId, chatId, isVideo, peerName = name, peerAvatarUrl = avatar)
+    }
+
+    fun acceptCall() = callSession.accept()
+
+    fun declineCall() = callSession.decline()
+
+    fun hangupCall() = callSession.hangup()
+
+    fun toggleCallMic() = callSession.toggleMic()
+
+    fun toggleCallCamera() = callSession.toggleCamera()
+
+    fun switchCallCamera() = callSession.switchCamera()
+
+    /** Dismisses an ENDED call from the UI. */
+    fun dismissCall() = callSession.clear()
 
     /**
      * Opens what an invite points at: a chat we are already in, or one the server
@@ -424,6 +472,21 @@ class AppViewModel(
     private var draftFlushJob: Job? = null
 
     init {
+        // Mirror the call session's state into AppState for the call UI.
+        viewModelScope.launch {
+            callSession.state.collect { call -> _state.update { it.copy(call = call) } }
+        }
+        // An inbound call is ringing: hand it to the session, resolving caller name/avatar.
+        viewModelScope.launch {
+            originalClient.incomingCalls.collect { call ->
+                val name = _state.value.contacts[call.callerId]
+                val avatar =
+                    _state.value.contactsList
+                        .firstOrNull { it.id == call.callerId }
+                        ?.avatarUrl
+                callSession.onIncomingCall(call, peerName = name, peerAvatarUrl = avatar)
+            }
+        }
         // Forward server-pushed messages into whichever chat is open AND keep the
         // chat-list row live (preview text, timestamp, unread badge, ordering).
         viewModelScope.launch {

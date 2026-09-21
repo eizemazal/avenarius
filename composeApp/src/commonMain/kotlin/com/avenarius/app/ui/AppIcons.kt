@@ -5,6 +5,9 @@ import androidx.compose.ui.graphics.painter.Painter
 import com.avenarius.app.resources.Res
 import com.avenarius.app.resources.arrow_back
 import com.avenarius.app.resources.attach_file
+import com.avenarius.app.resources.call
+import com.avenarius.app.resources.call_end
+import com.avenarius.app.resources.cameraswitch
 import com.avenarius.app.resources.chat
 import com.avenarius.app.resources.check
 import com.avenarius.app.resources.close
@@ -17,6 +20,7 @@ import com.avenarius.app.resources.expand_content
 import com.avenarius.app.resources.forward
 import com.avenarius.app.resources.group
 import com.avenarius.app.resources.mic
+import com.avenarius.app.resources.mic_off
 import com.avenarius.app.resources.more_vert
 import com.avenarius.app.resources.open_in_new
 import com.avenarius.app.resources.pause
@@ -27,6 +31,8 @@ import com.avenarius.app.resources.search
 import com.avenarius.app.resources.send
 import com.avenarius.app.resources.settings
 import com.avenarius.app.resources.video_chat
+import com.avenarius.app.resources.videocam
+import com.avenarius.app.resources.videocam_off
 import org.jetbrains.compose.resources.painterResource
 
 /**
@@ -81,4 +87,13 @@ object AppIcons {
     val Chats: Painter @Composable get() = painterResource(Res.drawable.chat)
     val Contacts: Painter @Composable get() = painterResource(Res.drawable.group)
     val Settings: Painter @Composable get() = painterResource(Res.drawable.settings)
+
+    // Calls: chat-header buttons and in-call controls.
+    val Call: Painter @Composable get() = painterResource(Res.drawable.call)
+    val VideoCall: Painter @Composable get() = painterResource(Res.drawable.video_chat)
+    val CallEnd: Painter @Composable get() = painterResource(Res.drawable.call_end)
+    val MicOff: Painter @Composable get() = painterResource(Res.drawable.mic_off)
+    val Video: Painter @Composable get() = painterResource(Res.drawable.videocam)
+    val VideoOff: Painter @Composable get() = painterResource(Res.drawable.videocam_off)
+    val SwitchCamera: Painter @Composable get() = painterResource(Res.drawable.cameraswitch)
 }

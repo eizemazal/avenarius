@@ -37,6 +37,10 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* result ignored */ }
 
+    // Mic + camera for calls, requested when a call starts.
+    private val callPermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _: Map<String, Boolean> -> }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -72,6 +76,33 @@ class MainActivity : ComponentActivity() {
                     Screen.USER, Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE, Screen.GROUP,
                     -> ConnectionService.start(this@MainActivity)
                     Screen.LOGIN, Screen.LOADING -> ConnectionService.stop(this@MainActivity)
+                }
+            }
+
+            // While a call is live, request mic/camera and run the call foreground
+            // service so capture survives backgrounding; stop it when the call ends.
+            val callActive = state.call != null && state.call?.status != com.avenarius.app.model.CallStatus.ENDED
+            LaunchedEffect(callActive) {
+                if (callActive) {
+                    // Request both mic and camera for any call — video can be switched on
+                    // mid-call, so the camera permission is needed even for an "audio" call.
+                    val needed =
+                        buildList {
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) !=
+                                android.content.pm.PackageManager.PERMISSION_GRANTED
+                            ) {
+                                add(Manifest.permission.RECORD_AUDIO)
+                            }
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) !=
+                                android.content.pm.PackageManager.PERMISSION_GRANTED
+                            ) {
+                                add(Manifest.permission.CAMERA)
+                            }
+                        }
+                    if (needed.isNotEmpty()) callPermissions.launch(needed.toTypedArray())
+                    CallService.start(this@MainActivity)
+                } else {
+                    CallService.stop(this@MainActivity)
                 }
             }
 

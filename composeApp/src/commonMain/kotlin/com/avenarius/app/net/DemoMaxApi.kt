@@ -1,7 +1,9 @@
 package com.avenarius.app.net
 
 import com.avenarius.app.model.Account
+import com.avenarius.app.model.CallSetup
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.IncomingCall
 import com.avenarius.app.model.MediaContent
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
@@ -23,6 +25,7 @@ class DemoMaxApi : MaxApi {
     override val reactionUpdates = MutableSharedFlow<ReactionUpdate>()
     override val chatUpdates = MutableSharedFlow<Chat>()
     override val deletions = MutableSharedFlow<MessageDeletion>()
+    override val incomingCalls = MutableSharedFlow<IncomingCall>()
     override val drops = MutableSharedFlow<Unit>()
     override val isConnected = true
 
@@ -84,6 +87,19 @@ class DemoMaxApi : MaxApi {
     ) = Unit
 
     override fun disconnect() = Unit
+
+    override suspend fun startCall(
+        peerId: Long,
+        isVideo: Boolean,
+    ): CallSetup = error("Звонки недоступны в демо-режиме")
+
+    override suspend fun acceptCall(
+        conversationId: String,
+        peerId: Long,
+        isVideo: Boolean,
+    ): CallSetup = error("Звонки недоступны в демо-режиме")
+
+    override suspend fun hangupCall(conversationId: String) = Unit
 
     override suspend fun startAuth(phone: String): Int = 5
 

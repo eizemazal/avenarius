@@ -6,8 +6,10 @@ import com.avenarius.app.data.InMemoryStorage
 import com.avenarius.app.data.MessageCache
 import com.avenarius.app.data.Prefs
 import com.avenarius.app.model.Account
+import com.avenarius.app.model.CallSetup
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.FileAttach
+import com.avenarius.app.model.IncomingCall
 import com.avenarius.app.model.MediaAttach
 import com.avenarius.app.model.MediaContent
 import com.avenarius.app.model.MediaType
@@ -67,6 +69,8 @@ private class FakeMaxClient : MaxApi {
     override val reactionUpdates: SharedFlow<ReactionUpdate> get() = _reactionUpdates
     override val chatUpdates: SharedFlow<Chat> get() = _chatUpdates
     override val deletions: SharedFlow<MessageDeletion> get() = _deletions
+    private val _incomingCalls = MutableSharedFlow<IncomingCall>(extraBufferCapacity = 8)
+    override val incomingCalls: SharedFlow<IncomingCall> get() = _incomingCalls
     override val drops: SharedFlow<Unit> get() = _drops
     override var isConnected: Boolean = false
         private set
@@ -109,6 +113,19 @@ private class FakeMaxClient : MaxApi {
         connectCount++
         isConnected = true
     }
+
+    override suspend fun startCall(
+        peerId: Long,
+        isVideo: Boolean,
+    ): CallSetup = error("not used in tests")
+
+    override suspend fun acceptCall(
+        conversationId: String,
+        peerId: Long,
+        isVideo: Boolean,
+    ): CallSetup = error("not used in tests")
+
+    override suspend fun hangupCall(conversationId: String) = Unit
 
     override fun disconnect() {
         disconnectCount++
@@ -1435,13 +1452,13 @@ class AppViewModelTest {
     }
 
     @Test
-    fun callLinksSayCallsAreNotSupportedYet() {
+    fun groupCallLinksAreNotSupportedYet() {
         val vm = loggedIn()
 
         val handled = vm.openLink("https://max.ru/joincall/abc")
 
         assertTrue(handled, "a call link is still ours to handle, not the browser's")
-        assertEquals("Звонки пока не поддерживаются", vm.state.value.notice)
+        assertEquals("Групповые звонки по ссылке пока не поддерживаются", vm.state.value.notice)
     }
 
     @Test

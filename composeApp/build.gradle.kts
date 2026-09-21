@@ -79,6 +79,9 @@ kotlin {
             implementation(libs.androidx.camera.lifecycle)
             implementation(libs.androidx.camera.view)
             implementation(libs.mlkit.barcode.scanning)
+            // WebRTC media stack for voice/video calls (standard Google WebRTC,
+            // BSD-licensed — NOT VK's binaries). Native .so per ABI.
+            implementation(libs.stream.webrtc.android)
         }
 
         desktopMain.dependencies {
