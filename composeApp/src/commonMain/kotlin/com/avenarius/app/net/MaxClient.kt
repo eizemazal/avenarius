@@ -718,10 +718,7 @@ class MaxClient : MaxApi {
                             }
                         if (chatId != null && ids.isNotEmpty()) _deletions.emit(MessageDeletion(chatId, ids))
                     }
-                    OP_NOTIF_CALL_START -> {
-                        clog("NOTIF_CALL_START(137) raw: $payload")
-                        parseIncomingCall(payload)?.let { _incomingCalls.emit(it) }
-                    }
+                    OP_NOTIF_CALL_START -> parseIncomingCall(payload)?.let { _incomingCalls.emit(it) }
                 }
             }
         }

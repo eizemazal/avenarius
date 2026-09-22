@@ -11,8 +11,6 @@ import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.Camera2Enumerator
 import org.webrtc.CameraVideoCapturer
-import org.webrtc.DefaultVideoDecoderFactory
-import org.webrtc.DefaultVideoEncoderFactory
 import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
@@ -22,6 +20,8 @@ import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
+import org.webrtc.SoftwareVideoDecoderFactory
+import org.webrtc.SoftwareVideoEncoderFactory
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
@@ -65,7 +65,6 @@ internal class AndroidCallEngine(
             }
 
             override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
-                clog("ICE state: $state")
                 when (state) {
                     PeerConnection.IceConnectionState.CONNECTED,
                     PeerConnection.IceConnectionState.COMPLETED,
@@ -90,9 +89,7 @@ internal class AndroidCallEngine(
 
             override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
 
-            override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) {
-                clog("ICE gathering: $state")
-            }
+            override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) = Unit
 
             override fun onAddStream(stream: org.webrtc.MediaStream?) = Unit
 
@@ -122,7 +119,6 @@ internal class AndroidCallEngine(
         pc = factory.createPeerConnection(rtc, observer)
         addLocalTracks()
         setupAudioRouting()
-        startStatsLogging()
     }
 
     private val audioManager by lazy { Session.appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
@@ -147,52 +143,6 @@ internal class AndroidCallEngine(
         }
     }
 
-    private var statsThread: Thread? = null
-
-    /** Logs RTP byte counters every 3s so we can tell whether media is actually flowing. */
-    private fun startStatsLogging() {
-        statsThread =
-            Thread {
-                try {
-                    while (!Thread.currentThread().isInterrupted) {
-                        Thread.sleep(3000)
-                        val p = pc ?: continue
-                        p.getStats { report ->
-                            var aIn = 0.0
-                            var aOut = 0.0
-                            var vIn = 0.0
-                            var vOut = 0.0
-                            for (s in report.statsMap.values) {
-                                val m = s.members
-                                val kind = m["kind"]?.toString()
-                                val br = (m["bytesReceived"] as? Number)?.toDouble() ?: 0.0
-                                val bs = (m["bytesSent"] as? Number)?.toDouble() ?: 0.0
-                                when (s.type) {
-                                    "inbound-rtp" ->
-                                        if (kind == "audio") {
-                                            aIn += br
-                                        } else if (kind == "video") {
-                                            vIn += br
-                                        }
-                                    "outbound-rtp" ->
-                                        if (kind == "audio") {
-                                            aOut += bs
-                                        } else if (kind == "video") {
-                                            vOut += bs
-                                        }
-                                }
-                            }
-                            clog("stats: audio in=${aIn.toLong()} out=${aOut.toLong()} | video in=${vIn.toLong()} out=${vOut.toLong()}")
-                        }
-                    }
-                } catch (_: InterruptedException) {
-                }
-            }.also {
-                it.isDaemon = true
-                it.start()
-            }
-    }
-
     private fun addLocalTracks() {
         val streamIds = listOf("ARDAMS")
         audioSource = factory.createAudioSource(MediaConstraints())
@@ -209,9 +159,11 @@ internal class AndroidCallEngine(
                     it.setEnabled(video)
                     pc?.addTrack(it, streamIds)
                 }
-        }.onFailure { clog("video track setup failed: $it") }
+        }
 
-        if (video) runCatching { startCamera() }.onFailure { clog("camera start failed (continuing audio-only): $it") }
+        // Starting the camera can throw if the CAMERA permission isn't granted yet — the
+        // call proceeds audio-only and video can be enabled later.
+        if (video) runCatching { startCamera() }
     }
 
     /** Lazily opens the front camera and feeds [videoSource]. Safe to call repeatedly. */
@@ -248,6 +200,14 @@ internal class AndroidCallEngine(
         return sdp.description
     }
 
+    // ICE candidates must NOT be added before the remote description is set — doing so
+    // dereferences null on WebRTC's worker thread and crashes the process (SIGSEGV). The
+    // offer and its trickle candidates arrive on separate coroutines, so we buffer any
+    // candidate that lands early and flush once the remote description is applied.
+    private val candidateLock = Any()
+    private var remoteDescriptionSet = false
+    private val pendingRemoteCandidates = ArrayList<IceCandidate>()
+
     override suspend fun setRemoteDescription(
         type: String,
         sdp: String,
@@ -255,6 +215,12 @@ internal class AndroidCallEngine(
         val pc = pc ?: return
         val t = if (type.equals("offer", true)) SessionDescription.Type.OFFER else SessionDescription.Type.ANSWER
         pc.awaitSetRemote(SessionDescription(t, sdp))
+        val flush =
+            synchronized(candidateLock) {
+                remoteDescriptionSet = true
+                ArrayList(pendingRemoteCandidates).also { pendingRemoteCandidates.clear() }
+            }
+        flush.forEach { runCatching { pc.addIceCandidate(it) } }
     }
 
     override fun addRemoteCandidate(
@@ -262,7 +228,17 @@ internal class AndroidCallEngine(
         sdpMid: String?,
         sdpMLineIndex: Int?,
     ) {
-        pc?.addIceCandidate(IceCandidate(sdpMid ?: "", sdpMLineIndex ?: 0, candidate))
+        val ice = IceCandidate(sdpMid ?: "", sdpMLineIndex ?: 0, candidate)
+        val addNow =
+            synchronized(candidateLock) {
+                if (remoteDescriptionSet) {
+                    true
+                } else {
+                    pendingRemoteCandidates.add(ice)
+                    false
+                }
+            }
+        if (addNow) runCatching { pc?.addIceCandidate(ice) }
     }
 
     override fun setMicEnabled(enabled: Boolean) {
@@ -281,7 +257,6 @@ internal class AndroidCallEngine(
     }
 
     override fun close() {
-        runCatching { statsThread?.interrupt() }
         runCatching {
             audioManager.mode = prevAudioMode
             audioManager.isSpeakerphoneOn = false
@@ -320,8 +295,10 @@ internal class AndroidCallEngine(
                 }
                 PeerConnectionFactory
                     .builder()
-                    .setVideoEncoderFactory(DefaultVideoEncoderFactory(sharedEgl.eglBaseContext, true, true))
-                    .setVideoDecoderFactory(DefaultVideoDecoderFactory(sharedEgl.eglBaseContext))
+                    // Software VP8/VP9 codecs: the device's hardware codecs SIGSEGV inside
+                    // libjingle on media start (a known Xiaomi/MIUI issue). SW is fine for 1:1.
+                    .setVideoEncoderFactory(SoftwareVideoEncoderFactory())
+                    .setVideoDecoderFactory(SoftwareVideoDecoderFactory())
                     .createPeerConnectionFactory()
                     .also { factoryRef = it }
             }

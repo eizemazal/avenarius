@@ -62,11 +62,7 @@ class CallSession(
     ) {
         if (offerSent || remoteParticipantId == 0L) return
         offerSent = true
-        runCatching {
-            val offer = eng.createOffer()
-            clog("caller sending offer to pid=$remoteParticipantId (${offer.length} chars)")
-            sig.sendSdp(remoteParticipantId, "offer", offer)
-        }.onFailure { clog("caller offer failed: ${it.stackTraceToString()}") }
+        runCatching { sig.sendSdp(remoteParticipantId, "offer", eng.createOffer()) }
     }
 
     /** Set for an inbound call awaiting accept/decline (STAGE-1 setup not fetched yet). */
@@ -98,15 +94,10 @@ class CallSession(
             )
         scope.launch {
             runCatching {
-                clog("placeCall -> startCall peer=$peerId video=$isVideo")
                 val s = api.startCall(peerId, isVideo)
-                clog("startCall OK conv=${s.conversationId} ws=${s.wsEndpoint.take(80)} ice=${s.iceServers.size}")
                 _state.update { it?.copy(conversationId = s.conversationId) }
                 beginMedia(s, isVideo, tgt = "start")
-            }.onFailure {
-                clog("placeCall FAILED: ${it.stackTraceToString()}")
-                end("Не удалось начать звонок")
-            }
+            }.onFailure { end("Не удалось начать звонок") }
         }
     }
 
@@ -143,19 +134,10 @@ class CallSession(
             runCatching {
                 // The callee's SFU params come from the push's `vcp` (in call.setup); it must
                 // NOT call VIDEO_CHAT_START_ACTIVE (the server rejects that with error 1114).
-                val s =
-                    call.setup ?: run {
-                        clog("accept: no vcp setup, falling back to op78")
-                        api.acceptCall(call.conversationId, call.callerId, isVideo)
-                    }
-                clog("accept: setup ws=${s.wsEndpoint.take(90)} ice=${s.iceServers.size}")
+                val s = call.setup ?: api.acceptCall(call.conversationId, call.callerId, isVideo)
                 beginMedia(s, isVideo, tgt = "accept")
-                clog("accept -> sending accept-call over ws2")
                 signaling?.acceptCall(micEnabled = true, cameraEnabled = isVideo)
-            }.onFailure {
-                clog("accept FAILED: ${it.stackTraceToString()}")
-                end("Не удалось подключиться")
-            }
+            }.onFailure { end("Не удалось подключиться") }
         }
     }
 
@@ -197,23 +179,16 @@ class CallSession(
             }
         }
         scope.launch {
-            eng.events.collect { clog("engine event: $it") }
-        }
-        scope.launch {
             sig.remoteSdp.collect { r ->
-                clog("remote SDP ${r.type} from pid=${r.participantId} (${r.sdp.length} chars)")
                 if (remoteParticipantId == 0L) remoteParticipantId = r.participantId
                 eng.setRemoteDescription(r.type, r.sdp)
                 if (r.type == "offer") {
-                    val answer = eng.createAnswer()
-                    clog("sending answer to pid=${r.participantId} (${answer.length} chars)")
-                    sig.sendSdp(r.participantId, "answer", answer)
+                    sig.sendSdp(r.participantId, "answer", eng.createAnswer())
                 }
             }
         }
         scope.launch {
             sig.remoteCandidate.collect { c ->
-                clog("remote ICE from pid=${c.participantId}: ${c.candidate.take(60)}")
                 if (remoteParticipantId == 0L) remoteParticipantId = c.participantId
                 eng.addRemoteCandidate(c.candidate, c.sdpMid, c.sdpMLineIndex)
             }
@@ -221,7 +196,6 @@ class CallSession(
         val caller = tgt == "start"
         scope.launch {
             sig.events.collect { e ->
-                clog("signaling event: $e")
                 when (e) {
                     is CallSignaling.SignalingEvent.PeerRegistered -> {
                         if (remoteParticipantId == 0L) remoteParticipantId = e.participantId
@@ -241,9 +215,7 @@ class CallSession(
                 }
             }
         }
-        clog("connecting ws2 …")
         sig.connect()
-        clog("ws2 connected")
         // The caller has no accept-call to declare its media; announce it so the SFU
         // sets up our producer and relays the peer's offer.
         if (caller) {
@@ -308,9 +280,4 @@ class CallSession(
     fun clear() {
         _state.value = null
     }
-}
-
-/** Call-stack diagnostic log. On Android this reaches logcat (tag System.out): `adb logcat | grep AVECALL`. */
-internal fun clog(msg: String) {
-    println("AVECALL: $msg")
 }

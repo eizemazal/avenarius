@@ -112,9 +112,7 @@ class CallSignaling(
 
     /** Opens the ws2 WebSocket and starts the receive loop. */
     suspend fun connect() {
-        val url = withRequiredParams(setup.wsEndpoint, tgt)
-        clog("ws2 url: ${url.take(140)}")
-        val s = http.webSocketSession(urlString = url)
+        val s = http.webSocketSession(urlString = withRequiredParams(setup.wsEndpoint, tgt))
         session = s
         receiveJob =
             scope.launch {
@@ -133,18 +131,11 @@ class CallSignaling(
                             runCatching { s.send("pong") }
                             return@consumeEach
                         }
-                        if (!trimmed.startsWith("{")) {
-                            clog("ws2 RECV (non-json): $trimmed")
-                            return@consumeEach
-                        }
-                        clog("ws2 RECV: ${text.take(200)}")
+                        if (!trimmed.startsWith("{")) return@consumeEach
                         runCatching { route(Json.parseToJsonElement(text).jsonObject) }
-                            .onFailure { clog("ws2 route parse error: $it") }
                     }
-                    clog("ws2 incoming closed")
                 } catch (t: Throwable) {
                     // socket closed / errored -> treat as hangup
-                    clog("ws2 receive error: $t")
                     _events.tryEmit(SignalingEvent.Hungup("connection lost"))
                 }
             }
@@ -260,9 +251,7 @@ class CallSignaling(
                 put("sequence", seq)
                 params()
             }
-        val json = msg.toString()
-        clog("ws2 SEND: ${json.take(200)}")
-        runCatching { s.send(json) }.onFailure { clog("ws2 send error: $it") }
+        runCatching { s.send(msg.toString()) }
     }
 
     fun close() {
