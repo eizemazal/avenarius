@@ -14,3 +14,15 @@ expect fun formatDate(epochMillis: Long): String
  * yesterday, otherwise a localized day+month (with the year only when it differs from now).
  */
 expect fun formatDay(epochMillis: Long): String
+
+/**
+ * Compact timestamp for a chat-list row, as the official client shows it: "HH:mm"
+ * today, "Вчера" yesterday, "dd.MM" within the year, "dd.MM.yy" otherwise.
+ */
+expect fun formatListTime(epochMillis: Long): String
+
+/** True when both timestamps fall on the same local calendar day. */
+expect fun sameDay(
+    a: Long,
+    b: Long,
+): Boolean

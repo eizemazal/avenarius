@@ -28,6 +28,8 @@ import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.model.parseMaxLink
 import com.avenarius.app.model.previewLabel
+import com.avenarius.app.net.AuthRejectedException
+import com.avenarius.app.net.AuthSessionExpiredException
 import com.avenarius.app.net.CallEngine
 import com.avenarius.app.net.CallSession
 import com.avenarius.app.net.CodeResult
@@ -53,10 +55,109 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class Screen { LOADING, LOGIN, CODE, PASSWORD, REGISTER, CHATS, CHAT, USER, SHARE_PICK, ABOUT, EDIT_PROFILE, GROUP }
+enum class Screen {
+    LOADING,
+    LOGIN,
+    CODE,
+    PASSWORD,
+
+    /** The server requires a login password this account hasn't set (see [CodeResult.PasswordRequiredNotSet]). */
+    LOGIN_RESTRICTED,
+    REGISTER,
+    CHATS,
+    CHAT,
+    USER,
+    SHARE_PICK,
+    ABOUT,
+    EDIT_PROFILE,
+    GROUP,
+
+    /** Settings → "Пароль для входа": set up / change / remove the login password (2FA). */
+    TWOFA,
+}
+
+/** Steps of the login-password (2FA) settings flow, as in the official client. */
+enum class TwoFaStep {
+    /** No password yet: explanation + "Установить пароль". */
+    INTRO,
+
+    /** "Придумайте пароль" + repeat. */
+    PASSWORD,
+
+    /** "Подсказка (необязательно)". */
+    HINT,
+
+    /** "Укажите почту для восстановления пароля" / skip. */
+    EMAIL,
+
+    /** "Какой код пришёл на почту?" */
+    EMAIL_CODE,
+
+    /** "Вы установили пароль". */
+    DONE_SET,
+
+    /** Password exists: confirm it before managing. */
+    CHECK,
+
+    /** "Изменить пароль" / "Отключить пароль". */
+    MANAGE,
+
+    /** "Вы отключили пароль". */
+    DONE_REMOVED,
+}
+
+/** UI state of the 2FA settings flow ([Screen.TWOFA]). */
+data class TwoFaFlow(
+    val step: TwoFaStep,
+    /** Whether a password is currently set (null while unknown). */
+    val enabled: Boolean?,
+    val hint: String? = null,
+    /** Linked recovery e-mail (masked), if any. */
+    val email: String? = null,
+    /** E-mail a verification code was just sent to. */
+    val pendingEmail: String? = null,
+    /** True when changing an existing password rather than setting the first one. */
+    val changing: Boolean = false,
+    /**
+     * Error/refusal text for the current step. Kept here, not in the global `error`,
+     * so a background reconnect (which clears `error` on success) can't wipe it while
+     * the user is still reading it.
+     */
+    val notice: String? = null,
+)
+
+/** Screens that exist only with a live session (i.e. everything past the login steps). */
+fun Screen.isSignedIn(): Boolean =
+    when (this) {
+        Screen.LOADING, Screen.LOGIN, Screen.CODE, Screen.PASSWORD, Screen.LOGIN_RESTRICTED, Screen.REGISTER -> false
+        else -> true
+    }
 
 /** Bottom-navigation tabs on the main (CHATS) screen. */
 enum class Tab { CHATS, CONTACTS, SETTINGS }
+
+/**
+ * The "печатает…" line for [chatId], or null when nobody is typing there right now.
+ * Dialogs need no name; groups name one or two typists and count beyond that, as the
+ * official client does.
+ */
+fun AppState.typingText(
+    chatId: Long?,
+    names: Map<Long, String>,
+): String? {
+    if (chatId == null) return null
+    val now = nowMillis()
+    val users = typing[chatId]?.filterValues { it > now }?.keys.orEmpty()
+    if (users.isEmpty()) return null
+    val isDialog = chats.firstOrNull { it.id == chatId }?.isDialog ?: true
+    if (isDialog) return "печатает…"
+    val labels = users.map { names[it] ?: "Кто-то" }
+    return when (labels.size) {
+        1 -> "${labels[0]} печатает…"
+        2 -> "${labels[0]}, ${labels[1]} печатают…"
+        else -> "${labels.size} участника печатают…"
+    }
+}
 
 /** Full-screen media viewer overlay state. */
 sealed interface MediaViewer {
@@ -112,12 +213,18 @@ data class AppState(
     val mediaViewer: MediaViewer? = null,
     /** Optional server-provided hint shown on the password screen. */
     val passwordHint: String? = null,
+    /** Masked recovery e-mail for the password step (tells the user recovery is possible). */
+    val passwordEmail: String? = null,
+    /** The login-password settings flow while [Screen.TWOFA] is open. */
+    val twoFa: TwoFaFlow? = null,
     /** Selected bottom-nav tab on the main screen. */
     val tab: Tab = Tab.CHATS,
     /** Full contact list for the Contacts tab. */
     val contactsList: List<UserInfo> = emptyList(),
     /** Ids of users currently online (for the green presence dot). */
     val onlineUsers: Set<Long> = emptySet(),
+    /** Who is typing where: chatId → (userId → epoch-ms until which the hint is valid). */
+    val typing: Map<Long, Map<Long, Long>> = emptyMap(),
     /** The user whose profile page is open (Screen.USER). */
     val viewingUser: UserInfo? = null,
     /** The group whose info page is open (Screen.GROUP). */
@@ -209,15 +316,18 @@ class AppViewModel(
     private val voiceSendRetryDelayMs: Long = VOICE_SEND_RETRY_DELAY_MS,
     /** The audio player. Substituted in tests, which must not touch the real one. */
     private val voicePlayer: VoicePlayback = VoiceAudio,
+    /**
+     * Orchestrates voice/video calls (STAGE 1 + STAGE 2 + WebRTC). App-scoped on
+     * Android (shared with the background service so an inbound call rings without
+     * the Activity); the default is for desktop and tests.
+     */
+    private val callSession: CallSession = CallSession(realClient, ::nowMillis),
 ) : ViewModel() {
     // Swappable: the demo login (Google Play review account) replaces this with an
     // offline [DemoMaxApi] so it never touches the real servers. [originalClient] is
     // the real one, restored on logout.
     private val originalClient: MaxApi = realClient
     private var client: MaxApi = realClient
-
-    /** Orchestrates voice/video calls (STAGE 1 + STAGE 2 + WebRTC). */
-    private val callSession = CallSession(realClient, ::nowMillis)
 
     /** The live media engine, for the call screen's video renderers. */
     fun currentCallEngine(): CallEngine? = callSession.engine
@@ -372,6 +482,181 @@ class AppViewModel(
     /** Opens the "About" screen. */
     fun openAbout() = _state.update { it.copy(screen = Screen.ABOUT) }
 
+    // ------------------------------------------------------------------ login password (2FA)
+
+    private var twoFaTrackId: String? = null
+    private var twoFaPassword: String? = null
+    private var twoFaHint: String? = null
+    private var twoFaEmailVerified = false
+
+    /** Opens Settings → "Пароль для входа". Asks the server for the current state first. */
+    fun openTwoFa() {
+        val known = _state.value.account?.twoFaEnabled
+        twoFaTrackId = null
+        twoFaPassword = null
+        twoFaHint = null
+        twoFaEmailVerified = false
+        _state.update {
+            it.copy(
+                screen = Screen.TWOFA,
+                error = null,
+                twoFa = TwoFaFlow(step = if (known == true) TwoFaStep.CHECK else TwoFaStep.INTRO, enabled = known),
+            )
+        }
+        viewModelScope.launch {
+            // The official client asks for details on a track; try track-less first (no
+            // side effects), then open a track and keep it for the steps that follow.
+            var details = runCatching { client.twoFaDetails(null) }.getOrNull()
+            if (details?.enabled == null) {
+                details =
+                    runCatching {
+                        val track = client.twoFaCreateTrack()
+                        twoFaTrackId = track
+                        client.twoFaDetails(track)
+                    }.getOrElse { e ->
+                        // e.g. the server's "password can be changed only 24 h after
+                        // login" — show it here rather than on the first tap.
+                        _state.update { s -> s.copy(twoFa = s.twoFa?.copy(notice = e.message)) }
+                        null
+                    } ?: details
+            }
+            details ?: return@launch
+            val enabled = details.enabled ?: known
+            _state.update { s ->
+                val flow = s.twoFa ?: return@update s
+                // Only re-route while still on the entry step — never yank the user out
+                // of a step they have already started.
+                val step =
+                    when {
+                        flow.step != TwoFaStep.INTRO && flow.step != TwoFaStep.CHECK -> flow.step
+                        enabled == true -> TwoFaStep.CHECK
+                        else -> TwoFaStep.INTRO
+                    }
+                s.copy(
+                    twoFa = flow.copy(step = step, enabled = enabled, hint = details.hint, email = details.email),
+                    account = if (enabled != null) s.account?.copy(twoFaEnabled = enabled) else s.account,
+                )
+            }
+        }
+    }
+
+    fun closeTwoFa() = _state.update { it.copy(screen = Screen.CHATS, tab = Tab.SETTINGS, twoFa = null, error = null) }
+
+    /** Moves the flow on; a step change also retires the previous step's notice. */
+    private fun updateTwoFa(block: (TwoFaFlow) -> TwoFaFlow) =
+        _state.update { s -> s.copy(twoFa = s.twoFa?.let(block)?.copy(notice = null)) }
+
+    /** [launchBusy] for the 2FA flow: failures land in [TwoFaFlow.notice], not the global error. */
+    private fun launchTwoFa(block: suspend () -> Unit) {
+        _state.update { s -> s.copy(busy = true, twoFa = s.twoFa?.copy(notice = null)) }
+        viewModelScope.launch {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { s -> s.copy(twoFa = s.twoFa?.copy(notice = e.message ?: "Ошибка")) }
+            } finally {
+                _state.update { it.copy(busy = false) }
+            }
+        }
+    }
+
+    /** "Установить пароль" on the intro step. */
+    fun twoFaStartSetup() =
+        launchTwoFa {
+            if (twoFaTrackId == null) twoFaTrackId = client.twoFaCreateTrack()
+            updateTwoFa { it.copy(step = TwoFaStep.PASSWORD, changing = false) }
+        }
+
+    /** "Изменить пароль" on the manage step (track already password-confirmed). */
+    fun twoFaChangePassword() = updateTwoFa { it.copy(step = TwoFaStep.PASSWORD, changing = true) }
+
+    fun twoFaSubmitPassword(
+        password: String,
+        repeat: String,
+    ) {
+        if (password != repeat) {
+            _state.update { s -> s.copy(twoFa = s.twoFa?.copy(notice = "Пароли не совпадают, попробуйте ещё раз")) }
+            return
+        }
+        launchTwoFa {
+            val track = twoFaTrackId ?: error("Настройка пароля не начата")
+            client.twoFaValidatePassword(track, password)
+            twoFaPassword = password
+            updateTwoFa { it.copy(step = TwoFaStep.HINT) }
+        }
+    }
+
+    /** Hint step; a blank hint is simply skipped. */
+    fun twoFaSubmitHint(hint: String) =
+        launchTwoFa {
+            val track = twoFaTrackId ?: error("Настройка пароля не начата")
+            val h = hint.trim().ifBlank { null }
+            if (h != null) client.twoFaValidateHint(track, h)
+            twoFaHint = h
+            // The official client asks for a recovery e-mail only when none is linked.
+            if (_state.value.twoFa?.email == null) {
+                updateTwoFa { it.copy(step = TwoFaStep.EMAIL) }
+            } else {
+                commitTwoFaPassword()
+            }
+        }
+
+    fun twoFaSubmitEmail(email: String) =
+        launchTwoFa {
+            val track = twoFaTrackId ?: error("Настройка пароля не начата")
+            val e = email.trim()
+            client.twoFaVerifyEmail(track, e)
+            updateTwoFa { it.copy(step = TwoFaStep.EMAIL_CODE, pendingEmail = e) }
+        }
+
+    /** "Пропустить" on the e-mail step. */
+    fun twoFaSkipEmail() = launchTwoFa { commitTwoFaPassword() }
+
+    fun twoFaSubmitEmailCode(code: String) =
+        launchTwoFa {
+            val track = twoFaTrackId ?: error("Настройка пароля не начата")
+            client.twoFaCheckEmail(track, code.trim())
+            twoFaEmailVerified = true
+            commitTwoFaPassword()
+        }
+
+    private suspend fun commitTwoFaPassword() {
+        val track = twoFaTrackId ?: error("Настройка пароля не начата")
+        val password = twoFaPassword ?: error("Пароль не задан")
+        val changing = _state.value.twoFa?.changing == true
+        client.twoFaSet(track, password, twoFaHint, update = changing, withEmail = twoFaEmailVerified)
+        twoFaPassword = null
+        _state.update { s ->
+            s.copy(
+                account = s.account?.copy(twoFaEnabled = true),
+                twoFa = s.twoFa?.copy(step = TwoFaStep.DONE_SET, enabled = true, hint = twoFaHint),
+            )
+        }
+    }
+
+    /** Confirms the existing password (manage/remove need a password-confirmed track). */
+    fun twoFaCheckPassword(password: String) =
+        launchTwoFa {
+            val track = twoFaTrackId ?: client.twoFaCreateTrack().also { twoFaTrackId = it }
+            twoFaTrackId = client.twoFaCheckPassword(track, password)
+            updateTwoFa { it.copy(step = TwoFaStep.MANAGE) }
+        }
+
+    /** "Отключить пароль" (after the confirmation dialog). */
+    fun twoFaDisable() =
+        launchTwoFa {
+            val track = twoFaTrackId ?: error("Сначала подтвердите пароль")
+            client.twoFaRemove(track)
+            _state.update { s ->
+                s.copy(
+                    account = s.account?.copy(twoFaEnabled = false),
+                    twoFa = s.twoFa?.copy(step = TwoFaStep.DONE_REMOVED, enabled = false, hint = null),
+                )
+            }
+        }
+
     /** Opens the edit-profile screen (for the signed-in user). */
     fun openEditProfile() = _state.update { it.copy(screen = Screen.EDIT_PROFILE) }
 
@@ -476,7 +761,8 @@ class AppViewModel(
         viewModelScope.launch {
             callSession.state.collect { call -> _state.update { it.copy(call = call) } }
         }
-        // An inbound call is ringing: hand it to the session, resolving caller name/avatar.
+        // An inbound call is ringing (the session picks it up itself); we only know the
+        // caller's name/avatar, so supply those for the call UI.
         viewModelScope.launch {
             originalClient.incomingCalls.collect { call ->
                 val name = _state.value.contacts[call.callerId]
@@ -484,13 +770,14 @@ class AppViewModel(
                     _state.value.contactsList
                         .firstOrNull { it.id == call.callerId }
                         ?.avatarUrl
-                callSession.onIncomingCall(call, peerName = name, peerAvatarUrl = avatar)
+                if (name != null || avatar != null) callSession.setPeerInfo(call.conversationId, name, avatar)
             }
         }
         // Forward server-pushed messages into whichever chat is open AND keep the
         // chat-list row live (preview text, timestamp, unread badge, ordering).
         viewModelScope.launch {
             client.incoming.collect { msg ->
+                clearTyping(msg.chatId, msg.senderId)
                 val openChatId = _state.value.currentChat?.id
                 val isOpen = openChatId == msg.chatId
                 val fromMe =
@@ -609,6 +896,22 @@ class AppViewModel(
                 }
             }
         }
+        // Typing pushes (op129): remember who is typing where and forget them after
+        // TYPING_TTL_MS without a repeat (the sender re-sends every few seconds while typing).
+        viewModelScope.launch {
+            client.typing.collect { t ->
+                if (t.userId == _state.value.account?.userId) return@collect
+                val until = nowMillis() + TYPING_TTL_MS
+                _state.update { s ->
+                    val perChat = (s.typing[t.chatId] ?: emptyMap()) + (t.userId to until)
+                    s.copy(typing = s.typing + (t.chatId to perChat))
+                }
+                launch {
+                    delay(TYPING_TTL_MS)
+                    pruneTyping(t.chatId)
+                }
+            }
+        }
         // Live reaction counts (op155): the push has counts only, so we keep our own
         // reaction flag from local state and just refresh the numbers/emojis.
         viewModelScope.launch {
@@ -668,14 +971,27 @@ class AppViewModel(
                 }
             }
         }
-        // Auto-reconnect transparently whenever the connection drops.
+        // Auto-reconnect transparently whenever the connection drops — from ANY signed-in
+        // screen. A drop is a one-shot event: ignoring it because the user happened to be
+        // in settings left the app offline until restart (every request then failed
+        // with "Нет соединения с сервером").
         viewModelScope.launch {
             client.drops.collect {
-                val screen = _state.value.screen
-                if (prefs.token != null && (screen == Screen.CHATS || screen == Screen.CHAT)) {
-                    connectWithRetry(freshSession = false)
-                }
+                if (prefs.token != null && _state.value.screen.isSignedIn()) connectWithRetry(freshSession = false)
             }
+        }
+        // Safety net for a drop that slipped through anyway (e.g. one that arrived while
+        // the client was being swapped): whenever a signed-in screen is shown on a dead
+        // transport, bring the connection back.
+        viewModelScope.launch {
+            _state
+                .map { it.screen }
+                .distinctUntilChanged()
+                .collect { screen ->
+                    if (screen.isSignedIn() && prefs.token != null && !_state.value.demoMode && !client.isConnected) {
+                        connectWithRetry(freshSession = false)
+                    }
+                }
         }
         // Keep the warm-start snapshot fresh. Collected from the state (rather than
         // written at each mutation site) so every path that changes the chat list —
@@ -774,6 +1090,7 @@ class AppViewModel(
     fun setDraft(text: String) {
         val chatId = _state.value.currentChat?.id ?: return
         if (text.isBlank()) drafts.remove(chatId) else drafts[chatId] = text
+        notifyTyping(chatId, text)
         draftFlushJob?.cancel()
         draftFlushJob =
             viewModelScope.launch {
@@ -785,6 +1102,44 @@ class AppViewModel(
     private fun flushDrafts() {
         draftFlushJob?.cancel()
         persistDrafts()
+    }
+
+    private var lastTypingChatId = 0L
+    private var lastTypingSentAt = 0L
+
+    /** Sends MSG_TYPING at most once per [TYPING_SEND_INTERVAL_MS] per chat while the user types. */
+    private fun notifyTyping(
+        chatId: Long,
+        text: String,
+    ) {
+        if (text.isBlank() || _state.value.demoMode) return
+        val now = nowMillis()
+        if (chatId == lastTypingChatId && now - lastTypingSentAt < TYPING_SEND_INTERVAL_MS) return
+        lastTypingChatId = chatId
+        lastTypingSentAt = now
+        viewModelScope.launch { runCatching { client.sendTyping(chatId) } }
+    }
+
+    /** Drops expired typing entries for [chatId] (and the chat's map once empty). */
+    private fun pruneTyping(chatId: Long) {
+        val now = nowMillis()
+        _state.update { s ->
+            val perChat = s.typing[chatId]?.filterValues { it > now }.orEmpty()
+            s.copy(typing = if (perChat.isEmpty()) s.typing - chatId else s.typing + (chatId to perChat))
+        }
+    }
+
+    /** A message from [userId] in [chatId] ends their typing hint at once. */
+    private fun clearTyping(
+        chatId: Long,
+        userId: Long,
+    ) {
+        _state.update { s ->
+            val perChat = s.typing[chatId] ?: return@update s
+            if (userId !in perChat) return@update s
+            val rest = perChat - userId
+            s.copy(typing = if (rest.isEmpty()) s.typing - chatId else s.typing + (chatId to rest))
+        }
     }
 
     /**
@@ -876,9 +1231,17 @@ class AppViewModel(
                         resolveDialogTitles()
                         _state.value.currentChat?.let { reloadOpenChat(it) } // catch up missed messages
                         return@launch
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Throwable) {
                         val msg = e.message ?: "Ошибка"
-                        if (msg.contains("вход", true) || msg.contains("авториз", true)) {
+                        // A typed rejection from sync, or the legacy text heuristic — but
+                        // never on the raw-payload fallback ("Ответ сервера: {...}"), where
+                        // any chat title containing "вход" would wipe the account.
+                        val authRejected =
+                            e is AuthRejectedException ||
+                                (!msg.contains("Ответ сервера") && (msg.contains("вход", true) || msg.contains("авториз", true)))
+                        if (authRejected) {
                             // Genuine auth rejection -> the token is dead, must re-login.
                             prefs.clear()
                             wipeLocalData()
@@ -886,7 +1249,10 @@ class AppViewModel(
                             _state.update { AppState(screen = Screen.LOGIN, error = msg) }
                             return@launch
                         }
-                        // Transient (connectivity/other): keep retrying with backoff.
+                        // Transient (connectivity/other): keep retrying with backoff. Sync
+                        // is once-per-connection, so retrying over the same (already synced,
+                        // or half-dead) socket can never succeed — start each attempt fresh.
+                        runCatching { client.disconnect() }
                         _state.update { it.copy(reconnecting = true) }
                         delay(backoff)
                         backoff = (backoff * 2).coerceAtMost(20_000L)
@@ -944,13 +1310,27 @@ class AppViewModel(
                 }
                 is CodeResult.NeedPassword -> {
                     passwordTrackId = result.trackId
-                    _state.update { it.copy(screen = Screen.PASSWORD, passwordHint = result.hint) }
+                    _state.update {
+                        it.copy(screen = Screen.PASSWORD, passwordHint = result.hint, passwordEmail = result.email)
+                    }
                 }
                 CodeResult.NeedRegister -> {
                     _state.update { it.copy(screen = Screen.REGISTER) }
                 }
+                CodeResult.PasswordRequiredNotSet -> {
+                    // Nothing more this device can do: the password must be created on a
+                    // device that is already signed in; then the user retries from the phone.
+                    client.disconnect()
+                    _state.update { it.copy(screen = Screen.LOGIN_RESTRICTED) }
+                }
             }
         }
+    }
+
+    /** "Повторить вход" on the restricted screen (or an expired login step): start over. */
+    fun restartLogin() {
+        passwordTrackId = null
+        _state.update { it.copy(screen = Screen.LOGIN, error = null, passwordHint = null, passwordEmail = null) }
     }
 
     /** Starts the offline demo session against [DemoMaxApi] (no network). */
@@ -986,7 +1366,16 @@ class AppViewModel(
     fun submitPassword(password: String) =
         launchBusy {
             val trackId = passwordTrackId ?: error("Нет идентификатора пароля")
-            val token = client.checkPassword(password, trackId)
+            val token =
+                try {
+                    client.checkPassword(password, trackId)
+                } catch (e: AuthSessionExpiredException) {
+                    // The password track is dead (timed out / attempts exhausted): the
+                    // official client sends the user back to the phone step, so do we.
+                    restartLogin()
+                    _state.update { it.copy(error = e.message) }
+                    return@launchBusy
+                }
             prefs.token = token
             connectAndSync(token)
         }
@@ -1507,9 +1896,9 @@ class AppViewModel(
             Screen.CHAT -> backToChats()
             Screen.SHARE_PICK -> cancelShare()
             Screen.ABOUT -> _state.update { it.copy(screen = Screen.CHATS) }
+            Screen.TWOFA -> closeTwoFa()
             Screen.EDIT_PROFILE -> _state.update { it.copy(screen = Screen.USER) }
-            Screen.CODE, Screen.PASSWORD, Screen.REGISTER ->
-                _state.update { it.copy(screen = Screen.LOGIN, error = null) }
+            Screen.CODE, Screen.PASSWORD, Screen.REGISTER, Screen.LOGIN_RESTRICTED -> restartLogin()
             Screen.CHATS -> if (s.tab != Tab.CHATS) _state.update { it.copy(tab = Tab.CHATS) }
             else -> Unit
         }
@@ -1522,7 +1911,7 @@ class AppViewModel(
     ): Boolean =
         when (screen) {
             Screen.CHAT, Screen.USER, Screen.GROUP, Screen.CODE, Screen.PASSWORD, Screen.REGISTER,
-            Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE,
+            Screen.LOGIN_RESTRICTED, Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE, Screen.TWOFA,
             -> true
             Screen.CHATS -> tab != Tab.CHATS
             else -> false
@@ -2570,6 +2959,12 @@ class AppViewModel(
 
         // How long to wait after the last keystroke before writing a draft to storage.
         const val DRAFT_FLUSH_DELAY_MS = 800L
+
+        /** How long a typing hint stays up without a repeat push. */
+        const val TYPING_TTL_MS = 6_000L
+
+        /** Minimum gap between our own MSG_TYPING sends for one chat. */
+        const val TYPING_SEND_INTERVAL_MS = 5_000L
 
         // Minimum interval between warm-start snapshot writes.
         const val CACHE_WRITE_THROTTLE_MS = 1_000L

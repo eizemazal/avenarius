@@ -60,11 +60,9 @@ import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -90,6 +88,20 @@ data class Presence(
     val online: Boolean,
 )
 
+/** [userId] is typing in [chatId] (server push NOTIF_TYPING, opcode 129). */
+data class TypingEvent(
+    val chatId: Long,
+    val userId: Long,
+)
+
+/** State of the account's login password (2FA), from AUTH_2FA_DETAILS. Nulls = unknown. */
+data class TwoFaDetails(
+    val enabled: Boolean?,
+    val hint: String?,
+    /** Masked recovery e-mail, if one is linked. */
+    val email: String?,
+)
+
 /**
  * A live reaction-count change for a message (server push, opcode 155). The push
  * carries only aggregate counts (no "did I react"), so [reactions] always has
@@ -110,11 +122,30 @@ sealed interface CodeResult {
     data class NeedPassword(
         val trackId: String,
         val hint: String?,
+        /** Masked recovery e-mail, if the account has one (for the "forgot password" hint). */
+        val email: String? = null,
     ) : CodeResult
 
     /** This phone has no account yet — registration (a name) is required. */
     data object NeedRegister : CodeResult
+
+    /**
+     * The code was accepted, but the server refuses to sign this device in until the
+     * account has a login password — and none is set. It can only be created from a
+     * device that is already signed in (the official client shows the same dead end).
+     */
+    data object PasswordRequiredNotSet : CodeResult
 }
+
+/** The server rejected our login token outright: the session is dead, re-login is required. */
+class AuthRejectedException(
+    message: String,
+) : RuntimeException(message)
+
+/** The multi-step login (code → password) expired server-side; start over from the phone. */
+class AuthSessionExpiredException(
+    message: String,
+) : RuntimeException(message)
 
 /** A user resolved by phone lookup. */
 data class FoundUser(
@@ -145,6 +176,64 @@ interface MaxApi {
     val readMarks: SharedFlow<ReadMark>
     val presence: SharedFlow<Presence>
     val reactionUpdates: SharedFlow<ReactionUpdate>
+
+    /** Someone started/kept typing in a chat (NOTIF_TYPING). Defaults to silent for fakes. */
+    val typing: SharedFlow<TypingEvent> get() = MutableSharedFlow()
+
+    /** Tells the server we are typing in [chatId] (MSG_TYPING, opcode 65); best-effort. */
+    suspend fun sendTyping(chatId: Long) = Unit
+
+    // --- Login password (2FA) management, mirroring the official client's Settings →
+    // Безопасность → Пароль для входа. Every step is bound to a server-side "track"
+    // (AUTH_CREATE_TRACK) that the final AUTH_SET_2FA commits. Defaults throw so the
+    // demo/test fakes need not implement them.
+
+    /** Opens a 2FA change track; returns its id. */
+    suspend fun twoFaCreateTrack(): String = error("Недоступно в этом режиме")
+
+    /** Current password state (enabled, hint, recovery e-mail); [trackId] optional. */
+    suspend fun twoFaDetails(trackId: String?): TwoFaDetails = error("Недоступно в этом режиме")
+
+    /** Server-side password rules check; throws with the reason if it is not acceptable. */
+    suspend fun twoFaValidatePassword(
+        trackId: String,
+        password: String,
+    ): Unit = error("Недоступно в этом режиме")
+
+    suspend fun twoFaValidateHint(
+        trackId: String,
+        hint: String,
+    ): Unit = error("Недоступно в этом режиме")
+
+    /** Sends a verification code to [email]. */
+    suspend fun twoFaVerifyEmail(
+        trackId: String,
+        email: String,
+    ): Unit = error("Недоступно в этом режиме")
+
+    /** Confirms the e-mail with the [code] it received. */
+    suspend fun twoFaCheckEmail(
+        trackId: String,
+        code: String,
+    ): Unit = error("Недоступно в этом режиме")
+
+    /** Confirms the current password before changing/removing it; returns the track to use. */
+    suspend fun twoFaCheckPassword(
+        trackId: String,
+        password: String,
+    ): String = error("Недоступно в этом режиме")
+
+    /** Commits a new/updated password (+ optional hint / verified e-mail) on [trackId]. */
+    suspend fun twoFaSet(
+        trackId: String,
+        password: String,
+        hint: String?,
+        update: Boolean,
+        withEmail: Boolean,
+    ): Unit = error("Недоступно в этом режиме")
+
+    /** Turns the login password off on [trackId] (a password-confirmed track). */
+    suspend fun twoFaRemove(trackId: String): Unit = error("Недоступно в этом режиме")
 
     /** A chat that was created or updated (NOTIF_CHAT) — upsert it into the list. */
     val chatUpdates: SharedFlow<Chat>
@@ -184,8 +273,17 @@ interface MaxApi {
         isVideo: Boolean,
     ): CallSetup
 
-    /** Ends or declines the call [conversationId] on the Max socket (fire-and-forget). */
-    suspend fun hangupCall(conversationId: String)
+    /**
+     * Ends or declines the call [conversationId] on the Max socket. [reason] is one of
+     * the official client's hangup types — HUNGUP (ended after connecting), CANCELED
+     * (caller gave up before an answer), REJECTED (callee declined), MISSED — and is
+     * what the other side sees; [peerId] is the other participant.
+     */
+    suspend fun hangupCall(
+        conversationId: String,
+        reason: String,
+        peerId: Long?,
+    )
 
     /** Mutes or unmutes notifications for [chatId] (server `dontDisturbUntil`). */
     suspend fun setChatMuted(
@@ -570,9 +668,29 @@ class MaxClient : MaxApi {
         private const val OP_MARK_READ = 50
         private const val OP_SEND_MESSAGE = 64
         private const val OP_CHECK_PASSWORD = 115
+
+        // Login-password (2FA) management, as the official client names them.
+        private const val OP_AUTH_2FA_DETAILS = 104
+        private const val OP_AUTH_VALIDATE_PASSWORD = 107
+        private const val OP_AUTH_VALIDATE_HINT = 108
+        private const val OP_AUTH_VERIFY_EMAIL = 109
+        private const val OP_AUTH_CHECK_EMAIL = 110
+        private const val OP_AUTH_SET_2FA = 111
+        private const val OP_AUTH_CREATE_TRACK = 112
+        private const val OP_AUTH_CHECK_PASSWORD = 113
+
+        // AUTH_SET_2FA `expectedCapabilities` values (official enum x7j).
+        private const val CAP_SET_PASSWORD = 0
+        private const val CAP_UPDATE_PASSWORD = 1
+        private const val CAP_HINT = 3
+        private const val CAP_EMAIL = 4
+        private const val CAP_REMOVE_2FA = 5
+
         private const val OP_AUTH_QR_APPROVE = 290 // AUTH_QR_APPROVE: confirm a web/desktop login QR
         const val OP_NEW_MESSAGE = 128
         const val OP_MARK_UPDATE = 130 // server push: read/delivery marks changed
+        const val OP_NOTIF_TYPING = 129 // server push: someone is typing in a chat
+        private const val OP_MSG_TYPING = 65 // MSG_TYPING: we are typing
         const val OP_PRESENCE = 132 // server push: a contact's online state changed
         const val OP_REACTION_UPDATE = 155 // NOTIF_MSG_REACTIONS_CHANGED push
         const val OP_NOTIF_CHAT = 135 // NOTIF_CHAT push: a chat was created/updated (e.g. added to a group)
@@ -631,6 +749,8 @@ class MaxClient : MaxApi {
     /** Stream of live presence changes (server push, opcode 132). */
     private val _presence = MutableSharedFlow<Presence>(extraBufferCapacity = 64)
     override val presence: SharedFlow<Presence> = _presence
+    private val _typing = MutableSharedFlow<TypingEvent>(extraBufferCapacity = 64)
+    override val typing: SharedFlow<TypingEvent> = _typing
 
     /** Stream of live reaction-count changes (server push, opcode 155). */
     private val _reactionUpdates = MutableSharedFlow<ReactionUpdate>(extraBufferCapacity = 64)
@@ -677,50 +797,65 @@ class MaxClient : MaxApi {
         // (that would stack duplicate collectors on every refresh/reconnect).
         scope.launch {
             transport.events.collect { (opcode, payload) ->
-                when (opcode) {
-                    OP_NEW_MESSAGE -> {
-                        val chatId = payload["chatId"]?.jsonPrimitive?.long
-                        val msg = payload["message"]?.jsonObject
-                        if (chatId != null && msg != null) parseMessage(msg, chatId)?.let { _incoming.emit(it) }
-                    }
-                    OP_MARK_UPDATE -> {
-                        val chatId = payload["chatId"]?.jsonPrimitive?.longOrNullSafe()
-                        val mark = payload["mark"]?.jsonPrimitive?.longOrNullSafe()
-                        val userId = payload["userId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
-                        if (chatId != null && mark != null) _readMarks.emit(ReadMark(chatId, userId, mark))
-                    }
-                    OP_PRESENCE -> parsePresence(payload)?.let { _presence.emit(it) }
-                    OP_REACTION_UPDATE -> parseReactionUpdate(payload)?.let { _reactionUpdates.emit(it) }
-                    OP_NOTIF_CHAT -> {
-                        // {chat: {...}} — a chat was created or updated (new dialog, added to a group).
-                        payload["chat"]?.jsonObject?.let { parseChat(it, emptyMap()) }?.let { _chatUpdates.emit(it) }
-                    }
-                    OP_NOTIF_ATTACH -> {
-                        // {videoId} or {fileId} — an uploaded media finished processing.
-                        payload["videoId"]?.jsonPrimitive?.longOrNullSafe()?.let { videoReadyFlow.emit(it) }
-                        payload["fileId"]?.jsonPrimitive?.longOrNullSafe()?.let { fileReadyFlow.emit(it) }
-                    }
-                    OP_NOTIF_MSG_DELETE -> {
-                        // The chat id is nested under `chat` (no top-level chatId); messageIds is top-level.
-                        val chatId =
-                            payload["chatId"]?.jsonPrimitive?.longOrNullSafe()
-                                ?: payload["chat"]
-                                    ?.jsonObject
-                                    ?.get("id")
-                                    ?.jsonPrimitive
-                                    ?.longOrNullSafe()
-                        val ids =
-                            buildList {
-                                payload["messageIds"]
-                                    ?.jsonArray
-                                    ?.forEach { it.jsonPrimitive.longOrNullSafe()?.let { id -> add(id.toString()) } }
-                                payload["messageId"]?.jsonPrimitive?.longOrNullSafe()?.let { add(it.toString()) }
-                            }
-                        if (chatId != null && ids.isNotEmpty()) _deletions.emit(MessageDeletion(chatId, ids))
-                    }
-                    OP_NOTIF_CALL_START -> parseIncomingCall(payload)?.let { _incomingCalls.emit(it) }
-                }
+                // One malformed push must not kill this collector: it is created once per
+                // process, and losing it silently ends all realtime updates (messages,
+                // read marks, presence, upload completions, incoming calls) until restart.
+                runCatching { handlePush(opcode, payload) }
             }
+        }
+    }
+
+    private suspend fun handlePush(
+        opcode: Int,
+        payload: JsonObject,
+    ) {
+        when (opcode) {
+            OP_NEW_MESSAGE -> {
+                val chatId = payload["chatId"]?.jsonPrimitive?.longOrNullSafe()
+                val msg = payload["message"] as? JsonObject
+                if (chatId != null && msg != null) parseMessage(msg, chatId)?.let { _incoming.emit(it) }
+            }
+            OP_MARK_UPDATE -> {
+                val chatId = payload["chatId"]?.jsonPrimitive?.longOrNullSafe()
+                val mark = payload["mark"]?.jsonPrimitive?.longOrNullSafe()
+                val userId = payload["userId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
+                if (chatId != null && mark != null) _readMarks.emit(ReadMark(chatId, userId, mark))
+            }
+            OP_PRESENCE -> parsePresence(payload)?.let { _presence.emit(it) }
+            OP_NOTIF_TYPING -> {
+                // {chatId, userId, type?} — `type` names the attach being composed; we
+                // show a single "печатает…" regardless.
+                val chatId = payload["chatId"]?.jsonPrimitive?.longOrNullSafe()
+                val userId = payload["userId"]?.jsonPrimitive?.longOrNullSafe()
+                if (chatId != null && userId != null && userId != myId) _typing.emit(TypingEvent(chatId, userId))
+            }
+            OP_REACTION_UPDATE -> parseReactionUpdate(payload)?.let { _reactionUpdates.emit(it) }
+            OP_NOTIF_CHAT -> {
+                // {chat: {...}} — a chat was created or updated (new dialog, added to a group).
+                (payload["chat"] as? JsonObject)?.let { parseChat(it, emptyMap()) }?.let { _chatUpdates.emit(it) }
+            }
+            OP_NOTIF_ATTACH -> {
+                // {videoId} or {fileId} — an uploaded media finished processing.
+                payload["videoId"]?.jsonPrimitive?.longOrNullSafe()?.let { videoReadyFlow.emit(it) }
+                payload["fileId"]?.jsonPrimitive?.longOrNullSafe()?.let { fileReadyFlow.emit(it) }
+            }
+            OP_NOTIF_MSG_DELETE -> {
+                // The chat id is nested under `chat` (no top-level chatId); messageIds is top-level.
+                val chatId =
+                    payload["chatId"]?.jsonPrimitive?.longOrNullSafe()
+                        ?: (payload["chat"] as? JsonObject)
+                            ?.get("id")
+                            ?.jsonPrimitive
+                            ?.longOrNullSafe()
+                val ids =
+                    buildList {
+                        (payload["messageIds"] as? JsonArray)
+                            ?.forEach { (it as? JsonPrimitive)?.longOrNullSafe()?.let { id -> add(id.toString()) } }
+                        payload["messageId"]?.jsonPrimitive?.longOrNullSafe()?.let { add(it.toString()) }
+                    }
+                if (chatId != null && ids.isNotEmpty()) _deletions.emit(MessageDeletion(chatId, ids))
+            }
+            OP_NOTIF_CALL_START -> parseIncomingCall(payload)?.let { _incomingCalls.emit(it) }
         }
     }
 
@@ -775,7 +910,7 @@ class MaxClient : MaxApi {
         c: JsonObject,
         names: Map<Long, String>,
     ): Chat? {
-        val id = c["id"]?.jsonPrimitive?.long ?: return null
+        val id = c["id"]?.jsonPrimitive?.longOrNullSafe() ?: return null
         val type = c["type"]?.jsonPrimitive?.contentOrNullSafe()
         val rawTitle = c["title"]?.jsonPrimitive?.contentOrNullSafe()
         // Parsed rather than read straight off `text`, so a photo/file/voice message
@@ -962,13 +1097,30 @@ class MaxClient : MaxApi {
         isVideo: Boolean,
     ): CallSetup = videoChatStartActive(conversationId, listOf(peerId), isVideo)
 
-    override suspend fun hangupCall(conversationId: String) {
+    override suspend fun hangupCall(
+        conversationId: String,
+        reason: String,
+        peerId: Long?,
+    ) {
+        // Same shape as the official client's VIDEO_CHAT_HANGUP: without `reason` and
+        // `internalParams` the server ignores the request, and the peer keeps ringing.
         runCatching {
-            transport.notify(
+            transport.request(
                 OP_VIDEO_CHAT_HANGUP,
-                buildJsonObject { put("conversationId", conversationId) },
+                buildJsonObject {
+                    put("conversationId", conversationId)
+                    put("reason", reason)
+                    if (peerId != null) put("peerId", peerId.toString())
+                    put("internalParams", callInternalParams())
+                },
+                timeoutMs = 10_000,
             )
         }
+    }
+
+    override suspend fun sendTyping(chatId: Long) {
+        // Fire-and-forget like the official client; a reply, if any, is just ignored.
+        runCatching { transport.notify(OP_MSG_TYPING, buildJsonObject { put("chatId", chatId) }) }
     }
 
     override suspend fun setChatMuted(
@@ -1000,30 +1152,31 @@ class MaxClient : MaxApi {
         calleeIds: List<Long>,
         isVideo: Boolean,
     ): CallSetup {
-        val internalParams =
-            buildJsonObject {
-                put("platform", "ANDROID")
-                put("sdkVersion", CALLS_SDK_VERSION)
-                put("clientAppKey", CALLS_CLIENT_APP_KEY)
-                put("deviceId", sessionDeviceId ?: CALLS_FALLBACK_DEVICE_ID)
-                put("protocolVersion", CALLS_PROTOCOL_VERSION)
-                put("onlyAdminCanRecord", false)
-                put("waitForAdmin", false)
-                put("capabilities", CALLS_CAPABILITIES)
-            }.toString()
-
         val reply =
             transport.request(
                 OP_VIDEO_CHAT_START_ACTIVE,
                 buildJsonObject {
                     put("conversationId", conversationId)
                     putJsonArray("calleeIds") { calleeIds.forEach { add(it) } }
-                    put("internalParams", internalParams)
+                    put("internalParams", callInternalParams())
                     put("isVideo", isVideo)
                 },
             )
         return parseCallSetup(conversationId, reply)
     }
+
+    /** The calls-SDK descriptor the official client attaches to every call command. */
+    private fun callInternalParams(): String =
+        buildJsonObject {
+            put("platform", "ANDROID")
+            put("sdkVersion", CALLS_SDK_VERSION)
+            put("clientAppKey", CALLS_CLIENT_APP_KEY)
+            put("deviceId", sessionDeviceId ?: CALLS_FALLBACK_DEVICE_ID)
+            put("protocolVersion", CALLS_PROTOCOL_VERSION)
+            put("onlyAdminCanRecord", false)
+            put("waitForAdmin", false)
+            put("capabilities", CALLS_CAPABILITIES)
+        }.toString()
 
     /** Parses the VIDEO_CHAT_START_ACTIVE reply (its `internalCallerParams` JSON string). */
     private fun parseCallSetup(
@@ -1072,11 +1225,17 @@ class MaxClient : MaxApi {
                 )
             }
         authToken = payload["token"]?.jsonPrimitive?.contentOrNullSafe()
-        if (authToken == null) error(payload.serverMessage("Не удалось отправить код"))
-        return payload["codeLength"]?.jsonPrimitive?.int ?: 6
+        if (authToken == null) throw authFailure(payload, "Не удалось отправить код")
+        return payload["codeLength"]?.jsonPrimitive?.intOrNullSafe() ?: 6
     }
 
-    /** Submits the SMS code. Either logs in, or signals that a 2FA password is needed. */
+    /**
+     * Submits the SMS code. Mirrors the official client's branching on the reply:
+     * `tokenAttrs.LOGIN` → signed in; `passwordChallenge` → the account's login
+     * password is required; `tokenAttrs.REGISTER` → new account; an error → shown;
+     * and none of the above → the server enforces a login password this account
+     * doesn't have yet ([CodeResult.PasswordRequiredNotSet]).
+     */
     override suspend fun checkCode(code: String): CodeResult {
         val token = authToken ?: error("Сначала запросите код")
         val payload =
@@ -1089,14 +1248,17 @@ class MaxClient : MaxApi {
                 },
             )
         payload.loginToken()?.let { return CodeResult.Success(it) }
-        payload.passwordTrackId()?.let { return CodeResult.NeedPassword(it, payload.passwordHint()) }
+        payload.passwordTrackId()?.let {
+            return CodeResult.NeedPassword(it, payload.passwordHint(), payload.passwordEmail())
+        }
         // New, unregistered phone: the server returns a REGISTER token + preset avatars.
         payload.registerToken()?.let { regToken ->
             authToken = regToken
             payload.firstPresetAvatarId()?.let { registerPhotoId = it }
             return CodeResult.NeedRegister
         }
-        error(payload.serverMessage("Неверный код"))
+        if (payload.isErrorReply()) throw authFailure(payload, "Неверный код")
+        return CodeResult.PasswordRequiredNotSet
     }
 
     /** Completes registration of a new account with [firstName]. Returns the login token. */
@@ -1119,7 +1281,7 @@ class MaxClient : MaxApi {
         // The login token may come back under tokenAttrs.LOGIN or as a top-level field.
         return payload.loginToken()
             ?: payload["token"]?.jsonPrimitive?.contentOrNullSafe()
-            ?: error(payload.serverMessage("Не удалось зарегистрироваться"))
+            ?: throw authFailure(payload, "Не удалось зарегистрироваться")
     }
 
     /** Submits the 2FA cloud password. Returns the login token; throws on failure. */
@@ -1135,7 +1297,183 @@ class MaxClient : MaxApi {
                     put("trackId", trackId)
                 },
             )
-        return payload.loginToken() ?: error(payload.serverMessage("Неверный пароль"))
+        payload.loginToken()?.let { return it }
+        if (payload.isErrorReply()) throw authFailure(payload, "Неверный пароль")
+        // Accepted but no token — the official client treats this as a failed sign-in too.
+        error("Не удалось войти в профиль, попробуйте ещё раз")
+    }
+
+    /**
+     * Turns a login-step error reply into the exception the UI should see: known
+     * server codes (as the official client names them) get a proper message, and the
+     * codes that mean "this login attempt is over" become [AuthSessionExpiredException]
+     * so the flow restarts from the phone number instead of retrying a dead track.
+     */
+    private fun authFailure(
+        payload: JsonObject,
+        default: String,
+    ): Exception {
+        val code = payload.errorCode()
+        return when (code) {
+            "login.token", "track.not.found", "phone.not.checked" ->
+                AuthSessionExpiredException("Время на вход истекло, запросите код ещё раз")
+            "login.blocked" -> IllegalStateException("Вход временно заблокирован, попробуйте позже")
+            "login.flood", "too.many.requests" -> IllegalStateException("Слишком много попыток, попробуйте позже")
+            "password2fa.wrong" -> IllegalStateException("Неверный пароль")
+            "password.invalid" -> IllegalStateException("Пароль не подходит: ${payload.serverMessage("попробуйте другой")}")
+            "password2fa.no.attempts" ->
+                AuthSessionExpiredException("Попытки ввода пароля исчерпаны. Попробуйте войти позже")
+            "hint.invalid" -> IllegalStateException("Подсказка не подходит: она не должна совпадать с паролем")
+            "email.wrong" -> IllegalStateException("Неверный код из письма")
+            "email.compromised" -> IllegalStateException("Эту почту нельзя использовать для восстановления")
+            "verify.code.wrong", "code.invalid" -> IllegalStateException("Неверный код")
+            else -> IllegalStateException(payload.serverMessage(default))
+        }
+    }
+
+    /** Returns the reply, or throws the mapped auth error when it is an error frame. */
+    private fun JsonObject.orAuthFailure(default: String): JsonObject {
+        if (isErrorReply()) throw authFailure(this, default)
+        return this
+    }
+
+    // ---------------------------------------------------------------------
+    // Login password (2FA) management
+    // ---------------------------------------------------------------------
+
+    override suspend fun twoFaCreateTrack(): String {
+        val payload =
+            transport
+                .request(OP_AUTH_CREATE_TRACK, buildJsonObject { put("type", 0) })
+                .orAuthFailure("Не удалось начать настройку пароля")
+        return payload["trackId"]?.jsonPrimitive?.contentOrNullSafe()
+            ?: error("Не удалось начать настройку пароля")
+    }
+
+    override suspend fun twoFaDetails(trackId: String?): TwoFaDetails {
+        val payload =
+            transport
+                .request(OP_AUTH_2FA_DETAILS, buildJsonObject { if (!trackId.isNullOrEmpty()) put("trackId", trackId) })
+                .orAuthFailure("Не удалось получить настройки пароля")
+        // `password` = the official client's PasswordDetails {enabled, hint, email}.
+        return when (val p = payload["password"]) {
+            is JsonObject ->
+                TwoFaDetails(
+                    enabled = (p["enabled"] as? JsonPrimitive)?.asBoolean(),
+                    hint = p["hint"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null },
+                    email = p["email"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null },
+                )
+            is JsonPrimitive -> TwoFaDetails(enabled = p.asBoolean(), hint = null, email = null)
+            else -> TwoFaDetails(enabled = null, hint = null, email = null)
+        }
+    }
+
+    override suspend fun twoFaValidatePassword(
+        trackId: String,
+        password: String,
+    ) {
+        transport
+            .request(
+                OP_AUTH_VALIDATE_PASSWORD,
+                buildJsonObject {
+                    put("trackId", trackId)
+                    put("password", password)
+                },
+            ).orAuthFailure("Пароль не подходит")
+    }
+
+    override suspend fun twoFaValidateHint(
+        trackId: String,
+        hint: String,
+    ) {
+        transport
+            .request(
+                OP_AUTH_VALIDATE_HINT,
+                buildJsonObject {
+                    put("trackId", trackId)
+                    put("hint", hint)
+                },
+            ).orAuthFailure("Подсказка не подходит")
+    }
+
+    override suspend fun twoFaVerifyEmail(
+        trackId: String,
+        email: String,
+    ) {
+        transport
+            .request(
+                OP_AUTH_VERIFY_EMAIL,
+                buildJsonObject {
+                    put("trackId", trackId)
+                    put("email", email)
+                },
+            ).orAuthFailure("Не удалось отправить код на почту")
+    }
+
+    override suspend fun twoFaCheckEmail(
+        trackId: String,
+        code: String,
+    ) {
+        transport
+            .request(
+                OP_AUTH_CHECK_EMAIL,
+                buildJsonObject {
+                    put("trackId", trackId)
+                    put("verifyCode", code)
+                },
+            ).orAuthFailure("Неверный код из письма")
+    }
+
+    override suspend fun twoFaCheckPassword(
+        trackId: String,
+        password: String,
+    ): String {
+        val payload =
+            transport
+                .request(
+                    OP_AUTH_CHECK_PASSWORD,
+                    buildJsonObject {
+                        put("trackId", trackId)
+                        put("password", password)
+                    },
+                ).orAuthFailure("Неверный пароль")
+        // The reply carries the (password-confirmed) track to continue on.
+        return payload["trackId"]?.jsonPrimitive?.contentOrNullSafe() ?: trackId
+    }
+
+    override suspend fun twoFaSet(
+        trackId: String,
+        password: String,
+        hint: String?,
+        update: Boolean,
+        withEmail: Boolean,
+    ) {
+        transport
+            .request(
+                OP_AUTH_SET_2FA,
+                buildJsonObject {
+                    put("trackId", trackId)
+                    put("password", password)
+                    if (!hint.isNullOrBlank()) put("hint", hint)
+                    putJsonArray("expectedCapabilities") {
+                        add(if (update) CAP_UPDATE_PASSWORD else CAP_SET_PASSWORD)
+                        if (!hint.isNullOrBlank()) add(CAP_HINT)
+                        if (withEmail) add(CAP_EMAIL)
+                    }
+                },
+            ).orAuthFailure("Не удалось установить пароль")
+    }
+
+    override suspend fun twoFaRemove(trackId: String) {
+        transport
+            .request(
+                OP_AUTH_SET_2FA,
+                buildJsonObject {
+                    put("trackId", trackId)
+                    put("remove2fa", true)
+                    putJsonArray("expectedCapabilities") { add(CAP_REMOVE_2FA) }
+                },
+            ).orAuthFailure("Не удалось отключить пароль")
     }
 
     // ---------------------------------------------------------------------
@@ -1287,7 +1625,13 @@ class MaxClient : MaxApi {
                 },
             )
 
-        payload["error"]?.let { error(payload.serverMessage("Ошибка синхронизации")) }
+        payload.errorCode()?.let { code ->
+            val message = payload.serverMessage("Ошибка синхронизации")
+            // These mean the token itself is dead (revoked, expired, account blocked) —
+            // the caller must drop the session and re-login rather than keep retrying.
+            if (code == "login.token" || code == "auth.token" || code == "login.blocked") throw AuthRejectedException(message)
+            error(message)
+        }
 
         val rawChats = payload["chats"]?.jsonArray.orEmptyList().map { it.jsonObject }
 
@@ -1329,6 +1673,7 @@ class MaxClient : MaxApi {
                 firstName = me?.name ?: "Я",
                 lastName = null,
                 avatarUrl = me?.avatarUrl,
+                twoFaEnabled = me?.twoFaEnabled,
             )
         val contactsList = fetched.filter { it.id != myId }.sortedBy { it.name.lowercase() }
 
@@ -2100,6 +2445,7 @@ class MaxClient : MaxApi {
                                     width = w,
                                     height = h,
                                     videoId = a["videoId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L,
+                                    durationSec = a["duration"]?.jsonPrimitive?.intOrNullSafe() ?: 0,
                                     // A round video message carries a videoType; an
                                     // unexpected value simply renders as a plain video.
                                     isVideoNote =
@@ -2400,6 +2746,16 @@ private fun JsonObject.passwordTrackId(): String? {
 /** Optional password hint from the passwordChallenge. */
 private fun JsonObject.passwordHint(): String? = (this["passwordChallenge"] as? JsonObject)?.get("hint")?.jsonPrimitive?.contentOrNullSafe()
 
+/** Masked recovery e-mail from the passwordChallenge (shown so the user knows recovery exists). */
+private fun JsonObject.passwordEmail(): String? =
+    (this["passwordChallenge"] as? JsonObject)?.get("email")?.jsonPrimitive?.contentOrNullSafe()
+
+/** The server's dotted error code (`error` field), e.g. `login.token`, if this is an error reply. */
+private fun JsonObject.errorCode(): String? = (this["error"] as? JsonPrimitive)?.contentOrNullSafe()
+
+/** True for an error frame's payload: `{error, message, localizedMessage?}`. */
+private fun JsonObject.isErrorReply(): Boolean = errorCode() != null || this["message"] != null || this["localizedMessage"] != null
+
 /** Maps the server's localization-key placeholders to Russian text. */
 private val LOCALIZED_TEXT =
     mapOf(
@@ -2453,8 +2809,12 @@ private fun JsonObject.displayName(): String? {
     return listOfNotNull(first, last).joinToString(" ").ifBlank { null }
 }
 
-/** A presence object means "online" when it carries a [status] (offline = only `seen`). */
-private fun JsonObject.isOnline(): Boolean = (this["status"]?.jsonPrimitive?.intOrNullSafe() ?: 0) >= 1
+/**
+ * A presence object means "online" only when its `status` is 1. The official client's
+ * values: 0 offline (only `seen` present), 1 online, 2 "was recently", 3 "was long ago"
+ * — 2 and 3 must not light the green dot.
+ */
+private fun JsonObject.isOnline(): Boolean = (this["status"]?.jsonPrimitive?.intOrNullSafe() ?: 0) == 1
 
 /** Best available avatar URL from a user/contact/chat object. */
 private fun JsonObject.avatarUrl(): String? =
@@ -2475,5 +2835,16 @@ private fun parseUser(o: JsonObject): UserInfo? {
         link = o["link"]?.jsonPrimitive?.contentOrNullSafe(),
         country = o["country"]?.jsonPrimitive?.contentOrNullSafe(),
         registrationTime = o["registrationTime"]?.jsonPrimitive?.longOrNullSafe(),
+        // NOTE: a contact's `options` is a different enum from the profile's second-factor
+        // options (which only the login-time `profile` object carries), so the password
+        // state is not derivable here — it comes from AUTH_2FA_DETAILS instead.
     )
 }
+
+/** MessagePack booleans decode as `true`/`false`; some servers send 0/1 — accept both. */
+private fun JsonPrimitive.asBoolean(): Boolean? =
+    when (contentOrNullSafe()) {
+        "true", "1" -> true
+        "false", "0" -> false
+        else -> null
+    }

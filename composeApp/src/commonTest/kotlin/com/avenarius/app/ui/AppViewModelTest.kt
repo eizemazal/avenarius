@@ -125,7 +125,11 @@ private class FakeMaxClient : MaxApi {
         isVideo: Boolean,
     ): CallSetup = error("not used in tests")
 
-    override suspend fun hangupCall(conversationId: String) = Unit
+    override suspend fun hangupCall(
+        conversationId: String,
+        reason: String,
+        peerId: Long?,
+    ) = Unit
 
     var mutedChats = mutableSetOf<Long>()
 
@@ -2043,6 +2047,18 @@ class AppViewModelTest {
         val vm = viewModel()
         vm.submitCode("123456")
         assertEquals(Screen.REGISTER, vm.state.value.screen)
+    }
+
+    @Test
+    fun submitCodePasswordRequiredNotSetShowsRestrictedScreenAndRetryReturnsToLogin() {
+        fake.codeResult = CodeResult.PasswordRequiredNotSet
+        val vm = viewModel()
+        vm.submitCode("123456")
+        assertEquals(Screen.LOGIN_RESTRICTED, vm.state.value.screen)
+        assertNull(prefs.token)
+        vm.restartLogin()
+        assertEquals(Screen.LOGIN, vm.state.value.screen)
+        assertNull(vm.state.value.error)
     }
 
     @Test

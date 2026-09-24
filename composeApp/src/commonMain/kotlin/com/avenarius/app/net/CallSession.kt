@@ -8,8 +8,12 @@ import com.avenarius.app.model.CallState
 import com.avenarius.app.model.CallStatus
 import com.avenarius.app.model.IncomingCall
 import io.ktor.client.HttpClient
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,7 +38,12 @@ class CallSession(
     private val nowMs: () -> Long,
     private val httpFactory: () -> HttpClient = ::createHttpClient,
 ) {
-    private val scope = CoroutineScope(SupervisorJob())
+    // Swallow stray failures: an uncaught exception in a plain scope goes to the
+    // thread's default handler and, on Android, kills the process mid-call.
+    private val scope = CoroutineScope(SupervisorJob() + CoroutineExceptionHandler { _, _ -> })
+
+    /** Parent of the per-call collectors, cancelled in [end] before the engine is torn down. */
+    private var callJob: Job? = null
 
     private val _state = MutableStateFlow<CallState?>(null)
     val state: StateFlow<CallState?> = _state.asStateFlow()
@@ -67,6 +76,18 @@ class CallSession(
 
     /** Set for an inbound call awaiting accept/decline (STAGE-1 setup not fetched yet). */
     private var pendingIncoming: IncomingCall? = null
+
+    /** Caller name/avatar supplied by the UI layer, keyed by conversationId (see [setPeerInfo]). */
+    private val peerInfo = HashMap<String, Pair<String?, String?>>()
+
+    /** Ends an unanswered inbound call after [RING_TIMEOUT_MS]. */
+    private var ringTimeoutJob: Job? = null
+
+    init {
+        // The session — not the ViewModel — owns inbound calls, so a call still rings
+        // (via the platform service) when the Activity and its ViewModel are gone.
+        scope.launch { api.incomingCalls.collect { onIncomingCall(it) } }
+    }
 
     // ------------------------------------------------------------------ outgoing
 
@@ -111,6 +132,7 @@ class CallSession(
     ) {
         if (_state.value != null) return
         pendingIncoming = call
+        val known = peerInfo.remove(call.conversationId)
         _state.value =
             CallState(
                 conversationId = call.conversationId,
@@ -119,10 +141,36 @@ class CallSession(
                 kind = call.kind,
                 direction = CallDirection.INCOMING,
                 status = CallStatus.RINGING,
-                peerName = peerName ?: call.callerName,
-                peerAvatarUrl = peerAvatarUrl ?: call.callerAvatarUrl,
+                peerName = peerName ?: known?.first ?: call.callerName,
+                peerAvatarUrl = peerAvatarUrl ?: known?.second ?: call.callerAvatarUrl,
                 media = CallMediaState(cameraEnabled = call.kind == CallKind.VIDEO),
             )
+        // The caller cancelling before we answer arrives over no channel we listen to
+        // yet, so an unanswered call must time out on its own instead of ringing forever.
+        ringTimeoutJob?.cancel()
+        ringTimeoutJob =
+            scope.launch {
+                delay(RING_TIMEOUT_MS)
+                if (_state.value?.status == CallStatus.RINGING) end("Пропущенный звонок")
+            }
+    }
+
+    /**
+     * Supplies the caller's display name/avatar for [conversationId]. Applied to the
+     * ringing call if it is already up, otherwise remembered for when its push lands
+     * (the UI resolves names from its contact list; the push carries only an id).
+     */
+    fun setPeerInfo(
+        conversationId: String,
+        peerName: String?,
+        peerAvatarUrl: String?,
+    ) {
+        val cur = _state.value
+        if (cur != null && cur.conversationId == conversationId) {
+            _state.value = cur.copy(peerName = peerName ?: cur.peerName, peerAvatarUrl = peerAvatarUrl ?: cur.peerAvatarUrl)
+        } else {
+            peerInfo[conversationId] = peerName to peerAvatarUrl
+        }
     }
 
     /** Accepts the ringing inbound call. */
@@ -143,9 +191,9 @@ class CallSession(
 
     /** Declines the ringing inbound call. */
     fun decline() {
-        val id = pendingIncoming?.conversationId
+        val call = pendingIncoming
         pendingIncoming = null
-        if (id != null) scope.launch { runCatching { api.hangupCall(id) } }
+        if (call != null) scope.launch { runCatching { api.hangupCall(call.conversationId, "REJECTED", call.callerId) } }
         end("Отклонён")
     }
 
@@ -162,8 +210,13 @@ class CallSession(
         engine = eng
         val sig = CallSignaling(s, tgt, httpFactory())
         signaling = sig
+        val job = SupervisorJob(scope.coroutineContext[Job])
+        callJob = job
+        // Collectors run under [job] so end() can cancel them *before* disposing the
+        // PeerConnection — a late SDP/candidate hitting a disposed native peer is a SIGSEGV.
+        val calls = CoroutineScope(scope.coroutineContext + job)
 
-        scope.launch {
+        calls.launch {
             eng.events.collect { ev ->
                 when (ev) {
                     is CallEngineEvent.LocalCandidate ->
@@ -178,23 +231,27 @@ class CallSession(
                 }
             }
         }
-        scope.launch {
+        calls.launch {
             sig.remoteSdp.collect { r ->
                 if (remoteParticipantId == 0L) remoteParticipantId = r.participantId
-                eng.setRemoteDescription(r.type, r.sdp)
-                if (r.type == "offer") {
-                    sig.sendSdp(r.participantId, "answer", eng.createAnswer())
-                }
+                // setRemoteDescription/createAnswer reject (e.g. an SFU re-offer in the
+                // wrong signaling state); that ends the call, it must not throw out of here.
+                runCatching {
+                    eng.setRemoteDescription(r.type, r.sdp)
+                    if (r.type == "offer") {
+                        sig.sendSdp(r.participantId, "answer", eng.createAnswer())
+                    }
+                }.onFailure { end("Сбой соединения") }
             }
         }
-        scope.launch {
+        calls.launch {
             sig.remoteCandidate.collect { c ->
                 if (remoteParticipantId == 0L) remoteParticipantId = c.participantId
-                eng.addRemoteCandidate(c.candidate, c.sdpMid, c.sdpMLineIndex)
+                runCatching { eng.addRemoteCandidate(c.candidate, c.sdpMid, c.sdpMLineIndex) }
             }
         }
         val caller = tgt == "start"
-        scope.launch {
+        calls.launch {
             sig.events.collect { e ->
                 when (e) {
                     is CallSignaling.SignalingEvent.PeerRegistered -> {
@@ -205,12 +262,7 @@ class CallSession(
                         if (remoteParticipantId == 0L) remoteParticipantId = e.participantId
                         if (caller) maybeSendOffer(eng, sig)
                     }
-                    is CallSignaling.SignalingEvent.Hungup -> {
-                        // The peer ended it. Map the raw technical reason (HUNGUP/CANCELED/…)
-                        // to a friendly message; only surface a distinct text for a failure.
-                        val reason = if (e.reason == "FAILED") "Не удалось соединиться" else "Звонок завершён"
-                        end(reason)
-                    }
+                    is CallSignaling.SignalingEvent.Hungup -> end(peerEndReason(e.reason))
                     else -> Unit
                 }
             }
@@ -250,12 +302,40 @@ class CallSession(
 
     fun setSpeaker(on: Boolean) = _state.update { it?.copy(media = it.media.copy(speakerOn = on)) }
 
+    /**
+     * The text shown when the *peer* ended the call, from the SFU's hangup reason. A
+     * hangup that arrives before the call ever connected is the other side declining
+     * (or giving up), not a normal end — say so instead of "Звонок завершён".
+     */
+    private fun peerEndReason(raw: String?): String {
+        val s = _state.value
+        val connected = s?.status == CallStatus.ACTIVE
+        return when (raw?.uppercase()) {
+            "FAILED" -> "Не удалось соединиться"
+            "REJECTED", "DECLINED" -> "Вызов отклонён"
+            "BUSY" -> "Абонент занят"
+            "MISSED", "TIMEOUT", "NO_ANSWER" -> "Нет ответа"
+            "CANCELED", "CANCELLED" -> "Звонок отменён"
+            else ->
+                when {
+                    connected -> "Звонок завершён"
+                    s?.direction == CallDirection.OUTGOING -> "Вызов отклонён"
+                    else -> "Звонок отменён"
+                }
+        }
+    }
+
     /** Ends the current call (user hangup). */
     fun hangup() {
-        val id = _state.value?.conversationId
+        val s = _state.value
+        val id = s?.conversationId
+        // Before an answer, the caller is cancelling, not hanging up — the callee's
+        // history entry (and the official client's wording) depend on which.
+        val reason = if (s?.status == CallStatus.ACTIVE) "HUNGUP" else "CANCELED"
+        val sig = signaling
         scope.launch {
-            runCatching { signaling?.hangup() }
-            if (!id.isNullOrEmpty()) runCatching { api.hangupCall(id) }
+            runCatching { sig?.hangup(reason) }
+            if (!id.isNullOrEmpty()) runCatching { api.hangupCall(id, reason, s?.peerId) }
         }
         end(null)
     }
@@ -266,10 +346,20 @@ class CallSession(
         // would clobber the real reason with a spurious "Сбой соединения".
         if (_state.value?.status == CallStatus.ENDED) return
         _state.update { it?.copy(status = CallStatus.ENDED, endReason = reason) }
-        runCatching { signaling?.close() }
-        runCatching { engine?.close() }
+        ringTimeoutJob?.cancel()
+        ringTimeoutJob = null
+        callJob?.cancel()
+        callJob = null
+        val sig = signaling
+        val eng = engine
         signaling = null
         engine = null
+        // PeerConnection.dispose() blocks until the native signaling/network threads
+        // drain (up to seconds) — hangup is tapped on the main thread, so do it off it.
+        scope.launch(Dispatchers.Default) {
+            runCatching { sig?.close() }
+            runCatching { eng?.close() }
+        }
         setup = null
         pendingIncoming = null
         remoteParticipantId = 0L
@@ -279,5 +369,9 @@ class CallSession(
     /** Clears an ENDED call from state (after the UI has shown the end reason). */
     fun clear() {
         _state.value = null
+    }
+
+    private companion object {
+        const val RING_TIMEOUT_MS = 60_000L
     }
 }

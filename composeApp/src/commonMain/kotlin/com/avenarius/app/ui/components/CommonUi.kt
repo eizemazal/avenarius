@@ -42,7 +42,8 @@ internal fun CenteredSpinner() {
 
 private val UrlRegex =
     Regex(
-        """(https?://[^\s]+)|([\w.-]+\.(?:ru|com|org|net|me|io|info|app|tv|dev)(?:/[^\s]*)?)""",
+        // E-mails come before bare domains, otherwise "ivan@mail.ru" links only "mail.ru".
+        """(https?://[^\s]+)|([\w.+-]+@[\w-]+(?:\.[\w-]+)+)|([\w.-]+\.(?:ru|com|org|net|me|io|info|app|tv|dev)(?:/[^\s]*)?)""",
         RegexOption.IGNORE_CASE,
     )
 

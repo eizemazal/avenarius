@@ -75,11 +75,13 @@ import com.avenarius.app.ui.AppViewModel
 import com.avenarius.app.ui.Tab
 import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.clickableRow
+import com.avenarius.app.ui.formatListTime
 import com.avenarius.app.ui.qrScanSupported
 import com.avenarius.app.ui.rememberDeviceContacts
 import com.avenarius.app.ui.rememberQrScanLauncher
 import com.avenarius.app.ui.rememberSingleImagePickLauncher
 import com.avenarius.app.ui.theme.ThemeMode
+import com.avenarius.app.ui.typingText
 import androidx.compose.material3.Tab as MdTab
 
 @Composable
@@ -430,6 +432,10 @@ internal fun MainScreen(
                         peers = state.groupMembers,
                         online = state.onlineUsers,
                         drafts = state.drafts,
+                        typing =
+                            state.typing.keys
+                                .mapNotNull { id -> state.typingText(id, state.contacts)?.let { id to it } }
+                                .toMap(),
                         query = if (searchActive) chatQuery else "",
                         isRefreshing = state.refreshing,
                         onRefresh = vm::refresh,
@@ -448,6 +454,8 @@ internal fun MainScreen(
                         onConfirmWebLogin = vm::confirmWebLogin,
                         onOpenProfile = { state.account?.let { vm.openUser(it.userId) } },
                         onOpenAbout = vm::openAbout,
+                        twoFaEnabled = state.account?.twoFaEnabled,
+                        onOpenTwoFa = vm::openTwoFa,
                         onClearCache = vm::clearCache,
                         onRefreshCacheSize = vm::refreshCacheSize,
                         onLogout = vm::logout,
@@ -467,6 +475,8 @@ private fun ChatsTab(
     online: Set<Long>,
     /** Unsent text per chat, previewed instead of the last message. */
     drafts: Map<Long, String>,
+    /** "печатает…" per chat where someone is typing right now; shown over the preview. */
+    typing: Map<Long, String> = emptyMap(),
     query: String,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
@@ -533,14 +543,34 @@ private fun ChatsTab(
                         )
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(
-                                chat.title,
-                                style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    chat.title,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
+                                )
+                                if (chat.muted) {
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        "🔕",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
                             val draft = drafts[chat.id]?.takeIf { it.isNotBlank() }
-                            if (draft != null) {
+                            val typingHere = typing[chat.id]
+                            if (typingHere != null) {
+                                Text(
+                                    typingHere,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            } else if (draft != null) {
                                 Text(
                                     buildAnnotatedString {
                                         withStyle(SpanStyle(color = MaterialTheme.colorScheme.error)) {
@@ -566,9 +596,22 @@ private fun ChatsTab(
                                 }
                             }
                         }
-                        if (chat.unreadCount > 0) {
-                            Spacer(Modifier.width(8.dp))
-                            UnreadBadge(chat.unreadCount)
+                        Spacer(Modifier.width(8.dp))
+                        // Trailing column: last-activity time over the unread badge (as the
+                        // official list does), so a glance shows both recency and backlog.
+                        Column(horizontalAlignment = Alignment.End) {
+                            if (chat.lastEventTime > 0) {
+                                Text(
+                                    formatListTime(chat.lastEventTime),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                )
+                            }
+                            if (chat.unreadCount > 0) {
+                                Spacer(Modifier.height(4.dp))
+                                UnreadBadge(chat.unreadCount, muted = chat.muted)
+                            }
                         }
                     }
                     HorizontalDivider()
@@ -629,6 +672,9 @@ private fun SettingsTab(
     onClearCache: () -> Unit,
     onRefreshCacheSize: () -> Unit,
     onLogout: () -> Unit,
+    /** Login password (2FA) state for the "Пароль для входа" row; null = unknown yet. */
+    twoFaEnabled: Boolean? = null,
+    onOpenTwoFa: () -> Unit = {},
 ) {
     var confirmLogout by remember { mutableStateOf(false) }
     var confirmClearCache by remember { mutableStateOf(false) }
@@ -713,6 +759,28 @@ private fun SettingsTab(
             HorizontalDivider()
         }
 
+        // Security: the login password (2FA), as in the official Settings → Безопасность.
+        if (!demoMode) {
+            Row(
+                Modifier.fillMaxWidth().clickableRow(onOpenTwoFa).padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Пароль для входа", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        when (twoFaEnabled) {
+                            true -> "Включён"
+                            false -> "Отключён"
+                            null -> "Дополнительная защита профиля"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            HorizontalDivider()
+        }
+
         // Settings block.
         Text("Тема оформления", style = MaterialTheme.typography.titleMedium)
         Column(Modifier.selectableGroup()) {
@@ -788,10 +856,16 @@ private fun formatBytes(bytes: Long): String =
     }
 
 @Composable
-private fun UnreadBadge(count: Int) {
+private fun UnreadBadge(
+    count: Int,
+    muted: Boolean = false,
+) {
+    // Muted chats get a grey badge so they don't compete with the ones that ring.
+    val bg = if (muted) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primary
+    val fg = if (muted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimary
     Box(
-        Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.primary).padding(horizontal = 7.dp, vertical = 2.dp),
+        Modifier.clip(CircleShape).background(bg).padding(horizontal = 7.dp, vertical = 2.dp),
     ) {
-        Text("$count", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.labelSmall)
+        Text(if (count > 99) "99+" else "$count", color = fg, style = MaterialTheme.typography.labelSmall)
     }
 }

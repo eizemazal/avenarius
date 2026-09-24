@@ -1,5 +1,6 @@
 package com.avenarius.app
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -37,15 +39,20 @@ class CallService : Service() {
     ): Int {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    ID,
-                    notification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA,
-                )
+                // Android 14+ throws SecurityException if a declared type's runtime
+                // permission isn't granted *right now* — so only claim what we hold.
+                val type = grantedCaptureTypes(this)
+                if (type == 0) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                startForeground(ID, notification(), type)
             } else {
                 startForeground(ID, notification())
             }
-        } catch (e: IllegalStateException) {
+        } catch (e: Exception) {
+            // IllegalStateException (background start not allowed), SecurityException
+            // (permission race) — either way the call still runs, just not as a FGS.
             stopSelf()
             return START_NOT_STICKY
         }
@@ -73,17 +80,34 @@ class CallService : Service() {
         private const val CHANNEL = "avenarius_calls"
         private const val ID = 2
 
+        /** FGS type mask limited to the capture permissions currently granted. */
+        fun grantedCaptureTypes(context: Context): Int {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
+            var type = 0
+            if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            }
+            if (context.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            }
+            return type
+        }
+
         fun start(context: Context) {
             val intent = Intent(context, CallService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            // startForegroundService itself throws (ForegroundServiceStartNotAllowed) when
+            // the app isn't allowed to start one right now; the call works without it.
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
             }
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, CallService::class.java))
+            runCatching { context.stopService(Intent(context, CallService::class.java)) }
         }
     }
 }

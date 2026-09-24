@@ -44,7 +44,9 @@ import com.avenarius.app.ui.screens.MainScreen
 import com.avenarius.app.ui.screens.MediaViewerOverlay
 import com.avenarius.app.ui.screens.PasswordScreen
 import com.avenarius.app.ui.screens.RegisterScreen
+import com.avenarius.app.ui.screens.RestrictedLoginScreen
 import com.avenarius.app.ui.screens.SharePickScreen
+import com.avenarius.app.ui.screens.TwoFaScreen
 import com.avenarius.app.ui.screens.UserScreen
 import com.avenarius.app.ui.theme.AvenariusColorsDark
 import com.avenarius.app.ui.theme.AvenariusColorsLight
@@ -132,8 +134,28 @@ fun App(viewModel: AppViewModel) {
                                     busy = state.busy,
                                     error = state.error,
                                     hint = state.passwordHint,
+                                    email = state.passwordEmail,
                                     onSubmit = viewModel::submitPassword,
                                 )
+                            Screen.LOGIN_RESTRICTED -> RestrictedLoginScreen(onRetry = viewModel::restartLogin)
+                            Screen.TWOFA ->
+                                state.twoFa?.let { flow ->
+                                    TwoFaScreen(
+                                        flow = flow,
+                                        busy = state.busy,
+                                        error = flow.notice,
+                                        onBack = viewModel::closeTwoFa,
+                                        onStartSetup = viewModel::twoFaStartSetup,
+                                        onSubmitPassword = viewModel::twoFaSubmitPassword,
+                                        onSubmitHint = viewModel::twoFaSubmitHint,
+                                        onSubmitEmail = viewModel::twoFaSubmitEmail,
+                                        onSkipEmail = viewModel::twoFaSkipEmail,
+                                        onSubmitEmailCode = viewModel::twoFaSubmitEmailCode,
+                                        onCheckPassword = viewModel::twoFaCheckPassword,
+                                        onChangePassword = viewModel::twoFaChangePassword,
+                                        onDisable = viewModel::twoFaDisable,
+                                    )
+                                }
                             Screen.REGISTER ->
                                 RegisterScreen(
                                     busy = state.busy,
@@ -181,6 +203,11 @@ fun App(viewModel: AppViewModel) {
                                     sendingAttachment = state.sendingAttachment,
                                     stagedMedia = state.stagedMedia,
                                     initialDraft = state.draft,
+                                    typingText =
+                                        state.typingText(
+                                            state.currentChat?.id,
+                                            state.contacts + state.groupMembers.mapValues { it.value.name },
+                                        ),
                                     onLoadOlder = viewModel::loadOlder,
                                     onBack = viewModel::backToChats,
                                     onStartCall = viewModel::startCall,

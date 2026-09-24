@@ -29,9 +29,16 @@ actual fun shareMediaToOtherApps(
     val safeName = fileName.replace('/', '_').replace('\\', '_').ifBlank { "file" }
     shareScope.launch {
         runCatching {
-            val bytes = URL(url).openStream().use { it.readBytes() }
             val dir = File(context.cacheDir, "shared").apply { mkdirs() }
-            val file = File(dir, safeName).apply { writeBytes(bytes) }
+            val file = File(dir, safeName)
+            // Stream to disk: a shared video can be hundreds of MB, far beyond what
+            // readBytes() could hold in the heap without an OOM.
+            val conn =
+                URL(url).openConnection().apply {
+                    connectTimeout = 15_000
+                    readTimeout = 30_000
+                }
+            conn.getInputStream().use { input -> file.outputStream().use { out -> input.copyTo(out) } }
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
             val send =
                 Intent(Intent.ACTION_SEND).apply {

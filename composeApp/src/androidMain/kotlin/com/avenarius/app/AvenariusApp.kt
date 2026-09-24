@@ -3,6 +3,7 @@ package com.avenarius.app
 import android.app.Application
 import android.content.Context
 import com.avenarius.app.data.Prefs
+import com.avenarius.app.net.CallSession
 import com.avenarius.app.net.MaxClient
 import com.avenarius.app.ui.clearMediaTempFiles
 
@@ -19,6 +20,13 @@ object Session {
     lateinit var client: MaxClient
         private set
     lateinit var prefs: Prefs
+        private set
+
+    /**
+     * The call orchestrator, app-scoped for the same reason as [client]: an inbound
+     * call must ring (via [ConnectionService]) even when no Activity is alive.
+     */
+    lateinit var callSession: CallSession
         private set
 
     /** Application context, for work needing one outside an Activity (e.g. downloads). */
@@ -39,6 +47,7 @@ object Session {
         appContext = context.applicationContext
         prefs = Prefs(AndroidStorage(context.applicationContext))
         client = MaxClient()
+        callSession = CallSession(client, System::currentTimeMillis)
     }
 }
 

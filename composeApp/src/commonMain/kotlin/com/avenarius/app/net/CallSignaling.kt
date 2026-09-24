@@ -134,12 +134,18 @@ class CallSignaling(
                         if (!trimmed.startsWith("{")) return@consumeEach
                         runCatching { route(Json.parseToJsonElement(text).jsonObject) }
                     }
+                    // A clean server-side close completes the channel without throwing;
+                    // that is still the end of the call (otherwise the UI waits for ICE to notice).
+                    if (!closing) _events.tryEmit(SignalingEvent.Hungup("connection closed"))
                 } catch (t: Throwable) {
                     // socket closed / errored -> treat as hangup
-                    _events.tryEmit(SignalingEvent.Hungup("connection lost"))
+                    if (!closing) _events.tryEmit(SignalingEvent.Hungup("connection lost"))
                 }
             }
     }
+
+    /** Set by [close] so our own teardown isn't reported as a remote hangup. */
+    @Volatile private var closing = false
 
     private suspend fun route(msg: JsonObject) {
         val kind = msg["notification"]?.jsonPrimitive?.contentOrNull ?: msg["type"]?.jsonPrimitive?.contentOrNull
@@ -255,9 +261,16 @@ class CallSignaling(
     }
 
     fun close() {
+        closing = true
         receiveJob?.cancel()
-        scope.launch { runCatching { session?.close() } }
+        val s = session
         session = null
+        scope.launch {
+            runCatching { s?.close() }
+            // Each call gets its own HttpClient (OkHttp thread pool + dispatcher); it
+            // is only released by close(), otherwise every call leaks the threads.
+            runCatching { http.close() }
+        }
     }
 
     private companion object {

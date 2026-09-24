@@ -119,6 +119,7 @@ import com.avenarius.app.ui.rememberCameraVideoLauncher
 import com.avenarius.app.ui.rememberFilePickLauncher
 import com.avenarius.app.ui.rememberPhotoPickLauncher
 import com.avenarius.app.ui.rememberVoiceRecorder
+import com.avenarius.app.ui.sameDay
 import com.avenarius.app.ui.voiceRecordingSupported
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -141,6 +142,8 @@ internal fun ChatScreen(
     stagedMedia: List<PickedMedia>,
     /** The saved unsent text for this chat, restored into the input. */
     initialDraft: String,
+    /** "печатает…" line for the header, or null when nobody is typing. */
+    typingText: String? = null,
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     /** Starts a call with the dialog partner ([userId], [isVideo]). */
@@ -304,7 +307,17 @@ internal fun ChatScreen(
                     ) {
                         Avatar(chat?.title ?: "Чат", headingAvatar, 36.dp)
                         Spacer(Modifier.width(10.dp))
-                        Text(chat?.title ?: "Чат", maxLines = 1, style = MaterialTheme.typography.titleMedium)
+                        Column {
+                            Text(chat?.title ?: "Чат", maxLines = 1, style = MaterialTheme.typography.titleMedium)
+                            if (typingText != null) {
+                                Text(
+                                    typingText,
+                                    maxLines = 1,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
                     }
                 },
                 navigationIcon = {
@@ -619,6 +632,10 @@ internal fun ChatScreen(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 itemsIndexed(messages, key = { _, m -> m.id ?: m.cid ?: m.time }) { index, msg ->
+                    // A day chip at every date change, as the official client does; the
+                    // floating chip above still tracks the day while scrolling.
+                    val prevAny = messages.getOrNull(index - 1)
+                    if (prevAny == null || !sameDay(prevAny.time, msg.time)) ServiceMessageChip(formatDay(msg.time))
                     if (index == firstUnread && firstUnread > 0) NewMessagesDivider()
                     // Group service events ("X joined", "X added Y") render as a centered chip.
                     val service = msg.service
@@ -1753,8 +1770,31 @@ private fun MediaThumbnail(
             ) {
                 Icon(AppIcons.Play, contentDescription = "Воспроизвести", tint = Color.White, modifier = Modifier.size(28.dp))
             }
+            if (media.durationSec > 0) {
+                Text(
+                    formatDuration(media.durationSec),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier =
+                        Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(6.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0x88000000))
+                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                )
+            }
         }
     }
+}
+
+/** "m:ss" (or "h:mm:ss") for a video-length badge. */
+private fun formatDuration(totalSec: Int): String {
+    val h = totalSec / 3600
+    val m = totalSec % 3600 / 60
+    val s = totalSec % 60
+    val ss = s.toString().padStart(2, '0')
+    return if (h > 0) "$h:${m.toString().padStart(2, '0')}:$ss" else "$m:$ss"
 }
 
 @Composable

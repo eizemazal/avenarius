@@ -18,6 +18,8 @@ data class Account(
     val firstName: String,
     val lastName: String? = null,
     val avatarUrl: String? = null,
+    /** Login password (2FA) set on the account; null = not reported by the server yet. */
+    val twoFaEnabled: Boolean? = null,
 )
 
 /** A name-search hit (a contact-dialog or a public chat/channel) that can be opened. */
@@ -50,6 +52,8 @@ data class UserInfo(
     val link: String? = null,
     val country: String? = null,
     val registrationTime: Long? = null,
+    /** From the profile's `options`; only present for our own profile. */
+    val twoFaEnabled: Boolean? = null,
 )
 
 /** A conversation in the chat list. */
@@ -107,6 +111,8 @@ data class MediaAttach(
     val height: Int,
     /** For VIDEO: the id needed to resolve the playable stream (opcode 83). */
     val videoId: Long = 0,
+    /** For VIDEO: length in seconds (0 = unknown), for the duration badge on the tile. */
+    val durationSec: Int = 0,
     /**
      * A round video message ("video note") rather than a plain video, from the
      * attach's `videoType`. Only changes how it is drawn.

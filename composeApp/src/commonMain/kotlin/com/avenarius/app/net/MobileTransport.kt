@@ -12,10 +12,15 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+
+/** A request got no reply in time. Deliberately NOT a CancellationException. */
+class RequestTimeoutException(
+    message: String,
+) : RuntimeException(message)
 
 /**
  * The Max "mobile" transport: a raw TLS connection carrying length-prefixed,
@@ -47,7 +52,21 @@ class MobileTransport(
     private val pendingLock = Mutex()
 
     private var seq = 0
-    private val pending = mutableMapOf<Int, CompletableDeferred<JsonObject>>()
+
+    // Swapped (not cleared) on disconnect, so a reconnect that races the async
+    // fail-all never has its fresh waiters wiped by the previous connection's teardown.
+    private var pending = mutableMapOf<Int, CompletableDeferred<JsonObject>>()
+
+    // Consecutive keep-alive pings that got no reply. Two in a row (60 s of silence
+    // from a socket that is supposedly fine) means the TCP connection is half-open —
+    // reads block forever, nothing throws — so we tear it down and report a drop.
+    private var missedPings = 0
+
+    // Frames read off the wire since connect(). A missed ping only counts as silence if
+    // this hasn't moved either: pushes or late replies prove the socket is alive even
+    // when the ping reply itself went astray, and a live socket must never be dropped.
+    @Volatile private var inboundFrames = 0L
+    private var inboundAtLastPing = 0L
 
     private var readerJob: Job? = null
     private var pingJob: Job? = null
@@ -73,6 +92,9 @@ class MobileTransport(
         if (connected) return
         socket.connect()
         seq = 0 // fresh connection -> fresh seq sequence
+        missedPings = 0
+        inboundFrames = 0L
+        inboundAtLastPing = 0L
         connected = true
         val myGeneration = ++generation
         readerJob = scope.launch { readLoop(myGeneration) }
@@ -84,7 +106,22 @@ class MobileTransport(
             scope.launch {
                 while (isActive) {
                     delay(intervalMs)
-                    runCatching { request(1, buildJsonObject { put("interactive", true) }) }
+                    if (!connected) continue
+                    val ok = runCatching { request(1, buildJsonObject { put("interactive", true) }, timeoutMs = intervalMs) }.isSuccess
+                    val sawTraffic = inboundFrames != inboundAtLastPing
+                    inboundAtLastPing = inboundFrames
+                    if (ok || sawTraffic) {
+                        missedPings = 0
+                    } else if (++missedPings >= 2 && connected) {
+                        // Half-open socket: nothing will ever arrive. Drop it so the app reconnects.
+                        generation++
+                        connected = false
+                        readerJob?.cancel()
+                        readerJob = null
+                        socket.close()
+                        failAllPending(RequestTimeoutException("Сервер не отвечает"))
+                        _drops.emit(Unit)
+                    }
                 }
             }
     }
@@ -100,22 +137,45 @@ class MobileTransport(
         failAllPending(IllegalStateException("Соединение закрыто"))
     }
 
+    /**
+     * Registers a waiter for [mySeq] under the write lock, sends [frame], and awaits the
+     * reply. The waiter is always removed afterwards — including on timeout — so a late
+     * reply can't be misdelivered to whoever reuses the 8-bit seq later, and stale
+     * replies don't leak into [events] as fake pushes.
+     */
+    private suspend fun awaitReply(
+        timeoutMs: Long,
+        send: suspend (mySeq: Int) -> Unit,
+    ): JsonObject {
+        if (!connected) error("Нет соединения с сервером")
+        val deferred = CompletableDeferred<JsonObject>()
+        var mySeq = 0
+        writeLock.withLock {
+            seq = (seq + 1) and 0xff
+            mySeq = seq
+            pendingLock.withLock { pending[mySeq] = deferred }
+            send(mySeq)
+        }
+        try {
+            // withTimeoutOrNull rather than withTimeout: TimeoutCancellationException IS a
+            // CancellationException, which callers rightly rethrow as "we were cancelled"
+            // — a server timeout must surface as an ordinary failure instead.
+            return withTimeoutOrNull(timeoutMs) { deferred.await() }
+                ?: throw RequestTimeoutException("Сервер не ответил")
+        } finally {
+            pendingLock.withLock { pending.remove(mySeq) }
+        }
+    }
+
     /** Sends a request and suspends until the reply with the same seq arrives. */
     suspend fun request(
         opcode: Int,
         payload: JsonObject,
         timeoutMs: Long = 30_000,
-    ): JsonObject {
-        if (!connected) error("Нет соединения с сервером")
-        val deferred = CompletableDeferred<JsonObject>()
-        writeLock.withLock {
-            seq = (seq + 1) and 0xff
-            val mySeq = seq
-            pendingLock.withLock { pending[mySeq] = deferred }
+    ): JsonObject =
+        awaitReply(timeoutMs) { mySeq ->
             socket.write(encodeFrame(ver = 11, cmd = 0, seq = mySeq, opcode = opcode, payload = payload))
         }
-        return withTimeout(timeoutMs) { deferred.await() }
-    }
 
     /**
      * Like [request], but sends a pre-encoded payload with an explicit protocol [ver] and
@@ -129,17 +189,10 @@ class MobileTransport(
         flag: Int,
         payload: ByteArray,
         timeoutMs: Long = 30_000,
-    ): JsonObject {
-        if (!connected) error("Нет соединения с сервером")
-        val deferred = CompletableDeferred<JsonObject>()
-        writeLock.withLock {
-            seq = (seq + 1) and 0xff
-            val mySeq = seq
-            pendingLock.withLock { pending[mySeq] = deferred }
+    ): JsonObject =
+        awaitReply(timeoutMs) { mySeq ->
             socket.write(encodeRawFrame(ver = ver, seq = mySeq, opcode = opcode, flag = flag, payload = payload))
         }
-        return withTimeout(timeoutMs) { deferred.await() }
-    }
 
     /**
      * Sends a one-way frame and does NOT wait for a reply. Used for fire-and-forget
@@ -184,6 +237,7 @@ class MobileTransport(
                     body = ByteArray(len)
                     socket.readFully(body)
                 }
+                inboundFrames++
             } catch (e: Throwable) {
                 // A superseded reader (disconnect/reconnect bumped the generation)
                 // must stay silent: the live connection owns the state now.
@@ -227,10 +281,14 @@ class MobileTransport(
     }
 
     private fun failAllPending(cause: Throwable) {
+        // Detach the old connection's waiters synchronously; only they get failed, so a
+        // connect()+request() that follows immediately is never caught in the sweep.
+        val old = pending
+        pending = mutableMapOf()
         scope.launch {
             pendingLock.withLock {
-                pending.values.forEach { if (!it.isCompleted) it.completeExceptionally(cause) }
-                pending.clear()
+                old.values.forEach { if (!it.isCompleted) it.completeExceptionally(cause) }
+                old.clear()
             }
         }
     }

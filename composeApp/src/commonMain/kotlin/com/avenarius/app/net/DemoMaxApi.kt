@@ -99,7 +99,11 @@ class DemoMaxApi : MaxApi {
         isVideo: Boolean,
     ): CallSetup = error("Звонки недоступны в демо-режиме")
 
-    override suspend fun hangupCall(conversationId: String) = Unit
+    override suspend fun hangupCall(
+        conversationId: String,
+        reason: String,
+        peerId: Long?,
+    ) = Unit
 
     override suspend fun setChatMuted(
         chatId: Long,

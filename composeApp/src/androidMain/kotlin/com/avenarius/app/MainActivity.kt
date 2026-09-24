@@ -37,9 +37,15 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* result ignored */ }
 
-    // Mic + camera for calls, requested when a call starts.
+    // Mic + camera for calls, requested when a call starts. The call foreground service
+    // is started from here (once the dialog is answered) rather than alongside the
+    // request: its FGS type must match permissions that are granted at that moment.
     private val callPermissions =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _: Map<String, Boolean> -> }
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _: Map<String, Boolean> ->
+            if (callInProgress) CallService.start(this)
+        }
+
+    private var callInProgress = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,9 +54,10 @@ class MainActivity : ComponentActivity() {
         openChatRequests.value = intent.chatIdExtra()
         shareRequests.value = intent.shareUris()
         linkRequests.value = intent.viewUrl()
+        handleCallExtras(intent)
 
         setContent {
-            val vm: AppViewModel = viewModel { AppViewModel(Session.prefs, Session.client) }
+            val vm: AppViewModel = viewModel { AppViewModel(Session.prefs, Session.client, callSession = Session.callSession) }
             val state by vm.state.collectAsStateWithLifecycle()
 
             // Mirror UI state the background service needs (to suppress notifications
@@ -73,9 +80,9 @@ class MainActivity : ComponentActivity() {
                 }
                 when (state.screen) {
                     Screen.CODE, Screen.PASSWORD, Screen.REGISTER, Screen.CHATS, Screen.CHAT,
-                    Screen.USER, Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE, Screen.GROUP,
+                    Screen.USER, Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE, Screen.GROUP, Screen.TWOFA,
                     -> ConnectionService.start(this@MainActivity)
-                    Screen.LOGIN, Screen.LOADING -> ConnectionService.stop(this@MainActivity)
+                    Screen.LOGIN, Screen.LOGIN_RESTRICTED, Screen.LOADING -> ConnectionService.stop(this@MainActivity)
                 }
             }
 
@@ -83,6 +90,7 @@ class MainActivity : ComponentActivity() {
             // service so capture survives backgrounding; stop it when the call ends.
             val callActive = state.call != null && state.call?.status != com.avenarius.app.model.CallStatus.ENDED
             LaunchedEffect(callActive) {
+                callInProgress = callActive
                 if (callActive) {
                     // Request both mic and camera for any call — video can be switched on
                     // mid-call, so the camera permission is needed even for an "audio" call.
@@ -99,8 +107,7 @@ class MainActivity : ComponentActivity() {
                                 add(Manifest.permission.CAMERA)
                             }
                         }
-                    if (needed.isNotEmpty()) callPermissions.launch(needed.toTypedArray())
-                    CallService.start(this@MainActivity)
+                    if (needed.isNotEmpty()) callPermissions.launch(needed.toTypedArray()) else CallService.start(this@MainActivity)
                 } else {
                     CallService.stop(this@MainActivity)
                 }
@@ -148,6 +155,24 @@ class MainActivity : ComponentActivity() {
         openChatRequests.value = intent.chatIdExtra()
         intent.shareUris()?.let { shareRequests.value = it }
         intent.viewUrl()?.let { linkRequests.value = it }
+        handleCallExtras(intent)
+    }
+
+    /**
+     * Launched from the incoming-call notification: show over the lock screen and wake
+     * the display like a phone call would, and accept straight away if the user tapped
+     * "Принять" on the notification (the overlay's own button does the same).
+     */
+    private fun handleCallExtras(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_INCOMING_CALL, false) != true) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        if (intent.getBooleanExtra(EXTRA_ACCEPT_CALL, false)) {
+            Session.callSession.accept()
+            intent.removeExtra(EXTRA_ACCEPT_CALL) // don't re-accept on a config change
+        }
     }
 
     override fun onResume() {
@@ -191,5 +216,11 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_CHAT_ID = "chatId"
+
+        /** Set when opened from the incoming-call notification (content or full-screen intent). */
+        const val EXTRA_INCOMING_CALL = "incomingCall"
+
+        /** With [EXTRA_INCOMING_CALL]: the user tapped "Принять" on the notification. */
+        const val EXTRA_ACCEPT_CALL = "acceptCall"
     }
 }

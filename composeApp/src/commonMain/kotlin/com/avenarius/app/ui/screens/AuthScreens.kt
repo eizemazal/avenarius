@@ -120,6 +120,7 @@ internal fun PasswordScreen(
     busy: Boolean,
     error: String?,
     hint: String?,
+    email: String? = null,
     onSubmit: (String) -> Unit,
 ) {
     var password by remember { mutableStateOf("") }
@@ -132,6 +133,17 @@ internal fun PasswordScreen(
         if (!hint.isNullOrBlank()) {
             Text("Подсказка: $hint", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        // Same guidance the official client gives under "Забыли пароль?": recovery goes
+        // through the linked e-mail; without one the password can't be restored here.
+        Text(
+            if (!email.isNullOrBlank()) {
+                "Забыли пароль? Восстановить его можно через почту $email в официальном приложении Max."
+            } else {
+                "Если вы не помните пароль и не указали почту для восстановления, войти в профиль не получится."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         OutlinedTextField(
             value = password,
             onValueChange = { password = it },
@@ -148,6 +160,26 @@ internal fun PasswordScreen(
             modifier = Modifier.fillMaxWidth(),
         ) {
             if (busy) SmallSpinner() else Text("Войти")
+        }
+    }
+}
+
+/**
+ * The server accepted the SMS code but won't sign this device in until the account has
+ * a login password — which can only be created from a device that is already signed
+ * in. Wording follows the official client's "restricted login" screen.
+ */
+@Composable
+internal fun RestrictedLoginScreen(onRetry: () -> Unit) {
+    CenteredForm {
+        Text("Нет доступа к устройству", style = MaterialTheme.typography.headlineMedium)
+        Text(
+            "Для входа в этот профиль нужен пароль. Установите его на устройстве, где вы уже вошли в Max " +
+                "(Настройки → Безопасность → Пароль для входа), затем повторите вход.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
+            Text("Повторить вход")
         }
     }
 }
