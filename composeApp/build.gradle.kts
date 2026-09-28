@@ -74,6 +74,9 @@ kotlin {
             implementation(libs.ktor.client.okhttp) // Ktor engine for Android
             implementation(libs.androidx.media3.exoplayer) // in-app video playback
             implementation(libs.androidx.media3.ui)
+            // Some videos are only offered as HLS; without this module ExoPlayer's default
+            // factory can't load HLS and throws ClassNotFoundException on play.
+            implementation(libs.androidx.media3.exoplayer.hls)
             // QR scanning (web-login authorize)
             implementation(libs.androidx.camera.camera2)
             implementation(libs.androidx.camera.lifecycle)

@@ -6,8 +6,10 @@ import com.avenarius.app.data.AppCache
 import com.avenarius.app.data.CachedSession
 import com.avenarius.app.data.MessageCache
 import com.avenarius.app.data.Prefs
+import com.avenarius.app.data.RatePrompt
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.CallState
+import com.avenarius.app.model.CallStatus
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.DeviceContact
 import com.avenarius.app.model.FileAttach
@@ -36,6 +38,7 @@ import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.DemoMaxApi
 import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
+import com.avenarius.app.net.PasswordSetupRequiredException
 import com.avenarius.app.ui.theme.ThemeMode
 import com.avenarius.app.ui.theme.prefValue
 import com.avenarius.app.ui.theme.themeModeOf
@@ -215,6 +218,8 @@ data class AppState(
     val passwordHint: String? = null,
     /** Masked recovery e-mail for the password step (tells the user recovery is possible). */
     val passwordEmail: String? = null,
+    /** The server's own words when it demanded a login password (shown on [Screen.LOGIN_RESTRICTED]). */
+    val loginRestrictedDetail: String? = null,
     /** The login-password settings flow while [Screen.TWOFA] is open. */
     val twoFa: TwoFaFlow? = null,
     /** Selected bottom-nav tab on the main screen. */
@@ -252,6 +257,8 @@ data class AppState(
     val forwarding: Message? = null,
     /** True in the offline Google Play review "demo account" session. */
     val demoMode: Boolean = false,
+    /** Show the "rate the app" card on the chat list (see [AppViewModel.rateNow]). */
+    val showRatePrompt: Boolean = false,
     /** Transient message shown as a snackbar (e.g. "web login confirmed"). */
     val notice: String? = null,
     /**
@@ -333,6 +340,12 @@ class AppViewModel(
     fun currentCallEngine(): CallEngine? = callSession.engine
 
     private val _state = MutableStateFlow(AppState(theme = themeModeOf(prefs.theme)))
+
+    /** Who qualifies for the rating card; persisted per install. */
+    private val ratePrompt = RatePrompt(prefs.storage)
+    private var ratePromptShownThisSession = false
+    private var lastCallEndAt = 0L
+    private var lastReconnectAt = 0L
     val state: StateFlow<AppState> = _state.asStateFlow()
 
     /** Persists and applies the selected app theme. */
@@ -759,7 +772,11 @@ class AppViewModel(
     init {
         // Mirror the call session's state into AppState for the call UI.
         viewModelScope.launch {
-            callSession.state.collect { call -> _state.update { it.copy(call = call) } }
+            callSession.state.collect { call ->
+                if (call?.status == CallStatus.ENDED) lastCallEndAt = nowMillis()
+                // A call is never the moment to ask for a rating.
+                _state.update { it.copy(call = call, showRatePrompt = it.showRatePrompt && call == null) }
+            }
         }
         // An inbound call is ringing (the session picks it up itself); we only know the
         // caller's name/avatar, so supply those for the call UI.
@@ -1228,6 +1245,8 @@ class AppViewModel(
                                 syncedOnce = true,
                             )
                         }
+                        lastReconnectAt = nowMillis()
+                        ratePrompt.recordUse(lastReconnectAt)
                         resolveDialogTitles()
                         _state.value.currentChat?.let { reloadOpenChat(it) } // catch up missed messages
                         return@launch
@@ -1303,7 +1322,17 @@ class AppViewModel(
             return
         }
         launchBusy {
-            when (val result = client.checkCode(code)) {
+            val result =
+                try {
+                    client.checkCode(code)
+                } catch (e: PasswordSetupRequiredException) {
+                    // Same dead end as PasswordRequiredNotSet, but the server said so in
+                    // words: explain what to do instead of showing only its message.
+                    client.disconnect()
+                    _state.update { it.copy(screen = Screen.LOGIN_RESTRICTED, loginRestrictedDetail = e.serverText) }
+                    return@launchBusy
+                }
+            when (result) {
                 is CodeResult.Success -> {
                     prefs.token = result.loginToken
                     connectAndSync(result.loginToken)
@@ -1321,7 +1350,7 @@ class AppViewModel(
                     // Nothing more this device can do: the password must be created on a
                     // device that is already signed in; then the user retries from the phone.
                     client.disconnect()
-                    _state.update { it.copy(screen = Screen.LOGIN_RESTRICTED) }
+                    _state.update { it.copy(screen = Screen.LOGIN_RESTRICTED, loginRestrictedDetail = null) }
                 }
             }
         }
@@ -1330,7 +1359,9 @@ class AppViewModel(
     /** "Повторить вход" on the restricted screen (or an expired login step): start over. */
     fun restartLogin() {
         passwordTrackId = null
-        _state.update { it.copy(screen = Screen.LOGIN, error = null, passwordHint = null, passwordEmail = null) }
+        _state.update {
+            it.copy(screen = Screen.LOGIN, error = null, passwordHint = null, passwordEmail = null, loginRestrictedDetail = null)
+        }
     }
 
     /** Starts the offline demo session against [DemoMaxApi] (no network). */
@@ -1404,6 +1435,7 @@ class AppViewModel(
                 syncedOnce = true,
             )
         }
+        ratePrompt.recordUse(nowMillis())
         resolveDialogTitles()
         pendingInvite?.let { invite ->
             pendingInvite = null
@@ -1468,8 +1500,50 @@ class AppViewModel(
     fun backToChats() {
         stopVoice()
         _state.update { it.copy(playingVideoNote = null) }
+        // Decided before the chat is closed: its draft and failed sends matter.
+        val offerRating = isCalmMomentForRating()
         flushDrafts()
         _state.update { it.copy(screen = Screen.CHATS, currentChat = null, messages = emptyList(), draft = "") }
+        if (offerRating) {
+            ratePromptShownThisSession = true
+            _state.update { it.copy(showRatePrompt = true) }
+        }
+    }
+
+    /**
+     * The user just finished reading a chat and is back on the list — a relaxed moment —
+     * and nothing suggests they are busy or annoyed: no call now or in the last minutes,
+     * nothing left unsent in the chat they're leaving, not straight after a reconnect,
+     * and at most once per session. Whether they qualify at all is [RatePrompt]'s call.
+     */
+    private fun isCalmMomentForRating(): Boolean {
+        val s = _state.value
+        val now = nowMillis()
+        val chatId = s.currentChat?.id
+        return !ratePromptShownThisSession &&
+            !s.demoMode &&
+            s.call == null &&
+            now - lastCallEndAt >= RATE_AFTER_CALL_MS &&
+            now - lastReconnectAt >= RATE_AFTER_RECONNECT_MS &&
+            (chatId == null || drafts[chatId].isNullOrBlank()) &&
+            s.visibleMessages.none { m -> m.pending.any { it.state == UploadState.FAILED } } &&
+            ratePrompt.isEligible(now)
+    }
+
+    /** "Оценить": the UI opens the review flow; we just never ask again. */
+    fun rateNow() {
+        ratePrompt.rated()
+        _state.update { it.copy(showRatePrompt = false) }
+    }
+
+    fun rateLater() {
+        ratePrompt.later(nowMillis())
+        _state.update { it.copy(showRatePrompt = false) }
+    }
+
+    fun rateNever() {
+        ratePrompt.never()
+        _state.update { it.copy(showRatePrompt = false) }
     }
 
     fun selectTab(tab: Tab) = _state.update { it.copy(tab = tab) }
@@ -1968,6 +2042,7 @@ class AppViewModel(
         launchBusyless {
             val sent = client.sendMessage(chat.id, trimmed, cid, replyToId)
             if (sent != null) {
+                ratePrompt.recordMessageSent()
                 _state.update { s ->
                     if (s.messages.any { it.id == sent.id }) {
                         s
@@ -2210,6 +2285,7 @@ class AppViewModel(
             } catch (e: Throwable) {
                 // One bad item must not sink the others.
                 failed++
+                ratePrompt.recordProblem(nowMillis())
                 updatePending(send.chatId, send.cid, index) { it.copy(state = UploadState.FAILED) }
             }
         }
@@ -2916,7 +2992,10 @@ class AppViewModel(
         viewModelScope.launch {
             try {
                 block()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Throwable) {
+                ratePrompt.recordProblem(nowMillis())
                 _state.update { it.copy(error = e.message ?: "Ошибка отправки") }
             }
         }
@@ -2959,6 +3038,12 @@ class AppViewModel(
 
         // How long to wait after the last keystroke before writing a draft to storage.
         const val DRAFT_FLUSH_DELAY_MS = 800L
+
+        /** No rating card within this long after a call ends. */
+        const val RATE_AFTER_CALL_MS = 5 * 60_000L
+
+        /** ...nor right after a reconnect (the user may be catching up). */
+        const val RATE_AFTER_RECONNECT_MS = 60_000L
 
         /** How long a typing hint stays up without a repeat push. */
         const val TYPING_TTL_MS = 6_000L

@@ -137,7 +137,8 @@ fun App(viewModel: AppViewModel) {
                                     email = state.passwordEmail,
                                     onSubmit = viewModel::submitPassword,
                                 )
-                            Screen.LOGIN_RESTRICTED -> RestrictedLoginScreen(onRetry = viewModel::restartLogin)
+                            Screen.LOGIN_RESTRICTED ->
+                                RestrictedLoginScreen(detail = state.loginRestrictedDetail, onRetry = viewModel::restartLogin)
                             Screen.TWOFA ->
                                 state.twoFa?.let { flow ->
                                     TwoFaScreen(

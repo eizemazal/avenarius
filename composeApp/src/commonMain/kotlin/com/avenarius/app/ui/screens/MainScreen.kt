@@ -21,6 +21,7 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -77,6 +78,7 @@ import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.clickableRow
 import com.avenarius.app.ui.formatListTime
 import com.avenarius.app.ui.qrScanSupported
+import com.avenarius.app.ui.rememberAppReviewLauncher
 import com.avenarius.app.ui.rememberDeviceContacts
 import com.avenarius.app.ui.rememberQrScanLauncher
 import com.avenarius.app.ui.rememberSingleImagePickLauncher
@@ -441,6 +443,10 @@ internal fun MainScreen(
                         onRefresh = vm::refresh,
                         onOpenChat = vm::openChat,
                         onOpenUser = vm::openUser,
+                        showRatePrompt = state.showRatePrompt && state.call == null,
+                        onRateNow = vm::rateNow,
+                        onRateLater = vm::rateLater,
+                        onRateNever = vm::rateNever,
                     )
                 Tab.CONTACTS -> ContactsTab(state.contactsList, state.onlineUsers, vm::openUser)
                 Tab.SETTINGS ->
@@ -482,7 +488,12 @@ private fun ChatsTab(
     onRefresh: () -> Unit,
     onOpenChat: (Chat) -> Unit,
     onOpenUser: (Long) -> Unit,
+    showRatePrompt: Boolean = false,
+    onRateNow: () -> Unit = {},
+    onRateLater: () -> Unit = {},
+    onRateNever: () -> Unit = {},
 ) {
+    val launchReview = rememberAppReviewLauncher()
     // Filter the already-loaded chat list by title (= the other party's name for
     // dialogs); the search box that drives [query] lives in the top app bar.
     val visibleChats =
@@ -515,6 +526,18 @@ private fun ChatsTab(
             }
         } else {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                if (showRatePrompt && query.isBlank()) {
+                    item(key = "rate-prompt") {
+                        RatePromptCard(
+                            onRate = {
+                                launchReview()
+                                onRateNow()
+                            },
+                            onLater = onRateLater,
+                            onNever = onRateNever,
+                        )
+                    }
+                }
                 items(visibleChats, key = { it.id }) { chat ->
                     val otherId = if (chat.isDialog) chat.id xor myId else null
                     // Dialogs take their avatar from the contact (or a resolved
@@ -867,5 +890,39 @@ private fun UnreadBadge(
         Modifier.clip(CircleShape).background(bg).padding(horizontal = 7.dp, vertical = 2.dp),
     ) {
         Text(if (count > 99) "99+" else "$count", color = fg, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/**
+ * A quiet, dismissable offer to rate the app, shown in the list rather than as a dialog.
+ * Same offer for everyone who qualifies (Play policy: no asking whether they like it first,
+ * no asking for a particular rating).
+ */
+@Composable
+private fun RatePromptCard(
+    onRate: () -> Unit,
+    onLater: () -> Unit,
+    onNever: () -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        Text("Оцените Авенариус", style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Оценка в Google Play помогает другим людям найти приложение. Это займёт пару секунд.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = onNever) { Text("Не показывать") }
+            TextButton(onClick = onLater) { Text("Позже") }
+            TextButton(onClick = onRate) { Text("Оценить") }
+        }
     }
 }

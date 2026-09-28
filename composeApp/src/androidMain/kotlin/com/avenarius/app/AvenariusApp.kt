@@ -3,6 +3,7 @@ package com.avenarius.app
 import android.app.Application
 import android.content.Context
 import com.avenarius.app.data.Prefs
+import com.avenarius.app.data.RatePrompt
 import com.avenarius.app.net.CallSession
 import com.avenarius.app.net.MaxClient
 import com.avenarius.app.ui.clearMediaTempFiles
@@ -61,9 +62,28 @@ class AvenariusApp : Application() {
     override fun onCreate() {
         super.onCreate()
         Session.init(this)
+        rememberCrashes()
         // Copies of shared-in content and camera captures live in the cache dir.
         // Nothing can be staged for sending this early, so anything still there is
         // left over from a previous run.
         clearMediaTempFiles(this)
+    }
+
+    /**
+     * Notes the time of a crash so the rating card isn't offered in the days after one.
+     * commit(), not apply(): the process is about to die, so the write must land now.
+     * Same preferences file as [AndroidStorage], so [RatePrompt] reads it back.
+     */
+    private fun rememberCrashes() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            runCatching {
+                getSharedPreferences("avenarius", MODE_PRIVATE)
+                    .edit()
+                    .putString(RatePrompt.KEY_LAST_PROBLEM, System.currentTimeMillis().toString())
+                    .commit()
+            }
+            previous?.uncaughtException(thread, error)
+        }
     }
 }

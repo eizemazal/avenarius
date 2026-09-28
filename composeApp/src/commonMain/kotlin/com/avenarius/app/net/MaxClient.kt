@@ -142,6 +142,14 @@ class AuthRejectedException(
     message: String,
 ) : RuntimeException(message)
 
+/**
+ * The server won't sign this device in until the account has a login password (2FA).
+ * [serverText] is the server's own wording, shown as a detail under our explanation.
+ */
+class PasswordSetupRequiredException(
+    val serverText: String?,
+) : RuntimeException(serverText ?: "Для входа нужен пароль")
+
 /** The multi-step login (code → password) expired server-side; start over from the phone. */
 class AuthSessionExpiredException(
     message: String,
@@ -1327,9 +1335,31 @@ class MaxClient : MaxApi {
             "email.wrong" -> IllegalStateException("Неверный код из письма")
             "email.compromised" -> IllegalStateException("Эту почту нельзя использовать для восстановления")
             "verify.code.wrong", "code.invalid" -> IllegalStateException("Неверный код")
-            else -> IllegalStateException(payload.serverMessage(default))
+            else ->
+                if (payload.demandsPasswordSetup()) {
+                    PasswordSetupRequiredException(payload.readableServerMessage())
+                } else {
+                    IllegalStateException(payload.serverMessage(default))
+                }
         }
     }
+
+    /**
+     * Any other refusal that is about the login password (the codes for a wrong password
+     * or exhausted attempts are handled above): the server wants a password set up
+     * before it lets this device in. Matched loosely, since the exact code isn't known.
+     */
+    private fun JsonObject.demandsPasswordSetup(): Boolean {
+        val code = errorCode().orEmpty().lowercase()
+        val text = readableServerMessage().orEmpty().lowercase()
+        return listOf("2fa", "twofa", "password", "restrict").any { it in code } ||
+            listOf("парол", "двухфактор", "2fa").any { it in text }
+    }
+
+    /** The server's human-readable text only (no raw-payload fallback). */
+    private fun JsonObject.readableServerMessage(): String? =
+        (this["localizedMessage"] as? JsonPrimitive)?.contentOrNullSafe()?.ifBlank { null }
+            ?: (this["message"] as? JsonPrimitive)?.contentOrNullSafe()?.ifBlank { null }
 
     /** Returns the reply, or throws the mapped auth error when it is an error frame. */
     private fun JsonObject.orAuthFailure(default: String): JsonObject {

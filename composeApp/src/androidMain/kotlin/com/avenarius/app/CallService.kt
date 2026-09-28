@@ -37,27 +37,41 @@ class CallService : Service() {
         flags: Int,
         startId: Int,
     ): Int {
+        // A service started with startForegroundService() MUST reach startForeground()
+        // before anything else — returning early (even to stop) is exactly what Android
+        // punishes with ForegroundServiceDidNotStartInTimeException. [start] only starts
+        // us when a capture permission is held, so this succeeds; the stop request is
+        // handled afterwards.
+        val foreground = goForeground()
+        if (intent?.action == ACTION_STOP || !foreground) {
+            if (foreground) stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        return START_NOT_STICKY // a call can't be resumed by a restart
+    }
+
+    private fun goForeground(): Boolean =
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 // Android 14+ throws SecurityException if a declared type's runtime
                 // permission isn't granted *right now* — so only claim what we hold.
                 val type = grantedCaptureTypes(this)
                 if (type == 0) {
-                    stopSelf()
-                    return START_NOT_STICKY
+                    false
+                } else {
+                    startForeground(ID, notification(), type)
+                    true
                 }
-                startForeground(ID, notification(), type)
             } else {
                 startForeground(ID, notification())
+                true
             }
         } catch (e: Exception) {
             // IllegalStateException (background start not allowed), SecurityException
-            // (permission race) — either way the call still runs, just not as a FGS.
-            stopSelf()
-            return START_NOT_STICKY
+            // (permission revoked in between) — the call still runs, just not as a FGS.
+            false
         }
-        return START_STICKY
-    }
 
     private fun notification(): Notification =
         NotificationCompat
@@ -93,7 +107,16 @@ class CallService : Service() {
             return type
         }
 
+        private const val ACTION_STOP = "com.avenarius.app.action.STOP_CALL_SERVICE"
+
+        /** Whether we asked for the service to run (and haven't asked it to stop since). */
+        @Volatile private var requested = false
+
         fun start(context: Context) {
+            // Without mic or camera permission (the user declined) the service could not
+            // legally go foreground — and once startForegroundService() is called it must.
+            // So don't start it at all; the call itself works without it.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && grantedCaptureTypes(context) == 0) return
             val intent = Intent(context, CallService::class.java)
             // startForegroundService itself throws (ForegroundServiceStartNotAllowed) when
             // the app isn't allowed to start one right now; the call works without it.
@@ -103,11 +126,25 @@ class CallService : Service() {
                 } else {
                     context.startService(intent)
                 }
+                requested = true
             }
         }
 
+        /**
+         * Stops via a command rather than stopService(): commands are delivered in order,
+         * so a start that hasn't been handled yet still reaches startForeground() first.
+         * Stopping it before that point is itself a DidNotStartInTime failure.
+         */
         fun stop(context: Context) {
-            runCatching { context.stopService(Intent(context, CallService::class.java)) }
+            if (!requested) return
+            requested = false
+            runCatching {
+                context.startService(Intent(context, CallService::class.java).setAction(ACTION_STOP))
+            }.onFailure {
+                // Not allowed from the background — then the service isn't in the
+                // foreground either (it would make us a foreground app), so plain stop is safe.
+                runCatching { context.stopService(Intent(context, CallService::class.java)) }
+            }
         }
     }
 }

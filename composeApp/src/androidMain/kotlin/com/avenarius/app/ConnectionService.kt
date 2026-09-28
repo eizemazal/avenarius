@@ -63,10 +63,19 @@ class ConnectionService : Service() {
         // IllegalStateException). This can happen on a START_STICKY restart while the
         // app is backgrounded — bail out gracefully instead of crashing; MainActivity
         // will start us again next time it's in the foreground.
-        try {
-            startForeground(ONGOING_ID, buildOngoingNotification())
-        } catch (e: IllegalStateException) {
-            stopSelf()
+        //
+        // startForeground() comes first on every command, including a stop request: a
+        // service started with startForegroundService() that stops (or is stopped) before
+        // reaching it is failed by Android with ForegroundServiceDidNotStartInTimeException.
+        val foreground =
+            try {
+                startForeground(ONGOING_ID, buildOngoingNotification())
+                true
+            } catch (e: Exception) {
+                false
+            }
+        if (intent?.action == ACTION_STOP || !foreground) {
+            stopCleanly()
             return START_NOT_STICKY
         }
         if (collectorJob == null) {
@@ -236,9 +245,13 @@ class ConnectionService : Service() {
     ) = stopCleanly()
 
     private fun stopCleanly() {
+        requested = false
         collectorJob?.cancel()
         collectorJob = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        callJob?.cancel()
+        callJob = null
+        stopRinging()
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         stopSelf()
     }
 
@@ -372,17 +385,40 @@ class ConnectionService : Service() {
         private const val CALL_NOTIFICATION_TIMEOUT_MS = 60_000L
         private const val ACTION_DECLINE_CALL = "com.avenarius.app.action.DECLINE_CALL"
 
+        private const val ACTION_STOP = "com.avenarius.app.action.STOP_CONNECTION_SERVICE"
+
+        /** Whether we asked for the service to run (and haven't asked it to stop since). */
+        @Volatile private var requested = false
+
         fun start(context: Context) {
             val intent = Intent(context, ConnectionService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            // Throws ForegroundServiceStartNotAllowedException when the app may not start a
+            // foreground service right now; MainActivity starts us again when it resumes.
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                requested = true
             }
         }
 
+        /**
+         * Stops via a command rather than stopService(): commands are delivered in order,
+         * so a start still in flight (screens flip LOGIN → CODE → LOGIN quickly) reaches
+         * startForeground() before the stop. Stopping it earlier is a DidNotStartInTime failure.
+         */
         fun stop(context: Context) {
-            context.stopService(Intent(context, ConnectionService::class.java))
+            if (!requested) return
+            requested = false
+            runCatching {
+                context.startService(Intent(context, ConnectionService::class.java).setAction(ACTION_STOP))
+            }.onFailure {
+                // Not allowed from the background — then the service isn't in the
+                // foreground either (it would make us a foreground app), so plain stop is safe.
+                runCatching { context.stopService(Intent(context, ConnectionService::class.java)) }
+            }
         }
     }
 }
