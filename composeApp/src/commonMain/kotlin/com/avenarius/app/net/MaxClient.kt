@@ -94,6 +94,14 @@ data class TypingEvent(
     val userId: Long,
 )
 
+/** A recovery code was sent to the account's e-mail (reply to AUTH_VERIFY_EMAIL). */
+data class EmailCodeInfo(
+    /** Digits in the code, when the server says. */
+    val codeLength: Int?,
+    /** How long before another code may be requested. */
+    val resendAfterMs: Long,
+)
+
 /** State of the account's login password (2FA), from AUTH_2FA_DETAILS. Nulls = unknown. */
 data class TwoFaDetails(
     val enabled: Boolean?,
@@ -188,6 +196,13 @@ interface MaxApi {
     /** Someone started/kept typing in a chat (NOTIF_TYPING). Defaults to silent for fakes. */
     val typing: SharedFlow<TypingEvent> get() = MutableSharedFlow()
 
+    /**
+     * The profile-recovery web URL from the server's session-init (`recovery-url`), or null
+     * until we've connected. The official client opens this for a restricted account; the
+     * carrier verification happens on that page, not in this protocol.
+     */
+    val recoveryUrl: String? get() = null
+
     /** Tells the server we are typing in [chatId] (MSG_TYPING, opcode 65); best-effort. */
     suspend fun sendTyping(chatId: Long) = Unit
 
@@ -242,6 +257,25 @@ interface MaxApi {
 
     /** Turns the login password off on [trackId] (a password-confirmed track). */
     suspend fun twoFaRemove(trackId: String): Unit = error("Недоступно в этом режиме")
+
+    // --- Forgotten login password, during sign-in (the official client's "Забыли пароль?").
+    // All on the password challenge's trackId: e-mail code → check it → new password (+hint)
+    // → AUTH_LOGIN_RESTORE_PASSWORD, whose reply signs the user in.
+
+    /** Sends a recovery code to the account's linked e-mail. */
+    suspend fun restoreSendEmailCode(trackId: String): EmailCodeInfo = error("Недоступно в этом режиме")
+
+    suspend fun restoreCheckEmailCode(
+        trackId: String,
+        code: String,
+    ): Unit = error("Недоступно в этом режиме")
+
+    /** Sets the new password (checked with [twoFaValidatePassword] first); returns the login token. */
+    suspend fun restorePassword(
+        trackId: String,
+        password: String,
+        hint: String?,
+    ): String = error("Недоступно в этом режиме")
 
     /** A chat that was created or updated (NOTIF_CHAT) — upsert it into the list. */
     val chatUpdates: SharedFlow<Chat>
@@ -678,6 +712,7 @@ class MaxClient : MaxApi {
         private const val OP_CHECK_PASSWORD = 115
 
         // Login-password (2FA) management, as the official client names them.
+        private const val OP_AUTH_LOGIN_RESTORE_PASSWORD = 101
         private const val OP_AUTH_2FA_DETAILS = 104
         private const val OP_AUTH_VALIDATE_PASSWORD = 107
         private const val OP_AUTH_VALIDATE_HINT = 108
@@ -791,6 +826,10 @@ class MaxClient : MaxApi {
 
     /** Preset avatar id to use when registering a new account (rumax's default). */
     private var registerPhotoId: Long = 2981369L
+
+    /** Profile-recovery URL from session-init; see [recoveryUrl]. */
+    @Volatile private var recoveryUrlValue: String? = null
+    override val recoveryUrl: String? get() = recoveryUrlValue
 
     /** Our own user id, remembered from the last sync (for NOTIF_CHAT dialog titles). */
     private var myId: Long = 0L
@@ -1052,34 +1091,41 @@ class MaxClient : MaxApi {
         if (transport.isConnected) return
         transport.connect()
 
+        // Real per-device values (not a shared static string — see [DeviceProfile]). Keys
+        // are emitted in the official client's order; `arch` stays arm64-v8a to match the
+        // login attestation's native-library hashes.
+        val device = deviceProfile(deviceId)
         val handshake =
             transport.request(
                 OP_HANDSHAKE,
                 buildJsonObject {
-                    put("clientSessionId", 1)
-                    put("mt_instanceid", mtInstance)
                     putJsonObject("userAgent") {
                         put("deviceType", "ANDROID")
-                        put("appVersion", APP_VERSION)
-                        put("osVersion", "Android 13")
-                        put("timezone", "Europe/Moscow")
-                        put("screen", "130dpi 130dpi 600x874")
                         put("pushDeviceType", "GCM")
-                        put("locale", "ru")
-                        put("buildNumber", BUILD_NUMBER)
-                        put("deviceName", "unknown Generic Android-x86_64")
-                        put("deviceLocale", "ru")
-                        // The server picks which app-integrity hash to validate the SMS
-                        // attestation (`mode`) against from this arch; it must match the
-                        // one baked into AuthAttest (arm64-v8a).
+                        put("appVersion", APP_VERSION)
                         put("arch", "arm64-v8a")
+                        put("buildNumber", BUILD_NUMBER)
+                        put("osVersion", device.osVersion)
+                        put("locale", device.locale)
+                        put("deviceLocale", device.deviceLocale)
+                        put("deviceName", device.deviceName)
+                        put("screen", device.screen)
+                        put("timezone", device.timezone)
                     }
                     put("deviceId", deviceId)
+                    put("clientSessionId", 1)
+                    put("mt_instanceid", mtInstance)
                 },
             )
         // Kept for the login-code attestation: `mode` is bound to this session's
         // server-issued callsSeed plus our deviceId (see startAuth / AuthAttest).
         callsSeed = handshake["callsSeed"]?.jsonPrimitive?.longOrNullSafe()
+        // `recovery-url`: where a restricted account restores access (see [recoveryUrl]).
+        handshake["recovery-url"]
+            ?.jsonPrimitive
+            ?.contentOrNullSafe()
+            ?.ifBlank { null }
+            ?.let { recoveryUrlValue = it }
         sessionDeviceId = deviceId
         transport.startPing()
     }
@@ -1492,6 +1538,43 @@ class MaxClient : MaxApi {
                     }
                 },
             ).orAuthFailure("Не удалось установить пароль")
+    }
+
+    override suspend fun restoreSendEmailCode(trackId: String): EmailCodeInfo {
+        // No `email`: the code goes to the address already linked to the account.
+        val payload =
+            transport
+                .request(OP_AUTH_VERIFY_EMAIL, buildJsonObject { put("trackId", trackId) })
+                .orAuthFailure("Не удалось отправить код на почту")
+        val blocking = payload["blockingDuration"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
+        return EmailCodeInfo(
+            codeLength = payload["codeLength"]?.jsonPrimitive?.intOrNullSafe(),
+            // Sent in seconds; anything implausibly large for seconds is already ms.
+            resendAfterMs = if (blocking > 3_600) blocking else blocking * 1_000,
+        )
+    }
+
+    override suspend fun restoreCheckEmailCode(
+        trackId: String,
+        code: String,
+    ) = twoFaCheckEmail(trackId, code)
+
+    override suspend fun restorePassword(
+        trackId: String,
+        password: String,
+        hint: String?,
+    ): String {
+        val payload =
+            transport
+                .request(
+                    OP_AUTH_LOGIN_RESTORE_PASSWORD,
+                    buildJsonObject {
+                        put("trackId", trackId)
+                        put("password", password)
+                        if (!hint.isNullOrBlank()) put("hint", hint)
+                    },
+                ).orAuthFailure("Не удалось восстановить пароль")
+        return payload.loginToken() ?: error("Пароль изменён, но войти не удалось — войдите с новым паролем")
     }
 
     override suspend fun twoFaRemove(trackId: String) {

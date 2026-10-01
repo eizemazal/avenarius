@@ -39,6 +39,7 @@ import com.avenarius.app.net.DemoMaxApi
 import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
 import com.avenarius.app.net.PasswordSetupRequiredException
+import com.avenarius.app.ui.AppLinks.MAX_RECOVERY_DEFAULT
 import com.avenarius.app.ui.theme.ThemeMode
 import com.avenarius.app.ui.theme.prefValue
 import com.avenarius.app.ui.theme.themeModeOf
@@ -66,6 +67,9 @@ enum class Screen {
 
     /** The server requires a login password this account hasn't set (see [CodeResult.PasswordRequiredNotSet]). */
     LOGIN_RESTRICTED,
+
+    /** "Забыли пароль?" during sign-in: restoring the login password via the recovery e-mail. */
+    PASSWORD_RESTORE,
     REGISTER,
     CHATS,
     CHAT,
@@ -132,12 +136,27 @@ data class TwoFaFlow(
 /** Screens that exist only with a live session (i.e. everything past the login steps). */
 fun Screen.isSignedIn(): Boolean =
     when (this) {
-        Screen.LOADING, Screen.LOGIN, Screen.CODE, Screen.PASSWORD, Screen.LOGIN_RESTRICTED, Screen.REGISTER -> false
+        Screen.LOADING, Screen.LOGIN, Screen.CODE, Screen.PASSWORD, Screen.PASSWORD_RESTORE, Screen.LOGIN_RESTRICTED,
+        Screen.REGISTER,
+        -> false
         else -> true
     }
 
 /** Bottom-navigation tabs on the main (CHATS) screen. */
 enum class Tab { CHATS, CONTACTS, SETTINGS }
+
+/** Steps of restoring a forgotten login password at sign-in, as in the official client. */
+enum class RestoreStep { EMAIL_CODE, NEW_PASSWORD, HINT }
+
+/** UI state of [Screen.PASSWORD_RESTORE]. */
+data class PasswordRestore(
+    val step: RestoreStep,
+    /** Masked recovery e-mail the code went to. */
+    val email: String,
+    val codeLength: Int? = null,
+    /** Epoch ms from which another code may be requested. */
+    val resendAtMs: Long = 0L,
+)
 
 /**
  * The "печатает…" line for [chatId], or null when nobody is typing there right now.
@@ -218,8 +237,12 @@ data class AppState(
     val passwordHint: String? = null,
     /** Masked recovery e-mail for the password step (tells the user recovery is possible). */
     val passwordEmail: String? = null,
+    /** The forgotten-password flow while [Screen.PASSWORD_RESTORE] is open. */
+    val restore: PasswordRestore? = null,
     /** The server's own words when it demanded a login password (shown on [Screen.LOGIN_RESTRICTED]). */
     val loginRestrictedDetail: String? = null,
+    /** Profile-recovery web URL for the restricted-login screen (server's `recovery-url`, or default). */
+    val recoveryUrl: String = "",
     /** The login-password settings flow while [Screen.TWOFA] is open. */
     val twoFa: TwoFaFlow? = null,
     /** Selected bottom-nav tab on the main screen. */
@@ -1329,7 +1352,13 @@ class AppViewModel(
                     // Same dead end as PasswordRequiredNotSet, but the server said so in
                     // words: explain what to do instead of showing only its message.
                     client.disconnect()
-                    _state.update { it.copy(screen = Screen.LOGIN_RESTRICTED, loginRestrictedDetail = e.serverText) }
+                    _state.update {
+                        it.copy(
+                            screen = Screen.LOGIN_RESTRICTED,
+                            loginRestrictedDetail = e.serverText,
+                            recoveryUrl = recoveryUrlOrDefault(),
+                        )
+                    }
                     return@launchBusy
                 }
             when (result) {
@@ -1350,17 +1379,29 @@ class AppViewModel(
                     // Nothing more this device can do: the password must be created on a
                     // device that is already signed in; then the user retries from the phone.
                     client.disconnect()
-                    _state.update { it.copy(screen = Screen.LOGIN_RESTRICTED, loginRestrictedDetail = null) }
+                    _state.update {
+                        it.copy(screen = Screen.LOGIN_RESTRICTED, loginRestrictedDetail = null, recoveryUrl = recoveryUrlOrDefault())
+                    }
                 }
             }
         }
     }
 
+    /** The server-provided recovery URL, or the official default. */
+    private fun recoveryUrlOrDefault(): String = client.recoveryUrl?.takeIf { it.isNotBlank() } ?: MAX_RECOVERY_DEFAULT
+
     /** "Повторить вход" on the restricted screen (or an expired login step): start over. */
     fun restartLogin() {
         passwordTrackId = null
         _state.update {
-            it.copy(screen = Screen.LOGIN, error = null, passwordHint = null, passwordEmail = null, loginRestrictedDetail = null)
+            it.copy(
+                screen = Screen.LOGIN,
+                error = null,
+                passwordHint = null,
+                passwordEmail = null,
+                loginRestrictedDetail = null,
+                restore = null,
+            )
         }
     }
 
@@ -1409,6 +1450,99 @@ class AppViewModel(
                 }
             prefs.token = token
             connectAndSync(token)
+        }
+
+    // ------------------------------------------------------------------ forgotten password
+
+    private var restoreNewPassword: String? = null
+
+    /**
+     * "Забыли пароль?" on the password step. Only possible when the account has a recovery
+     * e-mail (the challenge names it); the code goes there, on the challenge's own track.
+     */
+    fun startPasswordRestore() {
+        val email = _state.value.passwordEmail ?: return
+        launchBusy {
+            val trackId = passwordTrackId ?: error("Нет идентификатора пароля")
+            val info = restoreCall { client.restoreSendEmailCode(trackId) } ?: return@launchBusy
+            restoreNewPassword = null
+            _state.update {
+                it.copy(
+                    screen = Screen.PASSWORD_RESTORE,
+                    restore = PasswordRestore(RestoreStep.EMAIL_CODE, email, info.codeLength, nowMillis() + info.resendAfterMs),
+                )
+            }
+        }
+    }
+
+    fun restoreResendCode() =
+        launchBusy {
+            val trackId = passwordTrackId ?: error("Нет идентификатора пароля")
+            val info = restoreCall { client.restoreSendEmailCode(trackId) } ?: return@launchBusy
+            _state.update { s ->
+                s.copy(
+                    restore =
+                        s.restore?.copy(
+                            codeLength = info.codeLength ?: s.restore.codeLength,
+                            resendAtMs =
+                                nowMillis() + info.resendAfterMs,
+                        ),
+                )
+            }
+        }
+
+    fun restoreSubmitCode(code: String) =
+        launchBusy {
+            val trackId = passwordTrackId ?: error("Нет идентификатора пароля")
+            restoreCall { client.restoreCheckEmailCode(trackId, code.trim()) } ?: return@launchBusy
+            _state.update { s -> s.copy(restore = s.restore?.copy(step = RestoreStep.NEW_PASSWORD)) }
+        }
+
+    fun restoreSubmitPassword(
+        password: String,
+        repeat: String,
+    ) {
+        if (password != repeat) {
+            _state.update { it.copy(error = "Пароли не совпадают, попробуйте ещё раз") }
+            return
+        }
+        launchBusy {
+            val trackId = passwordTrackId ?: error("Нет идентификатора пароля")
+            restoreCall { client.twoFaValidatePassword(trackId, password) } ?: return@launchBusy
+            restoreNewPassword = password
+            _state.update { s -> s.copy(restore = s.restore?.copy(step = RestoreStep.HINT)) }
+        }
+    }
+
+    /** Last step: optional hint, then set the password — which also signs the user in. */
+    fun restoreSubmitHint(hint: String) =
+        launchBusy {
+            val trackId = passwordTrackId ?: error("Нет идентификатора пароля")
+            val password = restoreNewPassword ?: error("Сначала придумайте пароль")
+            val h = hint.trim().ifBlank { null }
+            if (h != null) restoreCall { client.twoFaValidateHint(trackId, h) } ?: return@launchBusy
+            val token = restoreCall { client.restorePassword(trackId, password, h) } ?: return@launchBusy
+            restoreNewPassword = null
+            _state.update { it.copy(restore = null) }
+            prefs.token = token
+            connectAndSync(token)
+        }
+
+    /** Back from the restore flow to the password step. */
+    fun cancelPasswordRestore() {
+        restoreNewPassword = null
+        _state.update { it.copy(screen = Screen.PASSWORD, restore = null, error = null) }
+    }
+
+    /** Runs a restore step; a dead track sends the user back to the phone step, like elsewhere. */
+    private suspend fun <T> restoreCall(block: suspend () -> T): T? =
+        try {
+            block()
+        } catch (e: AuthSessionExpiredException) {
+            restoreNewPassword = null
+            restartLogin()
+            _state.update { it.copy(error = e.message, restore = null) }
+            null
         }
 
     private suspend fun connectAndSync(token: String) {
@@ -1972,6 +2106,7 @@ class AppViewModel(
             Screen.ABOUT -> _state.update { it.copy(screen = Screen.CHATS) }
             Screen.TWOFA -> closeTwoFa()
             Screen.EDIT_PROFILE -> _state.update { it.copy(screen = Screen.USER) }
+            Screen.PASSWORD_RESTORE -> cancelPasswordRestore()
             Screen.CODE, Screen.PASSWORD, Screen.REGISTER, Screen.LOGIN_RESTRICTED -> restartLogin()
             Screen.CHATS -> if (s.tab != Tab.CHATS) _state.update { it.copy(tab = Tab.CHATS) }
             else -> Unit
@@ -1984,7 +2119,7 @@ class AppViewModel(
         tab: Tab,
     ): Boolean =
         when (screen) {
-            Screen.CHAT, Screen.USER, Screen.GROUP, Screen.CODE, Screen.PASSWORD, Screen.REGISTER,
+            Screen.CHAT, Screen.USER, Screen.GROUP, Screen.CODE, Screen.PASSWORD, Screen.PASSWORD_RESTORE, Screen.REGISTER,
             Screen.LOGIN_RESTRICTED, Screen.SHARE_PICK, Screen.ABOUT, Screen.EDIT_PROFILE, Screen.TWOFA,
             -> true
             Screen.CHATS -> tab != Tab.CHATS

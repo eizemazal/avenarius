@@ -24,7 +24,9 @@ import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.model.VoiceAttach
+import com.avenarius.app.net.AuthSessionExpiredException
 import com.avenarius.app.net.CodeResult
+import com.avenarius.app.net.EmailCodeInfo
 import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
 import com.avenarius.app.net.MessageDeletion
@@ -158,6 +160,46 @@ private class FakeMaxClient : MaxApi {
         password: String,
         trackId: String,
     ): String = "pwd-token"
+
+    // Forgotten-password flow: records the calls so tests can check order and arguments.
+    val restoreCalls = mutableListOf<String>()
+    var restoreCodeFailure: Throwable? = null
+
+    override suspend fun restoreSendEmailCode(trackId: String): EmailCodeInfo {
+        restoreCalls += "send:$trackId"
+        return EmailCodeInfo(codeLength = 6, resendAfterMs = 60_000)
+    }
+
+    override suspend fun restoreCheckEmailCode(
+        trackId: String,
+        code: String,
+    ) {
+        restoreCodeFailure?.let { throw it }
+        restoreCalls += "check:$trackId:$code"
+    }
+
+    override suspend fun twoFaValidatePassword(
+        trackId: String,
+        password: String,
+    ) {
+        restoreCalls += "validatePassword:$password"
+    }
+
+    override suspend fun twoFaValidateHint(
+        trackId: String,
+        hint: String,
+    ) {
+        restoreCalls += "validateHint:$hint"
+    }
+
+    override suspend fun restorePassword(
+        trackId: String,
+        password: String,
+        hint: String?,
+    ): String {
+        restoreCalls += "restore:$trackId:$password:$hint"
+        return "restored-token"
+    }
 
     override suspend fun sync(token: String): SyncResult {
         syncFailure?.let { throw it }
@@ -2028,6 +2070,77 @@ class AppViewModelTest {
         vm.submitCode("123456")
         assertEquals(Screen.CHATS, vm.state.value.screen)
         assertEquals("fresh-token", prefs.token)
+    }
+
+    @Test
+    fun forgottenPasswordRestoresViaEmailAndSignsIn() {
+        fake.codeResult = CodeResult.NeedPassword(trackId = "track-1", hint = null, email = "a***@mail.ru")
+        val vm = viewModel()
+        vm.submitCode("123456")
+        vm.startPasswordRestore()
+        assertEquals(Screen.PASSWORD_RESTORE, vm.state.value.screen)
+        assertEquals(
+            RestoreStep.EMAIL_CODE,
+            vm.state.value.restore
+                ?.step,
+        )
+        assertEquals(
+            "a***@mail.ru",
+            vm.state.value.restore
+                ?.email,
+        )
+
+        vm.restoreSubmitCode(" 424242 ")
+        assertEquals(
+            RestoreStep.NEW_PASSWORD,
+            vm.state.value.restore
+                ?.step,
+        )
+
+        vm.restoreSubmitPassword("new-secret", "typo")
+        assertEquals(
+            RestoreStep.NEW_PASSWORD,
+            vm.state.value.restore
+                ?.step,
+        ) // mismatch: stays
+        vm.restoreSubmitPassword("new-secret", "new-secret")
+        assertEquals(
+            RestoreStep.HINT,
+            vm.state.value.restore
+                ?.step,
+        )
+
+        vm.restoreSubmitHint("  ")
+        assertEquals(Screen.CHATS, vm.state.value.screen)
+        assertEquals("restored-token", prefs.token)
+        assertNull(vm.state.value.restore)
+        // Same track throughout, a blank hint skipped (neither validated nor sent).
+        assertEquals(
+            listOf("send:track-1", "check:track-1:424242", "validatePassword:new-secret", "restore:track-1:new-secret:null"),
+            fake.restoreCalls,
+        )
+    }
+
+    @Test
+    fun forgottenPasswordNeedsARecoveryEmail() {
+        fake.codeResult = CodeResult.NeedPassword(trackId = "track-1", hint = null, email = null)
+        val vm = viewModel()
+        vm.submitCode("123456")
+        vm.startPasswordRestore()
+        assertEquals(Screen.PASSWORD, vm.state.value.screen)
+        assertTrue(fake.restoreCalls.isEmpty())
+    }
+
+    @Test
+    fun expiredRestoreTrackGoesBackToThePhoneStep() {
+        fake.codeResult = CodeResult.NeedPassword(trackId = "track-1", hint = null, email = "a***@mail.ru")
+        fake.restoreCodeFailure = AuthSessionExpiredException("Время на вход истекло, запросите код ещё раз")
+        val vm = viewModel()
+        vm.submitCode("123456")
+        vm.startPasswordRestore()
+        vm.restoreSubmitCode("111111")
+        assertEquals(Screen.LOGIN, vm.state.value.screen)
+        assertEquals("Время на вход истекло, запросите код ещё раз", vm.state.value.error)
     }
 
     @Test

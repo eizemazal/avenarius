@@ -13,10 +13,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,9 +31,13 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.ui.AppLinks
+import com.avenarius.app.ui.PasswordRestore
+import com.avenarius.app.ui.RestoreStep
 import com.avenarius.app.ui.components.ErrorText
 import com.avenarius.app.ui.components.SmallSpinner
 import com.avenarius.app.ui.components.openUriSafely
+import com.avenarius.app.ui.nowMillis
+import kotlinx.coroutines.delay
 
 @Composable
 private fun CenteredForm(content: @Composable ColumnScopeAlias.() -> Unit) {
@@ -150,6 +156,7 @@ internal fun PasswordScreen(
     hint: String?,
     email: String? = null,
     onSubmit: (String) -> Unit,
+    onForgotPassword: () -> Unit = {},
 ) {
     var password by remember { mutableStateOf("") }
     CenteredForm {
@@ -161,17 +168,6 @@ internal fun PasswordScreen(
         if (!hint.isNullOrBlank()) {
             Text("Подсказка: $hint", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        // Same guidance the official client gives under "Забыли пароль?": recovery goes
-        // through the linked e-mail; without one the password can't be restored here.
-        Text(
-            if (!email.isNullOrBlank()) {
-                "Забыли пароль? Восстановить его можно через почту $email в официальном приложении Max."
-            } else {
-                "Если вы не помните пароль и не указали почту для восстановления, войти в профиль не получится."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
         OutlinedTextField(
             value = password,
             onValueChange = { password = it },
@@ -182,7 +178,6 @@ internal fun PasswordScreen(
             modifier = Modifier.fillMaxWidth(),
         )
         ErrorText(error)
-        LoginHelpLink(label = if (error != null) "Не получается войти? Подробнее" else "Забыли пароль?", anchor = "password")
         Button(
             onClick = { onSubmit(password) },
             enabled = !busy && password.isNotEmpty(),
@@ -190,6 +185,145 @@ internal fun PasswordScreen(
         ) {
             if (busy) SmallSpinner() else Text("Войти")
         }
+        // As in the official client: recovery goes through the linked e-mail; without one
+        // the password can't be restored at all, so point to the guide instead.
+        if (!email.isNullOrBlank()) {
+            TextButton(onClick = onForgotPassword, enabled = !busy) { Text("Забыли пароль?") }
+            Text(
+                "Код для восстановления придёт на почту $email.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Text(
+                "Если вы не помните пароль и не указали почту для восстановления, войти в профиль не получится.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            LoginHelpLink(label = "Забыли пароль?", anchor = "password")
+        }
+        if (error != null) LoginHelpLink(anchor = "password")
+    }
+}
+
+/** "Забыли пароль?": e-mail code → new password → optional hint, then signed in. */
+@Composable
+internal fun RestorePasswordScreen(
+    restore: PasswordRestore,
+    busy: Boolean,
+    error: String?,
+    onSubmitCode: (String) -> Unit,
+    onResendCode: () -> Unit,
+    onSubmitPassword: (password: String, repeat: String) -> Unit,
+    onSubmitHint: (String) -> Unit,
+) {
+    // Fresh, empty fields on each step.
+    androidx.compose.runtime.key(restore.step) {
+        CenteredForm {
+            Text("Восстановление пароля", style = MaterialTheme.typography.headlineMedium)
+            when (restore.step) {
+                RestoreStep.EMAIL_CODE -> RestoreCodeStep(restore, busy, error, onSubmitCode, onResendCode)
+                RestoreStep.NEW_PASSWORD -> RestorePasswordStep(busy, error, onSubmitPassword)
+                RestoreStep.HINT -> RestoreHintStep(busy, error, onSubmitHint)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RestoreCodeStep(
+    restore: PasswordRestore,
+    busy: Boolean,
+    error: String?,
+    onSubmit: (String) -> Unit,
+    onResend: () -> Unit,
+) {
+    var code by remember { mutableStateOf("") }
+    // Seconds until "send again" unlocks, ticking down once a second.
+    var secondsLeft by remember(restore.resendAtMs) { mutableStateOf(0L) }
+    LaunchedEffect(restore.resendAtMs) {
+        while (true) {
+            secondsLeft = ((restore.resendAtMs - nowMillis()) / 1000).coerceAtLeast(0)
+            if (secondsLeft == 0L) break
+            delay(1000)
+        }
+    }
+    Text("Какой код пришёл на почту?", style = MaterialTheme.typography.titleMedium)
+    Text("Проверьте почту ${restore.email}", style = MaterialTheme.typography.bodyMedium)
+    OutlinedTextField(
+        value = code,
+        onValueChange = { v -> code = v.filter { it.isLetterOrDigit() }.let { f -> restore.codeLength?.let { f.take(it) } ?: f } },
+        label = { Text("Код") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    ErrorText(error)
+    Button(onClick = { onSubmit(code) }, enabled = !busy && code.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
+        if (busy) SmallSpinner() else Text("Продолжить")
+    }
+    TextButton(onClick = onResend, enabled = !busy && secondsLeft == 0L) {
+        Text(if (secondsLeft > 0) "Получить новый код можно через $secondsLeft с" else "Получить новый код")
+    }
+}
+
+@Composable
+private fun RestorePasswordStep(
+    busy: Boolean,
+    error: String?,
+    onSubmit: (String, String) -> Unit,
+) {
+    var password by remember { mutableStateOf("") }
+    var repeat by remember { mutableStateOf("") }
+    Text("Придумайте новый пароль", style = MaterialTheme.typography.titleMedium)
+    OutlinedTextField(
+        value = password,
+        onValueChange = { password = it },
+        label = { Text("Пароль") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedTextField(
+        value = repeat,
+        onValueChange = { repeat = it },
+        label = { Text("Повторите пароль") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        isError = repeat.isNotEmpty() && repeat != password,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    ErrorText(error)
+    Button(
+        onClick = { onSubmit(password, repeat) },
+        enabled = !busy && password.isNotEmpty() && repeat.isNotEmpty(),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (busy) SmallSpinner() else Text("Продолжить")
+    }
+}
+
+@Composable
+private fun RestoreHintStep(
+    busy: Boolean,
+    error: String?,
+    onSubmit: (String) -> Unit,
+) {
+    var hint by remember { mutableStateOf("") }
+    Text("Подсказка (необязательно)", style = MaterialTheme.typography.titleMedium)
+    Text("Она поможет вспомнить пароль. Подсказка не должна совпадать с паролем.", style = MaterialTheme.typography.bodyMedium)
+    OutlinedTextField(
+        value = hint,
+        onValueChange = { hint = it },
+        label = { Text("Введите подсказку") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    ErrorText(error)
+    Button(onClick = { onSubmit(hint) }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+        if (busy) SmallSpinner() else Text(if (hint.isBlank()) "Пропустить и войти" else "Сохранить и войти")
     }
 }
 
@@ -202,19 +336,27 @@ internal fun PasswordScreen(
 internal fun RestrictedLoginScreen(
     /** The server's own wording, if it gave one. */
     detail: String?,
+    /** The profile-recovery web URL (from the server, or the default). */
+    recoveryUrl: String,
     onRetry: () -> Unit,
 ) {
+    val uriHandler = LocalUriHandler.current
     CenteredForm {
         Text("Нужен пароль для входа", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "Max требует пароль для входа в этот профиль. Обычно так бывает, когда профиль уже открыт " +
-                "на другом телефоне в официальном приложении Max.",
+            "Max ограничил вход в этот профиль. Есть два пути вернуть доступ.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Text(
-            "Что сделать:\n" +
-                "1. На том телефоне откройте Max → Настройки → Безопасность → Пароль для входа и установите пароль.\n" +
-                "2. Вернитесь сюда и войдите снова: после кода из СМС Авенариус попросит этот пароль.",
+            "Если у вас есть другой телефон, где вы уже вошли в Max:\n" +
+                "откройте там Max → Настройки → Безопасность → Пароль для входа, установите пароль, " +
+                "затем вернитесь сюда и войдите снова — после кода из СМС Авенариус попросит этот пароль.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
+            "Если другого устройства нет — пройдите восстановление профиля на сайте Max. " +
+                "Откройте его с этого телефона через мобильный интернет (не Wi-Fi) и без VPN: " +
+                "сайт проверит, что SIM-карта с вашим номером стоит в этом устройстве.",
             style = MaterialTheme.typography.bodyMedium,
         )
         if (!detail.isNullOrBlank()) {
@@ -226,6 +368,11 @@ internal fun RestrictedLoginScreen(
         }
         Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
             Text("Повторить вход")
+        }
+        // Opens Max's self-recovery web flow in the browser — the same page the official
+        // app opens; the carrier check happens there, not in the app.
+        OutlinedButton(onClick = { uriHandler.openUriSafely(recoveryUrl) }, modifier = Modifier.fillMaxWidth()) {
+            Text("Восстановить профиль")
         }
         LoginHelpLink(label = "Подробнее о входе", anchor = "password-required")
     }

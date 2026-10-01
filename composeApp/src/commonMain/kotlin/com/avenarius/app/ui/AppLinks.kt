@@ -5,6 +5,9 @@ internal object AppLinks {
     const val GITHUB = "https://github.com/eizemazal/avenarius"
     const val PLAY_STORE = "https://play.google.com/store/apps/details?id=com.avenarius.app"
 
+    /** Fallback when the server's session-init carried no `recovery-url`. */
+    const val MAX_RECOVERY_DEFAULT = "https://go.max.ru/recovery"
+
     /** The sign-in troubleshooting guide in the repo (docs/login.md). */
     private const val LOGIN_HELP = "$GITHUB/blob/main/docs/login.md"
 

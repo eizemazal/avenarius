@@ -44,6 +44,7 @@ import com.avenarius.app.ui.screens.MainScreen
 import com.avenarius.app.ui.screens.MediaViewerOverlay
 import com.avenarius.app.ui.screens.PasswordScreen
 import com.avenarius.app.ui.screens.RegisterScreen
+import com.avenarius.app.ui.screens.RestorePasswordScreen
 import com.avenarius.app.ui.screens.RestrictedLoginScreen
 import com.avenarius.app.ui.screens.SharePickScreen
 import com.avenarius.app.ui.screens.TwoFaScreen
@@ -136,9 +137,26 @@ fun App(viewModel: AppViewModel) {
                                     hint = state.passwordHint,
                                     email = state.passwordEmail,
                                     onSubmit = viewModel::submitPassword,
+                                    onForgotPassword = viewModel::startPasswordRestore,
                                 )
+                            Screen.PASSWORD_RESTORE ->
+                                state.restore?.let { restore ->
+                                    RestorePasswordScreen(
+                                        restore = restore,
+                                        busy = state.busy,
+                                        error = state.error,
+                                        onSubmitCode = viewModel::restoreSubmitCode,
+                                        onResendCode = viewModel::restoreResendCode,
+                                        onSubmitPassword = viewModel::restoreSubmitPassword,
+                                        onSubmitHint = viewModel::restoreSubmitHint,
+                                    )
+                                }
                             Screen.LOGIN_RESTRICTED ->
-                                RestrictedLoginScreen(detail = state.loginRestrictedDetail, onRetry = viewModel::restartLogin)
+                                RestrictedLoginScreen(
+                                    detail = state.loginRestrictedDetail,
+                                    recoveryUrl = state.recoveryUrl,
+                                    onRetry = viewModel::restartLogin,
+                                )
                             Screen.TWOFA ->
                                 state.twoFa?.let { flow ->
                                     TwoFaScreen(
