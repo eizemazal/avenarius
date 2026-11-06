@@ -25,6 +25,7 @@ import com.avenarius.app.resources.group_filled
 import com.avenarius.app.resources.mic
 import com.avenarius.app.resources.mic_off
 import com.avenarius.app.resources.more_vert
+import com.avenarius.app.resources.notifications_off
 import com.avenarius.app.resources.open_in_new
 import com.avenarius.app.resources.pause
 import com.avenarius.app.resources.play_arrow
@@ -96,6 +97,9 @@ object AppIcons {
     val ChatsSelected: Painter @Composable get() = painterResource(Res.drawable.chat_filled)
     val ContactsSelected: Painter @Composable get() = painterResource(Res.drawable.group_filled)
     val SettingsSelected: Painter @Composable get() = painterResource(Res.drawable.settings_filled)
+
+    /** Muted chat marker in the chat list. */
+    val Muted: Painter @Composable get() = painterResource(Res.drawable.notifications_off)
 
     // Calls: chat-header buttons and in-call controls.
     // Jump-to-latest button in the chat.

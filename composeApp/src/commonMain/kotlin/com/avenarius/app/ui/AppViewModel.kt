@@ -40,7 +40,9 @@ import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
 import com.avenarius.app.net.PasswordSetupRequiredException
 import com.avenarius.app.ui.AppLinks.MAX_RECOVERY_DEFAULT
+import com.avenarius.app.ui.theme.Accent
 import com.avenarius.app.ui.theme.ThemeMode
+import com.avenarius.app.ui.theme.accentOf
 import com.avenarius.app.ui.theme.prefValue
 import com.avenarius.app.ui.theme.themeModeOf
 import kotlinx.coroutines.CancellationException
@@ -276,6 +278,10 @@ data class AppState(
     val groupMembers: Map<Long, UserInfo> = emptyMap(),
     /** Selected app theme (System/Dark/Light). */
     val theme: ThemeMode = ThemeMode.SYSTEM,
+    /** Appearance settings, persisted like [theme]. */
+    val accent: Accent = Accent.BLUE,
+    val uiScale: Float = 1f,
+    val fontScale: Float = 1f,
     /** A message awaiting a chat pick to forward it (Screen.SHARE_PICK). */
     val forwarding: Message? = null,
     /** True in the offline Google Play review "demo account" session. */
@@ -362,7 +368,15 @@ class AppViewModel(
     /** The live media engine, for the call screen's video renderers. */
     fun currentCallEngine(): CallEngine? = callSession.engine
 
-    private val _state = MutableStateFlow(AppState(theme = themeModeOf(prefs.theme)))
+    private val _state =
+        MutableStateFlow(
+            AppState(
+                theme = themeModeOf(prefs.theme),
+                accent = accentOf(prefs.accent),
+                uiScale = prefs.uiScale,
+                fontScale = prefs.fontScale,
+            ),
+        )
 
     /** Who qualifies for the rating card; persisted per install. */
     private val ratePrompt = RatePrompt(prefs.storage)
@@ -375,6 +389,21 @@ class AppViewModel(
     fun setTheme(mode: ThemeMode) {
         prefs.theme = mode.prefValue()
         _state.update { it.copy(theme = mode) }
+    }
+
+    fun setAccent(accent: Accent) {
+        prefs.accent = accent.name
+        _state.update { it.copy(accent = accent) }
+    }
+
+    fun setUiScale(scale: Float) {
+        prefs.uiScale = scale
+        _state.update { it.copy(uiScale = prefs.uiScale) }
+    }
+
+    fun setFontScale(scale: Float) {
+        prefs.fontScale = scale
+        _state.update { it.copy(fontScale = prefs.fontScale) }
     }
 
     /**
@@ -3047,7 +3076,8 @@ class AppViewModel(
         client = originalClient // leave demo mode if we were in it
         demoPending = false
         _state.update {
-            AppState(screen = Screen.LOGIN, theme = it.theme)
+            // Appearance is per device, not per account.
+            AppState(screen = Screen.LOGIN, theme = it.theme, accent = it.accent, uiScale = it.uiScale, fontScale = it.fontScale)
         }
     }
 

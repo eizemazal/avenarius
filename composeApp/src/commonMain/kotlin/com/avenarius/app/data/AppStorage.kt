@@ -58,6 +58,26 @@ class Prefs(
         get() = storage.getString(KEY_THEME) ?: "system"
         set(value) = storage.putString(KEY_THEME, value)
 
+    /** Accent color name (see Accent); like the theme, survives logout. */
+    var accent: String?
+        get() = storage.getString(KEY_ACCENT)
+        set(value) = storage.putString(KEY_ACCENT, value)
+
+    /** Whole-UI scale factor (1 = system size). */
+    var uiScale: Float
+        get() = scaleOf(KEY_UI_SCALE, UI_SCALE_RANGE)
+        set(value) = storage.putString(KEY_UI_SCALE, value.toString())
+
+    /** Text-only scale factor, on top of the system font size. */
+    var fontScale: Float
+        get() = scaleOf(KEY_FONT_SCALE, FONT_SCALE_RANGE)
+        set(value) = storage.putString(KEY_FONT_SCALE, value.toString())
+
+    private fun scaleOf(
+        key: String,
+        range: ClosedFloatingPointRange<Float>,
+    ): Float = storage.getString(key)?.toFloatOrNull()?.coerceIn(range) ?: 1f
+
     /** A stable per-install device id (UUID format). Generated once, then persisted. */
     val deviceId: String
         get() = getOrCreate(KEY_DEVICE_ID)
@@ -78,12 +98,17 @@ class Prefs(
         userId = null
     }
 
-    private companion object {
-        const val KEY_TOKEN = "login_token"
-        const val KEY_USER_ID = "user_id"
-        const val KEY_DEVICE_ID = "device_id"
-        const val KEY_MT_INSTANCE = "mt_instance"
-        const val KEY_THEME = "theme"
+    companion object {
+        val UI_SCALE_RANGE = 0.8f..1.3f
+        val FONT_SCALE_RANGE = 0.8f..1.5f
+        private const val KEY_ACCENT = "accent"
+        private const val KEY_UI_SCALE = "ui_scale"
+        private const val KEY_FONT_SCALE = "font_scale"
+        private const val KEY_TOKEN = "login_token"
+        private const val KEY_USER_ID = "user_id"
+        private const val KEY_DEVICE_ID = "device_id"
+        private const val KEY_MT_INSTANCE = "mt_instance"
+        private const val KEY_THEME = "theme"
     }
 }
 

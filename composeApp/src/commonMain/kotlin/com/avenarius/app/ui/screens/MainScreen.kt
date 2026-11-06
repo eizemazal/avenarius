@@ -1,11 +1,13 @@
 package com.avenarius.app.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -37,6 +39,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.TabRow
@@ -49,6 +52,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -59,11 +63,15 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import com.avenarius.app.data.Prefs
 import com.avenarius.app.model.Account
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.DeviceContact
@@ -82,8 +90,12 @@ import com.avenarius.app.ui.rememberAppReviewLauncher
 import com.avenarius.app.ui.rememberDeviceContacts
 import com.avenarius.app.ui.rememberQrScanLauncher
 import com.avenarius.app.ui.rememberSingleImagePickLauncher
+import com.avenarius.app.ui.theme.Accent
 import com.avenarius.app.ui.theme.ThemeMode
+import com.avenarius.app.ui.theme.dynamicColorScheme
+import com.avenarius.app.ui.theme.isLightTheme
 import com.avenarius.app.ui.typingText
+import kotlin.math.roundToInt
 import androidx.compose.material3.Tab as MdTab
 
 @Composable
@@ -459,6 +471,12 @@ internal fun MainScreen(
                     SettingsTab(
                         account = state.account,
                         theme = state.theme,
+                        accent = state.accent,
+                        uiScale = state.uiScale,
+                        fontScale = state.fontScale,
+                        onSetAccent = vm::setAccent,
+                        onSetUiScale = vm::setUiScale,
+                        onSetFontScale = vm::setFontScale,
                         demoMode = state.demoMode,
                         dataCacheBytes = state.dataCacheBytes,
                         imageCacheBytes = state.imageCacheBytes,
@@ -560,13 +578,13 @@ private fun ChatsTab(
                         Modifier
                             .fillMaxWidth()
                             .clickableRow { onOpenChat(chat) }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Avatar(
                             chat.title,
                             avatarUrl,
-                            44.dp,
+                            CHAT_AVATAR,
                             onClick = otherId?.let { id -> { onOpenUser(id) } },
                             online = otherId != null && otherId in online,
                         )
@@ -576,16 +594,18 @@ private fun ChatsTab(
                                 Text(
                                     chat.title,
                                     style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f, fill = false),
                                 )
                                 if (chat.muted) {
                                     Spacer(Modifier.width(4.dp))
-                                    Text(
-                                        "🔕",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    Icon(
+                                        AppIcons.Muted,
+                                        contentDescription = "Без звука",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp),
                                     )
                                 }
                             }
@@ -632,7 +652,7 @@ private fun ChatsTab(
                             if (chat.lastEventTime > 0) {
                                 Text(
                                     formatListTime(chat.lastEventTime),
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
                                 )
@@ -643,12 +663,15 @@ private fun ChatsTab(
                             }
                         }
                     }
-                    HorizontalDivider()
+                    // Inset under the text, as messengers do, so avatars read as one column.
+                    HorizontalDivider(Modifier.padding(start = CHAT_AVATAR + 24.dp), thickness = 0.5.dp)
                 }
             }
         }
     }
 }
+
+private val CHAT_AVATAR = 54.dp
 
 @Composable
 private fun ContactsTab(
@@ -691,6 +714,12 @@ private fun ContactsTab(
 private fun SettingsTab(
     account: Account?,
     theme: ThemeMode,
+    accent: Accent,
+    uiScale: Float,
+    fontScale: Float,
+    onSetAccent: (Accent) -> Unit,
+    onSetUiScale: (Float) -> Unit,
+    onSetFontScale: (Float) -> Unit,
     demoMode: Boolean,
     dataCacheBytes: Long,
     imageCacheBytes: Long,
@@ -817,6 +846,10 @@ private fun SettingsTab(
             ThemeOption("Тёмная", ThemeMode.DARK, theme, onSetTheme)
             ThemeOption("Светлая", ThemeMode.LIGHT, theme, onSetTheme)
         }
+        Text("Цвет акцента", style = MaterialTheme.typography.titleMedium)
+        AccentPicker(accent, onSetAccent)
+        ScaleSlider("Масштаб интерфейса", uiScale, Prefs.UI_SCALE_RANGE, onSetUiScale)
+        ScaleSlider("Размер шрифта", fontScale, Prefs.FONT_SCALE_RANGE, onSetFontScale)
         HorizontalDivider()
 
         // Cached chat list / contacts (the warm-start snapshot).
@@ -873,6 +906,61 @@ private fun ThemeOption(
     }
 }
 
+/** Row of accent swatches; "Системный" (Material You) only where the platform has it. */
+@Composable
+private fun AccentPicker(
+    current: Accent,
+    onSelect: (Accent) -> Unit,
+) {
+    val dark = !isLightTheme()
+    val dynamic = dynamicColorScheme(dark)
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Accent.entries.filter { it != Accent.SYSTEM || dynamic != null }.forEach { a ->
+            val swatch = if (a == Accent.SYSTEM) dynamic!!.primary else (if (dark) a.dark else a.light).primary
+            Box(
+                Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(swatch)
+                    .selectable(selected = a == current, onClick = { onSelect(a) }, role = Role.RadioButton)
+                    .semantics { contentDescription = a.label },
+                contentAlignment = Alignment.Center,
+            ) {
+                // The selected swatch is the scheme's own primary, so onPrimary contrasts with it.
+                if (a == current) Icon(AppIcons.Delivered, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary)
+            }
+        }
+    }
+    Text(current.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+/** A 10%-step scale slider; applied on release, since rescaling mid-drag moves the slider under the finger. */
+@Composable
+private fun ScaleSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit,
+) {
+    var draft by remember(value) { mutableFloatStateOf(value) }
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+            Text("${(draft * 100).roundToInt()}%", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+        }
+        Slider(
+            value = draft,
+            onValueChange = { draft = (it * 10).roundToInt() / 10f },
+            valueRange = range,
+            steps = ((range.endInclusive - range.start) * 10).roundToInt() - 1,
+            onValueChangeFinished = { onChange(draft) },
+        )
+    }
+}
+
 /** Human-readable byte size for the cache row ("42 КБ", "1,3 МБ"). */
 private fun formatBytes(bytes: Long): String =
     when {
@@ -890,12 +978,22 @@ private fun UnreadBadge(
     muted: Boolean = false,
 ) {
     // Muted chats get a grey badge so they don't compete with the ones that ring.
-    val bg = if (muted) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primary
-    val fg = if (muted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimary
+    val bg = if (muted) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.primary
+    val fg = if (muted) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onPrimary
     Box(
-        Modifier.clip(CircleShape).background(bg).padding(horizontal = 7.dp, vertical = 2.dp),
+        Modifier
+            .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
+            .clip(CircleShape)
+            .background(bg)
+            .padding(horizontal = 6.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        Text(if (count > 99) "99+" else "$count", color = fg, style = MaterialTheme.typography.labelSmall)
+        Text(
+            if (count > 99) "99+" else "$count",
+            color = fg,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 

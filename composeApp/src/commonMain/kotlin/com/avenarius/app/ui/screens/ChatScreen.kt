@@ -65,11 +65,14 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -80,6 +83,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -112,6 +116,7 @@ import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.CenteredSpinner
 import com.avenarius.app.ui.components.LinkedText
 import com.avenarius.app.ui.components.openUriSafely
+import com.avenarius.app.ui.components.senderNameColor
 import com.avenarius.app.ui.formatClock
 import com.avenarius.app.ui.formatDay
 import com.avenarius.app.ui.rememberCameraPhotoLauncher
@@ -120,6 +125,7 @@ import com.avenarius.app.ui.rememberFilePickLauncher
 import com.avenarius.app.ui.rememberPhotoPickLauncher
 import com.avenarius.app.ui.rememberVoiceRecorder
 import com.avenarius.app.ui.sameDay
+import com.avenarius.app.ui.theme.isLightTheme
 import com.avenarius.app.ui.voiceRecordingSupported
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -144,6 +150,8 @@ internal fun ChatScreen(
     initialDraft: String,
     /** "печатает…" line for the header, or null when nobody is typing. */
     typingText: String? = null,
+    /** Who is online now; a dialog's header says "в сети" when the partner is. */
+    onlineUsers: Set<Long> = emptySet(),
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     /** Starts a call with the dialog partner ([userId], [isVideo]). */
@@ -289,6 +297,9 @@ internal fun ChatScreen(
     // Heading avatar: a 1:1 dialog uses the contact's photo; a group uses its own.
     val headingAvatar = if (isDialog) otherUserId?.let { senderAvatars[it] } else chat?.avatarUrl
     Scaffold(
+        modifier = Modifier.background(chatWallpaper()),
+        containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onSurface,
         topBar = {
             TopAppBar(
                 title = {
@@ -305,13 +316,20 @@ internal fun ChatScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = if (onHeaderClick != null) Modifier.clickable(onClick = onHeaderClick) else Modifier,
                     ) {
-                        Avatar(chat?.title ?: "Чат", headingAvatar, 36.dp)
+                        Avatar(chat?.title ?: "Чат", headingAvatar, 40.dp)
                         Spacer(Modifier.width(10.dp))
                         Column {
-                            Text(chat?.title ?: "Чат", maxLines = 1, style = MaterialTheme.typography.titleMedium)
-                            if (typingText != null) {
+                            Text(
+                                chat?.title ?: "Чат",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            val status = typingText ?: if (otherUserId != null && otherUserId in onlineUsers) "в сети" else null
+                            if (status != null) {
                                 Text(
-                                    typingText,
+                                    status,
                                     maxLines = 1,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.primary,
@@ -387,7 +405,8 @@ internal fun ChatScreen(
                 // Telegram-style rounded input pill: attach + text field + send button.
                 Surface(
                     shape = RoundedCornerShape(24.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    color = incomingBubbleColor(),
+                    shadowElevation = 1.dp,
                     modifier =
                         Modifier
                             .fillMaxWidth()
@@ -628,8 +647,8 @@ internal fun ChatScreen(
             }
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 itemsIndexed(messages, key = { _, m -> m.id ?: m.cid ?: m.time }) { index, msg ->
                     // A day chip at every date change, as the official client does; the
@@ -848,7 +867,7 @@ private fun MessageRow(
     val maxPx = with(density) { 88.dp.toPx() }
     var triggered by remember(rowKey) { mutableStateOf(false) }
 
-    Box(Modifier.fillMaxWidth()) {
+    Box(Modifier.fillMaxWidth().padding(top = if (startsRun) 6.dp else 0.dp)) {
         val progress = (-offsetX.value / triggerPx).coerceIn(0f, 1f)
         Icon(
             AppIcons.Reply,
@@ -915,22 +934,33 @@ private fun MessageRow(
             val bg =
                 when {
                     bareVideoNote -> Color.Transparent
-                    isMine -> MaterialTheme.colorScheme.primary
-                    else -> MaterialTheme.colorScheme.surfaceVariant
+                    isMine -> MaterialTheme.colorScheme.primaryContainer
+                    else -> incomingBubbleColor()
                 }
             // Without a bubble behind it, the footer sits on the chat background, so it
             // can't use the on-bubble colour.
             val fg =
                 when {
                     bareVideoNote -> MaterialTheme.colorScheme.onSurfaceVariant
-                    isMine -> MaterialTheme.colorScheme.onPrimary
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    isMine -> MaterialTheme.colorScheme.onPrimaryContainer
+                    else -> MaterialTheme.colorScheme.onSurface
+                }
+            // Messages in a run hug each other: the sender-side corners are tight, the first
+            // bubble of a run keeps a round top on that side.
+            val big = 18.dp
+            val tight = 6.dp
+            val bubbleShape =
+                if (isMine) {
+                    RoundedCornerShape(topStart = big, topEnd = if (startsRun) big else tight, bottomEnd = tight, bottomStart = big)
+                } else {
+                    RoundedCornerShape(topStart = if (startsRun) big else tight, topEnd = big, bottomEnd = big, bottomStart = tight)
                 }
             Column(horizontalAlignment = if (isMine) Alignment.End else Alignment.Start) {
                 Box(
                     Modifier
-                        .widthIn(max = 280.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .widthIn(max = 300.dp)
+                        .then(if (bareVideoNote) Modifier else Modifier.shadow(0.5.dp, bubbleShape))
+                        .clip(bubbleShape)
                         .background(bg)
                         .clickable(onClick = onClick)
                         .padding(
@@ -940,7 +970,12 @@ private fun MessageRow(
                 ) {
                     Column {
                         if (isGroup && !isMine && startsRun) {
-                            Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                            Text(
+                                senderName,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = senderNameColor(senderName),
+                            )
                         }
                         if (forwardAuthor != null) {
                             Text(
@@ -1363,7 +1398,7 @@ private fun MessageMeta(
             Icon(
                 if (read) AppIcons.Read else AppIcons.Delivered,
                 contentDescription = if (read) "Прочитано" else "Доставлено",
-                tint = if (read) Color(0xFF8AB4F8) else fg.copy(alpha = 0.7f),
+                tint = if (read) MaterialTheme.colorScheme.primary else fg.copy(alpha = 0.7f),
                 modifier = Modifier.size(16.dp),
             )
         }
@@ -1882,15 +1917,18 @@ private fun ZoomableImage(url: String) {
 /** A centered, muted chip for a group service/system event. */
 @Composable
 private fun ServiceMessageChip(text: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center) {
+    // A translucent pill that reads on the wallpaper in either theme.
+    val light = isLightTheme()
+    val chipBg = if (light) Color.Black.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.85f)
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.Center) {
         Text(
             text,
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (light) Color.White else MaterialTheme.colorScheme.onSurface,
             modifier =
                 Modifier
                     .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                    .background(chipBg)
                     .padding(horizontal = 12.dp, vertical = 4.dp),
         )
     }
@@ -1940,3 +1978,19 @@ private fun NewMessagesDivider() {
         HorizontalDivider(Modifier.weight(1f))
     }
 }
+
+/** Soft diagonal gradient behind the conversation, derived from the scheme's accent colors. */
+@Composable
+private fun chatWallpaper(): Brush {
+    val cs = MaterialTheme.colorScheme
+    return if (isLightTheme()) {
+        Brush.linearGradient(listOf(lerp(cs.primaryContainer, cs.primary, 0.25f), lerp(cs.tertiaryContainer, cs.tertiary, 0.25f)))
+    } else {
+        Brush.linearGradient(listOf(cs.surfaceContainerLowest, lerp(cs.surface, cs.primaryContainer, 0.2f)))
+    }
+}
+
+/** Incoming bubbles (and the input pill): white on the light wallpaper, a raised tone on the dark one. */
+@Composable
+private fun incomingBubbleColor(): Color =
+    if (isLightTheme()) MaterialTheme.colorScheme.surfaceContainerLowest else MaterialTheme.colorScheme.surfaceContainerHigh

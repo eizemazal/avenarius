@@ -49,10 +49,8 @@ import com.avenarius.app.ui.screens.RestrictedLoginScreen
 import com.avenarius.app.ui.screens.SharePickScreen
 import com.avenarius.app.ui.screens.TwoFaScreen
 import com.avenarius.app.ui.screens.UserScreen
-import com.avenarius.app.ui.theme.AvenariusColorsDark
-import com.avenarius.app.ui.theme.AvenariusColorsLight
+import com.avenarius.app.ui.theme.AvenariusTheme
 import com.avenarius.app.ui.theme.ThemeMode
-import com.avenarius.app.ui.theme.dynamicColorScheme
 import okio.Path.Companion.toPath
 
 /** Ceiling for the on-disk thumbnail cache. */
@@ -97,7 +95,7 @@ fun App(viewModel: AppViewModel) {
             ThemeMode.DARK -> true
             ThemeMode.LIGHT -> false
         }
-    MaterialTheme(colorScheme = dynamicColorScheme(dark) ?: if (dark) AvenariusColorsDark else AvenariusColorsLight) {
+    AvenariusTheme(dark, state.accent, state.uiScale, state.fontScale) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             // Intercept the Android system back so leaving a chat returns to the
             // list (and code/password screens return to login) instead of exiting.
@@ -228,6 +226,7 @@ fun App(viewModel: AppViewModel) {
                                             state.currentChat?.id,
                                             state.contacts + state.groupMembers.mapValues { it.value.name },
                                         ),
+                                    onlineUsers = state.onlineUsers,
                                     onLoadOlder = viewModel::loadOlder,
                                     onBack = viewModel::backToChats,
                                     onStartCall = viewModel::startCall,

@@ -17,8 +17,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.text.LinkAnnotation
@@ -27,11 +29,13 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.avenarius.app.ui.theme.isLightTheme
 
 @Composable
 internal fun CenteredSpinner() {
@@ -120,20 +124,20 @@ internal fun Avatar(
     online: Boolean = false,
 ) {
     Box(Modifier.size(size)) {
-        var mod = Modifier.size(size).clip(CircleShape).background(avatarColor(name))
+        val (light, dark) = avatarGradient(name)
+        var mod = Modifier.size(size).clip(CircleShape).background(Brush.verticalGradient(listOf(light, dark)))
         if (onClick != null) mod = mod.clickable(onClick = onClick)
         if (!url.isNullOrBlank()) {
             AsyncImage(model = url, contentDescription = name, contentScale = ContentScale.Crop, modifier = mod)
         } else {
             Box(mod, contentAlignment = Alignment.Center) {
                 Text(
-                    name
-                        .trim()
-                        .firstOrNull()
-                        ?.uppercaseChar()
-                        ?.toString() ?: "?",
+                    initials(name),
                     color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
+                    // Sized from the circle, not the user's font scale, so two letters always fit.
+                    fontSize = with(LocalDensity.current) { (size * 0.38f).toSp() },
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
                 )
             }
         }
@@ -157,19 +161,34 @@ internal fun OnlineDot(
     }
 }
 
-private val AvatarColors =
+// Top-to-bottom gradients (Material 300 -> 600), one per hue.
+private val AvatarGradients =
     listOf(
-        Color(0xFFE57373),
-        Color(0xFF64B5F6),
-        Color(0xFF81C784),
-        Color(0xFFFFB74D),
-        Color(0xFFBA68C8),
-        Color(0xFF4DB6AC),
-        Color(0xFFF06292),
-        Color(0xFF9575CD),
+        Color(0xFFE57373) to Color(0xFFE53935),
+        Color(0xFF64B5F6) to Color(0xFF1E88E5),
+        Color(0xFF81C784) to Color(0xFF43A047),
+        Color(0xFFFFB74D) to Color(0xFFFB8C00),
+        Color(0xFFBA68C8) to Color(0xFF8E24AA),
+        Color(0xFF4DB6AC) to Color(0xFF00897B),
+        Color(0xFFF06292) to Color(0xFFD81B60),
+        Color(0xFF9575CD) to Color(0xFF5E35B1),
     )
 
-private fun avatarColor(key: String): Color = AvatarColors[(key.hashCode() and 0x7fffffff) % AvatarColors.size]
+private fun avatarGradient(key: String): Pair<Color, Color> = AvatarGradients[(key.hashCode() and 0x7fffffff) % AvatarGradients.size]
+
+/** The sender's avatar hue, for their name in group chats; the readable shade for the current theme. */
+@Composable
+internal fun senderNameColor(key: String): Color = avatarGradient(key).let { (light, dark) -> if (isLightTheme()) dark else light }
+
+/** Up to two initials from the first letters of the first words: "Анна Петрова" -> "АП". */
+internal fun initials(name: String): String =
+    name
+        .split(' ')
+        .mapNotNull { word -> word.firstOrNull { it.isLetterOrDigit() } }
+        .take(2)
+        .joinToString("")
+        .uppercase()
+        .ifEmpty { "?" }
 
 @Composable
 internal fun ErrorText(error: String?) {
