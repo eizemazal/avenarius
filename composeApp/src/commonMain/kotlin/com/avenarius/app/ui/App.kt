@@ -1,7 +1,6 @@
 package com.avenarius.app.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,7 +49,7 @@ import com.avenarius.app.ui.screens.SharePickScreen
 import com.avenarius.app.ui.screens.TwoFaScreen
 import com.avenarius.app.ui.screens.UserScreen
 import com.avenarius.app.ui.theme.AvenariusTheme
-import com.avenarius.app.ui.theme.ThemeMode
+import com.avenarius.app.ui.theme.isDark
 import okio.Path.Companion.toPath
 
 /** Ceiling for the on-disk thumbnail cache. */
@@ -89,12 +88,7 @@ fun App(viewModel: AppViewModel) {
             viewModel.consumedExternalLink()
         }
     }
-    val dark =
-        when (state.theme) {
-            ThemeMode.SYSTEM -> isSystemInDarkTheme()
-            ThemeMode.DARK -> true
-            ThemeMode.LIGHT -> false
-        }
+    val dark = state.theme.isDark()
     AvenariusTheme(dark, state.accent, state.uiScale, state.fontScale) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             // Intercept the Android system back so leaving a chat returns to the

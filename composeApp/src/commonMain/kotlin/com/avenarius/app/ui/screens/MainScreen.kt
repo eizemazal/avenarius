@@ -34,7 +34,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -43,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -50,6 +50,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -747,7 +748,7 @@ private enum class ChatFilter(
     UNREAD("Непрочитанные", { it.unreadCount > 0 }),
 }
 
-/** Folder chips; each shows how many of its chats have unread messages (muted ones aside). */
+/** Folder tabs, messenger-style: accent label and sliding indicator; a badge counts unread chats (muted aside). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChatFilterRow(
@@ -755,17 +756,42 @@ private fun ChatFilterRow(
     selected: ChatFilter,
     onSelect: (ChatFilter) -> Unit,
 ) {
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
+    PrimaryScrollableTabRow(selectedTabIndex = selected.ordinal, edgePadding = 8.dp) {
         ChatFilter.entries.forEach { f ->
+            val active = f == selected
             val unread = chats.count { f.matches(it) && it.unreadCount > 0 && !it.muted }
-            FilterChip(
-                selected = f == selected,
+            Tab(
+                selected = active,
                 onClick = { onSelect(f) },
-                label = { Text(if (unread > 0) "${f.label}  $unread" else f.label) },
-                shape = CircleShape,
+                selectedContentColor = MaterialTheme.colorScheme.primary,
+                unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            f.label,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                        )
+                        if (unread > 0) {
+                            Spacer(Modifier.width(6.dp))
+                            Box(
+                                Modifier
+                                    .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
+                                    .clip(CircleShape)
+                                    .background(if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+                                    .padding(horizontal = 5.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    if (unread > 99) "99+" else "$unread",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.surface,
+                                )
+                            }
+                        }
+                    }
+                },
             )
         }
     }

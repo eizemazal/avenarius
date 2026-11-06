@@ -1,5 +1,6 @@
 package com.avenarius.app.ui.theme
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -15,6 +16,15 @@ import androidx.compose.ui.unit.Density
 
 /** User-selectable theme; SYSTEM follows the OS setting. */
 enum class ThemeMode { SYSTEM, DARK, LIGHT }
+
+/** Whether this mode renders dark, given the OS setting (shared by the theme and system bars). */
+@Composable
+fun ThemeMode.isDark(): Boolean =
+    when (this) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.DARK -> true
+        ThemeMode.LIGHT -> false
+    }
 
 /** Parses a stored preference string ("system"/"dark"/"light") into a [ThemeMode]. */
 fun themeModeOf(value: String): ThemeMode =
