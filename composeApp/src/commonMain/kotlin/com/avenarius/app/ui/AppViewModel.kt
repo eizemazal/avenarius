@@ -40,6 +40,7 @@ import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
 import com.avenarius.app.net.PasswordSetupRequiredException
 import com.avenarius.app.net.Presence
+import com.avenarius.app.net.Privacy
 import com.avenarius.app.ui.AppLinks.MAX_RECOVERY_DEFAULT
 import com.avenarius.app.ui.theme.Accent
 import com.avenarius.app.ui.theme.ThemeMode
@@ -256,6 +257,8 @@ data class AppState(
     val onlineUsers: Set<Long> = emptySet(),
     /** Last-seen info per user, for the chat header ("был(а) в сети в 08:15"). */
     val presence: Map<Long, Presence> = emptyMap(),
+    /** Account privacy settings; null until the first sync (and in demo mode). */
+    val privacy: Privacy? = null,
     /** Who is typing where: chatId → (userId → epoch-ms until which the hint is valid). */
     val typing: Map<Long, Map<Long, Long>> = emptyMap(),
     /** The user whose profile page is open (Screen.USER). */
@@ -1299,6 +1302,7 @@ class AppViewModel(
                                 contactsList = result.contactsList,
                                 onlineUsers = result.online,
                                 presence = result.presence,
+                                privacy = result.privacy,
                                 reconnecting = false,
                                 busy = false,
                                 error = null,
@@ -1458,6 +1462,7 @@ class AppViewModel(
                     contactsList = result.contactsList,
                     onlineUsers = result.online,
                     presence = result.presence,
+                    privacy = result.privacy,
                     busy = false,
                     error = null,
                     reconnecting = false,
@@ -1603,6 +1608,7 @@ class AppViewModel(
                 contactsList = result.contactsList,
                 onlineUsers = result.online,
                 presence = result.presence,
+                privacy = result.privacy,
                 busy = false,
                 error = null,
                 syncedOnce = true,
@@ -2201,6 +2207,7 @@ class AppViewModel(
                 contactsList = result.contactsList,
                 onlineUsers = result.online,
                 presence = result.presence,
+                privacy = result.privacy,
                 error = null,
             )
         }
@@ -3024,6 +3031,22 @@ class AppViewModel(
             )
         }
         viewModelScope.launch { runCatching { client.setChatMuted(chat.id, newMuted) } }
+    }
+
+    /** Saves privacy settings optimistically; reverts and says so if the server refuses. */
+    fun updatePrivacy(privacy: Privacy) {
+        val before = _state.value.privacy
+        _state.update { it.copy(privacy = privacy) }
+        viewModelScope.launch {
+            try {
+                val saved = client.updatePrivacy(privacy)
+                _state.update { it.copy(privacy = saved) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(privacy = before, notice = e.message ?: "Не удалось сохранить настройки") }
+            }
+        }
     }
 
     /** Pins/unpins a chat at the top of the list (local to this device). */

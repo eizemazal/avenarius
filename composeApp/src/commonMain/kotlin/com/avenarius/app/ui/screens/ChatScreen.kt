@@ -1059,7 +1059,15 @@ private fun MessageRow(
                             Spacer(Modifier.height(4.dp))
                         }
                         if (msg.text.isNotEmpty()) {
-                            LinkedText(msg.text, MaterialTheme.typography.bodyLarge, fg, onLinkClick)
+                            // Own bubbles are accent-tinted, so an accent link could vanish (issue #49):
+                            // draw it in the bubble's text color, underlined.
+                            LinkedText(
+                                msg.text,
+                                MaterialTheme.typography.bodyLarge,
+                                fg,
+                                onLinkClick,
+                                linkColor = if (isMine) fg else MaterialTheme.colorScheme.primary,
+                            )
                         }
                         msg.linkPreview?.let { preview -> LinkPreviewCard(preview, fg) }
                         // Footer line inside the bubble: reactions then time + delivery

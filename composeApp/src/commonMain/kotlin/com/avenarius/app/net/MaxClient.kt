@@ -82,6 +82,21 @@ data class ReadMark(
     val mark: Long,
 )
 
+/** Account privacy (CONFIG `settings.user`); the "who" fields are [ALL] or [CONTACTS]. */
+data class Privacy(
+    val searchByPhone: String = ALL,
+    val incomingCall: String = ALL,
+    val chatsInvite: String = ALL,
+    /** Server `HIDDEN`: hide our online status. */
+    val hideOnline: Boolean = false,
+    val showReadMarks: Boolean = true,
+) {
+    companion object {
+        const val ALL = "ALL"
+        const val CONTACTS = "CONTACTS"
+    }
+}
+
 /**
  * A user's presence (sync reply or push, opcode 132). [status]: 1 online, 2 "recently",
  * 3 "long ago" (last seen hidden); absent means [seen] (epoch seconds) is exact.
@@ -188,6 +203,8 @@ data class SyncResult(
     val refreshedToken: String?,
     /** Last-seen info per user, for the chat header. */
     val presence: Map<Long, Presence> = emptyMap(),
+    /** Privacy settings from the login reply's `config.user`; null if absent. */
+    val privacy: Privacy? = null,
 )
 
 /**
@@ -333,6 +350,9 @@ interface MaxApi {
         reason: String,
         peerId: Long?,
     )
+
+    /** Saves privacy settings; returns what the server now holds. */
+    suspend fun updatePrivacy(privacy: Privacy): Privacy = privacy
 
     /** Mutes or unmutes notifications for [chatId] (server `dontDisturbUntil`). */
     suspend fun setChatMuted(
@@ -1183,6 +1203,27 @@ class MaxClient : MaxApi {
         runCatching { transport.notify(OP_MSG_TYPING, buildJsonObject { put("chatId", chatId) }) }
     }
 
+    override suspend fun updatePrivacy(privacy: Privacy): Privacy {
+        // CONFIG (op 22) with settings.user; the reply carries the full updated `user` map.
+        val payload =
+            transport.request(
+                OP_CHAT_SETTINGS,
+                buildJsonObject {
+                    putJsonObject("settings") {
+                        putJsonObject("user") {
+                            put("SEARCH_BY_PHONE", privacy.searchByPhone)
+                            put("INCOMING_CALL", privacy.incomingCall)
+                            put("CHATS_INVITE", privacy.chatsInvite)
+                            put("HIDDEN", privacy.hideOnline)
+                            put("SHOW_READ_MARK", privacy.showReadMarks)
+                        }
+                    }
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось сохранить настройки")) }
+        return (payload["user"] as? JsonObject)?.toPrivacy() ?: privacy
+    }
+
     override suspend fun setChatMuted(
         chatId: Long,
         muted: Boolean,
@@ -1835,7 +1876,8 @@ class MaxClient : MaxApi {
         // on our own scope so it never delays the sync result.
         scope.launch { runCatching { reportHostReachability() } }
 
-        return SyncResult(account, chats, names, contactsList, online, refreshedToken, presence)
+        val privacy = ((payload["config"] as? JsonObject)?.get("user") as? JsonObject)?.toPrivacy()
+        return SyncResult(account, chats, names, contactsList, online, refreshedToken, presence, privacy)
     }
 
     /** Full profile of a single user (for the user page). */
@@ -2939,6 +2981,15 @@ private fun JsonObject.displayName(): String? {
     val last = lastName()
     return listOfNotNull(first, last).joinToString(" ").ifBlank { null }
 }
+
+internal fun JsonObject.toPrivacy() =
+    Privacy(
+        searchByPhone = this["SEARCH_BY_PHONE"]?.jsonPrimitive?.contentOrNullSafe() ?: Privacy.ALL,
+        incomingCall = this["INCOMING_CALL"]?.jsonPrimitive?.contentOrNullSafe() ?: Privacy.ALL,
+        chatsInvite = this["CHATS_INVITE"]?.jsonPrimitive?.contentOrNullSafe() ?: Privacy.ALL,
+        hideOnline = this["HIDDEN"]?.jsonPrimitive?.asBoolean() ?: false,
+        showReadMarks = this["SHOW_READ_MARK"]?.jsonPrimitive?.asBoolean() ?: true,
+    )
 
 /** Parses a presence map `{userId: {seen, status?}}`. */
 private fun presenceIn(presence: JsonElement?): Map<Long, Presence> =

@@ -49,6 +49,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -88,6 +89,7 @@ import com.avenarius.app.model.DeviceContact
 import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.net.Privacy
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.AppState
 import com.avenarius.app.ui.AppViewModel
@@ -492,6 +494,8 @@ internal fun MainScreen(
                         onSetUiScale = vm::setUiScale,
                         onSetFontScale = vm::setFontScale,
                         demoMode = state.demoMode,
+                        privacy = state.privacy,
+                        onUpdatePrivacy = vm::updatePrivacy,
                         dataCacheBytes = state.dataCacheBytes,
                         imageCacheBytes = state.imageCacheBytes,
                         onSetTheme = vm::setTheme,
@@ -817,6 +821,8 @@ private fun SettingsTab(
     onSetUiScale: (Float) -> Unit,
     onSetFontScale: (Float) -> Unit,
     demoMode: Boolean,
+    privacy: Privacy?,
+    onUpdatePrivacy: (Privacy) -> Unit,
     dataCacheBytes: Long,
     imageCacheBytes: Long,
     onSetTheme: (ThemeMode) -> Unit,
@@ -925,6 +931,35 @@ private fun SettingsTab(
             }
         }
 
+        if (!demoMode && privacy != null) {
+            SettingsCard("Конфиденциальность") {
+                PrivacyChoiceRow(AppIcons.Search, 0f, "Кто может найти меня по номеру", privacy.searchByPhone) {
+                    onUpdatePrivacy(privacy.copy(searchByPhone = it))
+                }
+                PrivacyChoiceRow(AppIcons.Call, 120f, "Кто может мне звонить", privacy.incomingCall) {
+                    onUpdatePrivacy(privacy.copy(incomingCall = it))
+                }
+                PrivacyChoiceRow(AppIcons.Contacts, 240f, "Кто может приглашать в чаты", privacy.chatsInvite) {
+                    onUpdatePrivacy(privacy.copy(chatsInvite = it))
+                }
+                SettingsRow(
+                    AppIcons.HideOnline,
+                    tile(-90f),
+                    "Скрывать статус «в сети»",
+                    checked = privacy.hideOnline,
+                    onClick = { onUpdatePrivacy(privacy.copy(hideOnline = !privacy.hideOnline)) },
+                )
+                SettingsRow(
+                    AppIcons.Read,
+                    tile(90f),
+                    "Отметки о прочтении",
+                    "Собеседники видят, что вы прочитали сообщение",
+                    checked = privacy.showReadMarks,
+                    onClick = { onUpdatePrivacy(privacy.copy(showReadMarks = !privacy.showReadMarks)) },
+                )
+            }
+        }
+
         SettingsCard("Оформление") {
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Тема", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -990,6 +1025,8 @@ private fun SettingsRow(
     title: String,
     subtitle: String? = null,
     danger: Boolean = false,
+    /** Non-null renders a trailing switch; the whole row toggles it via [onClick]. */
+    checked: Boolean? = null,
     onClick: () -> Unit,
 ) {
     Row(
@@ -1015,8 +1052,45 @@ private fun SettingsRow(
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+        if (checked != null) {
+            Spacer(Modifier.width(12.dp))
+            Switch(checked = checked, onCheckedChange = null)
+        }
     }
 }
+
+/** A privacy "who can…" row; tapping opens Все / Мои контакты. */
+@Composable
+private fun PrivacyChoiceRow(
+    icon: Painter,
+    turn: Float,
+    title: String,
+    value: String,
+    onChange: (String) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        SettingsRow(icon, tile(turn), title, whoLabel(value), onClick = { open = true })
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            listOf(Privacy.ALL, Privacy.CONTACTS).forEach { v ->
+                DropdownMenuItem(
+                    text = { Text(whoLabel(v)) },
+                    onClick = {
+                        open = false
+                        if (v != value) onChange(v)
+                    },
+                )
+            }
+        }
+    }
+}
+
+private fun whoLabel(value: String): String =
+    when (value) {
+        Privacy.ALL -> "Все"
+        Privacy.CONTACTS -> "Мои контакты"
+        else -> value
+    }
 
 @Composable
 private fun ThemeOption(

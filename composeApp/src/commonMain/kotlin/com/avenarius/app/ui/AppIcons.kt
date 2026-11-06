@@ -45,6 +45,7 @@ import com.avenarius.app.resources.settings_filled
 import com.avenarius.app.resources.video_chat
 import com.avenarius.app.resources.videocam
 import com.avenarius.app.resources.videocam_off
+import com.avenarius.app.resources.visibility_off
 import org.jetbrains.compose.resources.painterResource
 
 /**
@@ -116,6 +117,7 @@ object AppIcons {
     val Clean: Painter @Composable get() = painterResource(Res.drawable.cleaning_services)
     val Info: Painter @Composable get() = painterResource(Res.drawable.info)
     val Logout: Painter @Composable get() = painterResource(Res.drawable.logout)
+    val HideOnline: Painter @Composable get() = painterResource(Res.drawable.visibility_off)
 
     // Calls: chat-header buttons and in-call controls.
     // Jump-to-latest button in the chat.

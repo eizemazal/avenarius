@@ -65,8 +65,9 @@ internal fun LinkedText(
      * externally as before.
      */
     onInternalLink: ((String) -> Boolean)? = null,
+    /** Must contrast with what the text sits on; an accent-filled bubble needs its own. */
+    linkColor: Color = MaterialTheme.colorScheme.primary,
 ) {
-    val linkColor = MaterialTheme.colorScheme.primary
     // Open links via our safe handler so an unhandled scheme (mailto: with no email
     // app, etc.) can't crash the app.
     val uriHandler = LocalUriHandler.current
