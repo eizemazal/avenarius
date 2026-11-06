@@ -31,3 +31,34 @@ class LastSeenTextTest {
         assertNull(lastSeenText(Presence(1, online = false), now))
     }
 }
+
+class ParticipantsLabelTest {
+    @Test
+    fun pluralFormsAndThousands() {
+        assertEquals(
+            "1 участник",
+            com.avenarius.app.ui.screens
+                .participantsLabel(1),
+        )
+        assertEquals(
+            "3 участника",
+            com.avenarius.app.ui.screens
+                .participantsLabel(3),
+        )
+        assertEquals(
+            "12 участников",
+            com.avenarius.app.ui.screens
+                .participantsLabel(12),
+        )
+        assertEquals(
+            "243 783 подписчика",
+            com.avenarius.app.ui.screens
+                .participantsLabel(243_783, channel = true),
+        )
+        assertEquals(
+            "1 000 000 подписчиков",
+            com.avenarius.app.ui.screens
+                .participantsLabel(1_000_000, channel = true),
+        )
+    }
+}

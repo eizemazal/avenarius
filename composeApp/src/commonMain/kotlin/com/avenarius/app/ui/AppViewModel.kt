@@ -281,6 +281,8 @@ data class AppState(
     val groupMembers: Map<Long, UserInfo> = emptyMap(),
     /** Selected app theme (System/Dark/Light). */
     val theme: ThemeMode = ThemeMode.SYSTEM,
+    /** Chats pinned to the top of the list (per device, cleared on logout). */
+    val pinnedChats: Set<Long> = emptySet(),
     /** Appearance settings, persisted like [theme]. */
     val accent: Accent = Accent.BLUE,
     val uiScale: Float = 1f,
@@ -378,6 +380,7 @@ class AppViewModel(
                 accent = accentOf(prefs.accent),
                 uiScale = prefs.uiScale,
                 fontScale = prefs.fontScale,
+                pinnedChats = prefs.pinnedChats,
             ),
         )
 
@@ -3008,15 +3011,26 @@ class AppViewModel(
 
     /** Mutes/unmutes notifications for the open chat (optimistic; persisted server-side). */
     fun toggleMuteCurrentChat() {
-        val chat = _state.value.currentChat ?: return
+        _state.value.currentChat?.let(::toggleMute)
+    }
+
+    /** Mutes/unmutes [chat] (from the open chat's menu or a chat-list long press). */
+    fun toggleMute(chat: Chat) {
         val newMuted = !chat.muted
         _state.update { s ->
             s.copy(
-                currentChat = s.currentChat?.copy(muted = newMuted),
+                currentChat = s.currentChat?.let { if (it.id == chat.id) it.copy(muted = newMuted) else it },
                 chats = s.chats.map { if (it.id == chat.id) it.copy(muted = newMuted) else it },
             )
         }
         viewModelScope.launch { runCatching { client.setChatMuted(chat.id, newMuted) } }
+    }
+
+    /** Pins/unpins a chat at the top of the list (local to this device). */
+    fun togglePin(chatId: Long) {
+        val pins = _state.value.pinnedChats.let { if (chatId in it) it - chatId else it + chatId }
+        prefs.pinnedChats = pins
+        _state.update { it.copy(pinnedChats = pins) }
     }
 
     /** Deletes the current 1:1 chat (removes it locally and returns to the list). */

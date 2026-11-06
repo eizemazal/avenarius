@@ -32,7 +32,7 @@ internal fun IncomingCallOverlay(
     onAccept: () -> Unit,
     onDecline: () -> Unit,
 ) {
-    Surface(Modifier.fillMaxSize(), color = Color(0xFF0E0E12)) {
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceContainerLowest) {
         Box(Modifier.fillMaxSize()) {
             Column(
                 Modifier.fillMaxWidth().padding(top = 120.dp),
@@ -48,19 +48,19 @@ internal fun IncomingCallOverlay(
                 ) {
                     Text(
                         (call.peerName ?: "?").take(1).uppercase(),
-                        color = Color.White,
+                        color = MaterialTheme.colorScheme.onSurface,
                         style = MaterialTheme.typography.displaySmall,
                     )
                 }
                 Text(
                     call.peerName ?: "Неизвестный",
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.headlineSmall,
                 )
                 Text(
                     if (call.kind == CallKind.VIDEO) "Входящий видеозвонок" else "Входящий звонок",
-                    color = Color.White.copy(alpha = 0.7f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
@@ -69,8 +69,20 @@ internal fun IncomingCallOverlay(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 64.dp),
                 horizontalArrangement = Arrangement.spacedBy(64.dp, Alignment.CenterHorizontally),
             ) {
-                LabeledCircleButton("Отклонить", AppIcons.CallEnd, Color(0xFFE0384A), onDecline)
-                LabeledCircleButton("Принять", AppIcons.Call, Color(0xFF2FB563), onAccept)
+                LabeledCircleButton(
+                    "Отклонить",
+                    AppIcons.CallEnd,
+                    MaterialTheme.colorScheme.error,
+                    MaterialTheme.colorScheme.onError,
+                    onDecline,
+                )
+                LabeledCircleButton(
+                    "Принять",
+                    AppIcons.Call,
+                    MaterialTheme.colorScheme.primary,
+                    MaterialTheme.colorScheme.onPrimary,
+                    onAccept,
+                )
             }
         }
     }
@@ -81,14 +93,15 @@ private fun LabeledCircleButton(
     label: String,
     icon: androidx.compose.ui.graphics.painter.Painter,
     bg: Color,
+    tint: Color,
     onClick: () -> Unit,
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Surface(onClick = onClick, shape = CircleShape, color = bg, modifier = Modifier.size(68.dp)) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(30.dp))
+                Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(30.dp))
             }
         }
-        Text(label, color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.bodySmall)
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
     }
 }

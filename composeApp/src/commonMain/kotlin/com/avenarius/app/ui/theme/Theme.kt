@@ -8,6 +8,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
@@ -76,6 +77,18 @@ enum class Accent(
         AccentTones(Color(0xFFFFB1C8), Color(0xFF5E1133), Color(0xFF7B2949), Color(0xFFFFD9E2)),
     ),
     SYSTEM("Системный", BLUE.light, BLUE.dark),
+    ;
+
+    /** The neighbouring accent used as tertiary (wallpaper gradient, highlights). */
+    val partner: Accent
+        get() =
+            when (this) {
+                BLUE, SYSTEM, PINK -> VIOLET
+                TEAL -> BLUE
+                VIOLET -> PINK
+                GREEN -> TEAL
+                ORANGE -> PINK
+            }
 }
 
 /** Parses a stored accent name; unknown or missing values fall back to [Accent.BLUE]. */
@@ -96,14 +109,42 @@ internal fun appColorScheme(
 ): ColorScheme {
     if (accent == Accent.SYSTEM) dynamicColorScheme(dark)?.let { return it }
     val t = if (dark) accent.dark else accent.light
-    return (if (dark) AvenariusColorsDark else AvenariusColorsLight).copy(
+    val partner = if (dark) accent.partner.dark else accent.partner.light
+    val base = if (dark) AvenariusColorsDark else AvenariusColorsLight
+
+    // Surfaces lean toward the accent's container, text/lines toward the accent itself.
+    fun surf(c: Color) = lerp(c, t.container, if (dark) 0.16f else 0.3f)
+
+    fun ink(c: Color) = lerp(c, t.primary, 0.12f)
+    return base.copy(
         primary = t.primary,
         onPrimary = t.onPrimary,
         primaryContainer = t.container,
         onPrimaryContainer = t.onContainer,
+        inversePrimary = if (dark) accent.light.primary else accent.dark.primary,
+        secondary = lerp(ink(base.onSurfaceVariant), t.primary, 0.3f),
+        onSecondary = t.onPrimary,
         secondaryContainer = t.container,
         onSecondaryContainer = t.onContainer,
-        inversePrimary = if (dark) accent.light.primary else accent.dark.primary,
+        tertiary = partner.primary,
+        onTertiary = partner.onPrimary,
+        tertiaryContainer = partner.container,
+        onTertiaryContainer = partner.onContainer,
+        background = surf(base.background),
+        surface = surf(base.surface),
+        surfaceVariant = surf(base.surfaceVariant),
+        surfaceDim = surf(base.surfaceDim),
+        surfaceBright = surf(base.surfaceBright),
+        surfaceContainerLowest = surf(base.surfaceContainerLowest),
+        surfaceContainerLow = surf(base.surfaceContainerLow),
+        surfaceContainer = surf(base.surfaceContainer),
+        surfaceContainerHigh = surf(base.surfaceContainerHigh),
+        surfaceContainerHighest = surf(base.surfaceContainerHighest),
+        inverseSurface = surf(base.inverseSurface),
+        onSurfaceVariant = ink(base.onSurfaceVariant),
+        outline = ink(base.outline),
+        outlineVariant = surf(base.outlineVariant),
+        surfaceTint = t.primary,
     )
 }
 
@@ -127,75 +168,67 @@ internal fun AvenariusTheme(
 @ReadOnlyComposable
 internal fun isLightTheme(): Boolean = MaterialTheme.colorScheme.surface.luminance() > 0.5f
 
-// Messenger-style palette: clear blue accent, blue-tinted "night" neutrals in dark mode,
-// violet tertiary from the logo.
+// Neutral greys; [appColorScheme] tints them toward the chosen accent, so the accent
+// colors every surface. The accent roles here are only placeholders (overwritten).
 internal val AvenariusColorsDark =
     darkColorScheme(
-        primary = Color(0xFF7CC0FF),
-        onPrimary = Color(0xFF00315A),
-        primaryContainer = Color(0xFF23507E),
-        onPrimaryContainer = Color(0xFFD6E8FF),
-        inversePrimary = Color(0xFF1F74C8),
-        secondary = Color(0xFFB2CBEA),
-        onSecondary = Color(0xFF1B3450),
-        secondaryContainer = Color(0xFF234264),
-        onSecondaryContainer = Color(0xFFD6E8FF),
-        tertiary = Color(0xFFD0BCFF),
-        onTertiary = Color(0xFF381E72),
-        tertiaryContainer = Color(0xFF4F378A),
-        onTertiaryContainer = Color(0xFFEADDFF),
-        background = Color(0xFF0F151C),
-        onBackground = Color(0xFFE3E8EE),
-        surface = Color(0xFF0F151C),
-        onSurface = Color(0xFFE3E8EE),
-        surfaceVariant = Color(0xFF26313D),
-        onSurfaceVariant = Color(0xFFA9B6C4),
-        inverseSurface = Color(0xFFE3E8EE),
-        inverseOnSurface = Color(0xFF2A3038),
-        outline = Color(0xFF7A8796),
-        outlineVariant = Color(0xFF2C3744),
-        surfaceDim = Color(0xFF0F151C),
-        surfaceBright = Color(0xFF2C3744),
-        surfaceContainerLowest = Color(0xFF0A0F14),
-        surfaceContainerLow = Color(0xFF141B23),
-        surfaceContainer = Color(0xFF18202A),
-        surfaceContainerHigh = Color(0xFF1E2833),
-        surfaceContainerHighest = Color(0xFF26313D),
+        background = Color(0xFF0E0F11),
+        onBackground = Color(0xFFE4E6E9),
+        surface = Color(0xFF0E0F11),
+        onSurface = Color(0xFFE4E6E9),
+        surfaceVariant = Color(0xFF2A2D31),
+        onSurfaceVariant = Color(0xFFAAB0B7),
+        inverseSurface = Color(0xFFE4E6E9),
+        inverseOnSurface = Color(0xFF2A2D31),
+        outline = Color(0xFF7E838A),
+        outlineVariant = Color(0xFF30343A),
+        surfaceDim = Color(0xFF0E0F11),
+        surfaceBright = Color(0xFF2F3236),
+        surfaceContainerLowest = Color(0xFF090A0B),
+        surfaceContainerLow = Color(0xFF151719),
+        surfaceContainer = Color(0xFF191B1E),
+        surfaceContainerHigh = Color(0xFF212327),
+        surfaceContainerHighest = Color(0xFF2A2D31),
     )
 
 internal val AvenariusColorsLight =
     lightColorScheme(
-        primary = Color(0xFF1F74C8),
-        onPrimary = Color(0xFFFFFFFF),
-        primaryContainer = Color(0xFFD6E8FF),
-        onPrimaryContainer = Color(0xFF00264A),
-        inversePrimary = Color(0xFF9FCAFF),
-        secondary = Color(0xFF4A6585),
-        onSecondary = Color(0xFFFFFFFF),
-        secondaryContainer = Color(0xFFD6E8FF),
-        onSecondaryContainer = Color(0xFF00264A),
-        tertiary = Color(0xFF6B4FB8),
-        onTertiary = Color(0xFFFFFFFF),
-        tertiaryContainer = Color(0xFFEADDFF),
-        onTertiaryContainer = Color(0xFF23005C),
         background = Color(0xFFFFFFFF),
-        onBackground = Color(0xFF151A20),
+        onBackground = Color(0xFF16181B),
         surface = Color(0xFFFFFFFF),
-        onSurface = Color(0xFF151A20),
-        surfaceVariant = Color(0xFFE3E8EE),
-        onSurfaceVariant = Color(0xFF5B6672),
-        inverseSurface = Color(0xFF2A3038),
-        inverseOnSurface = Color(0xFFEEF2F7),
-        outline = Color(0xFF7A8591),
-        outlineVariant = Color(0xFFD5DCE4),
-        surfaceDim = Color(0xFFDAE0E7),
+        onSurface = Color(0xFF16181B),
+        surfaceVariant = Color(0xFFE4E6E9),
+        onSurfaceVariant = Color(0xFF5D636B),
+        inverseSurface = Color(0xFF2B2E32),
+        inverseOnSurface = Color(0xFFEFF1F3),
+        outline = Color(0xFF7E838A),
+        outlineVariant = Color(0xFFD7DADE),
+        surfaceDim = Color(0xFFDADCDF),
         surfaceBright = Color(0xFFFFFFFF),
         surfaceContainerLowest = Color(0xFFFFFFFF),
-        surfaceContainerLow = Color(0xFFF5F7FA),
-        surfaceContainer = Color(0xFFEFF2F6),
-        surfaceContainerHigh = Color(0xFFE9EDF2),
-        surfaceContainerHighest = Color(0xFFE3E8EE),
+        surfaceContainerLow = Color(0xFFF6F7F8),
+        surfaceContainer = Color(0xFFF0F1F3),
+        surfaceContainerHigh = Color(0xFFEAEBEE),
+        surfaceContainerHighest = Color(0xFFE4E6E9),
     )
+
+/** Glyphs drawn over photos/video and their dark [ColorScheme.scrim]: light in every theme. */
+val ColorScheme.onScrim: Color get() = Color.White
+
+/** This color with its hue turned by [degrees]; saturation and brightness are kept. */
+fun Color.rotateHue(degrees: Float): Color {
+    val max = maxOf(red, green, blue)
+    val d = max - minOf(red, green, blue)
+    val hue =
+        when {
+            d == 0f -> 0f
+            max == red -> 60f * (((green - blue) / d) % 6f)
+            max == green -> 60f * ((blue - red) / d + 2f)
+            else -> 60f * ((red - green) / d + 4f)
+        }
+    val turned = ((hue + degrees) % 360f + 360f) % 360f
+    return Color.hsv(turned, if (max == 0f) 0f else d / max, max, alpha)
+}
 
 // Kept for source compatibility; the dark scheme is the historical default.
 internal val AvenariusColors = AvenariusColorsDark

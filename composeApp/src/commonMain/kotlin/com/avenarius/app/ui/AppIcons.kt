@@ -12,6 +12,7 @@ import com.avenarius.app.resources.cameraswitch
 import com.avenarius.app.resources.chat
 import com.avenarius.app.resources.chat_filled
 import com.avenarius.app.resources.check
+import com.avenarius.app.resources.cleaning_services
 import com.avenarius.app.resources.close
 import com.avenarius.app.resources.collapse_content
 import com.avenarius.app.resources.content_copy
@@ -22,13 +23,19 @@ import com.avenarius.app.resources.expand_content
 import com.avenarius.app.resources.forward
 import com.avenarius.app.resources.group
 import com.avenarius.app.resources.group_filled
+import com.avenarius.app.resources.info
+import com.avenarius.app.resources.lock
+import com.avenarius.app.resources.logout
 import com.avenarius.app.resources.mic
 import com.avenarius.app.resources.mic_off
 import com.avenarius.app.resources.more_vert
+import com.avenarius.app.resources.notifications
 import com.avenarius.app.resources.notifications_off
 import com.avenarius.app.resources.open_in_new
 import com.avenarius.app.resources.pause
 import com.avenarius.app.resources.play_arrow
+import com.avenarius.app.resources.push_pin
+import com.avenarius.app.resources.qr_code_scanner
 import com.avenarius.app.resources.refresh
 import com.avenarius.app.resources.reply
 import com.avenarius.app.resources.search
@@ -100,6 +107,15 @@ object AppIcons {
 
     /** Muted chat marker in the chat list. */
     val Muted: Painter @Composable get() = painterResource(Res.drawable.notifications_off)
+    val Unmuted: Painter @Composable get() = painterResource(Res.drawable.notifications)
+    val Pin: Painter @Composable get() = painterResource(Res.drawable.push_pin)
+
+    // Settings rows (filled, drawn white on a colored tile).
+    val QrScan: Painter @Composable get() = painterResource(Res.drawable.qr_code_scanner)
+    val Lock: Painter @Composable get() = painterResource(Res.drawable.lock)
+    val Clean: Painter @Composable get() = painterResource(Res.drawable.cleaning_services)
+    val Info: Painter @Composable get() = painterResource(Res.drawable.info)
+    val Logout: Painter @Composable get() = painterResource(Res.drawable.logout)
 
     // Calls: chat-header buttons and in-call controls.
     // Jump-to-latest button in the chat.

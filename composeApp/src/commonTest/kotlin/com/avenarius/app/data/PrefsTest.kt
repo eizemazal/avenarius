@@ -81,4 +81,17 @@ class PrefsTest {
         assertEquals(Accent.BLUE, accentOf("NEON"))
         assertEquals(Accent.GREEN, accentOf("GREEN"))
     }
+
+    @Test
+    fun pinnedChatsRoundTripAndClearOnLogout() {
+        val storage = InMemoryStorage()
+        val prefs = Prefs(storage)
+        assertEquals(emptySet(), prefs.pinnedChats)
+        prefs.pinnedChats = setOf(5L, -12L)
+        assertEquals(setOf(5L, -12L), prefs.pinnedChats)
+        storage.putString("pinned_chats", "7,junk,,9")
+        assertEquals(setOf(7L, 9L), prefs.pinnedChats)
+        prefs.clear()
+        assertEquals(emptySet(), prefs.pinnedChats)
+    }
 }

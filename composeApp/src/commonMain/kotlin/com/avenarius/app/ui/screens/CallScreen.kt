@@ -60,7 +60,7 @@ internal fun CallScreen(
             onDismiss()
         }
     }
-    Surface(Modifier.fillMaxSize(), color = Color(0xFF0E0E12)) {
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceContainerLowest) {
         Box(Modifier.fillMaxSize()) {
             // Any call can carry video (you can switch it on mid-call), so drive the UI
             // off the live media state, not the call's initial kind.
@@ -83,7 +83,7 @@ internal fun CallScreen(
                     ) {
                         Text(
                             (call.peerName ?: "?").take(1).uppercase(),
-                            color = Color.White,
+                            color = MaterialTheme.colorScheme.onSurface,
                             style = MaterialTheme.typography.displaySmall,
                         )
                     }
@@ -97,13 +97,13 @@ internal fun CallScreen(
             ) {
                 Text(
                     call.peerName ?: "Звонок",
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.headlineSmall,
                 )
                 Text(
                     statusText(call),
-                    color = Color.White.copy(alpha = 0.7f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
@@ -117,7 +117,7 @@ internal fun CallScreen(
                         .width(108.dp)
                         .aspectRatio(3f / 4f)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(Color.Black),
+                        .background(MaterialTheme.colorScheme.scrim),
                 ) {
                     CallVideoRenderer(engine = engine, local = true, modifier = Modifier.fillMaxSize(), mirror = true)
                 }
@@ -129,7 +129,7 @@ internal fun CallScreen(
                     Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp),
                     horizontalArrangement = Arrangement.Center,
                 ) {
-                    RoundCallButton(AppIcons.Close, Color(0xFF3A3A40), onDismiss)
+                    RoundCallButton(AppIcons.Close, MaterialTheme.colorScheme.surfaceContainerHighest, onDismiss)
                 }
             } else {
                 Row(
@@ -139,20 +139,36 @@ internal fun CallScreen(
                 ) {
                     RoundCallButton(
                         icon = if (call.media.micEnabled) AppIcons.Mic else AppIcons.MicOff,
-                        bg = if (call.media.micEnabled) Color(0xFF3A3A40) else Color.White,
-                        tint = if (call.media.micEnabled) Color.White else Color.Black,
+                        bg =
+                            if (call.media.micEnabled) {
+                                MaterialTheme.colorScheme.surfaceContainerHighest
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                        tint = if (call.media.micEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surface,
                         onClick = onToggleMic,
                     )
                     run {
                         RoundCallButton(
                             icon = if (call.media.cameraEnabled) AppIcons.Video else AppIcons.VideoOff,
-                            bg = if (call.media.cameraEnabled) Color(0xFF3A3A40) else Color.White,
-                            tint = if (call.media.cameraEnabled) Color.White else Color.Black,
+                            bg =
+                                if (call.media.cameraEnabled) {
+                                    MaterialTheme.colorScheme.surfaceContainerHighest
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                            tint = if (call.media.cameraEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surface,
                             onClick = onToggleCamera,
                         )
-                        if (call.media.cameraEnabled) RoundCallButton(AppIcons.SwitchCamera, Color(0xFF3A3A40), onSwitchCamera)
+                        if (call.media.cameraEnabled) {
+                            RoundCallButton(
+                                AppIcons.SwitchCamera,
+                                MaterialTheme.colorScheme.surfaceContainerHighest,
+                                onSwitchCamera,
+                            )
+                        }
                     }
-                    RoundCallButton(AppIcons.CallEnd, Color(0xFFE0384A), onHangup)
+                    RoundCallButton(AppIcons.CallEnd, MaterialTheme.colorScheme.error, onHangup, tint = MaterialTheme.colorScheme.onError)
                 }
             }
         }
@@ -186,7 +202,7 @@ private fun RoundCallButton(
     icon: androidx.compose.ui.graphics.painter.Painter,
     bg: Color,
     onClick: () -> Unit,
-    tint: Color = Color.White,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
 ) {
     Surface(
         onClick = onClick,

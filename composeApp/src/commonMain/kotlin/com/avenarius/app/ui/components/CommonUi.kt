@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
@@ -35,7 +36,7 @@ import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
-import com.avenarius.app.ui.theme.isLightTheme
+import com.avenarius.app.ui.theme.rotateHue
 
 @Composable
 internal fun CenteredSpinner() {
@@ -133,7 +134,7 @@ internal fun Avatar(
             Box(mod, contentAlignment = Alignment.Center) {
                 Text(
                     initials(name),
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.onPrimary,
                     // Sized from the circle, not the user's font scale, so two letters always fit.
                     fontSize = with(LocalDensity.current) { (size * 0.38f).toSp() },
                     fontWeight = FontWeight.SemiBold,
@@ -145,7 +146,7 @@ internal fun Avatar(
     }
 }
 
-/** Green presence dot, with a ring in the surface colour so it reads against the avatar. */
+/** Accent presence dot, with a ring in the surface colour so it reads against the avatar. */
 
 @Composable
 internal fun OnlineDot(
@@ -157,28 +158,25 @@ internal fun OnlineDot(
         modifier.size(ring).clip(CircleShape).background(MaterialTheme.colorScheme.surface),
         contentAlignment = Alignment.Center,
     ) {
-        Box(Modifier.size(ring * 0.7f).clip(CircleShape).background(Color(0xFF4CAF50)))
+        Box(Modifier.size(ring * 0.7f).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
     }
 }
 
-// Top-to-bottom gradients (Material 300 -> 600), one per hue.
-private val AvatarGradients =
-    listOf(
-        Color(0xFFE57373) to Color(0xFFE53935),
-        Color(0xFF64B5F6) to Color(0xFF1E88E5),
-        Color(0xFF81C784) to Color(0xFF43A047),
-        Color(0xFFFFB74D) to Color(0xFFFB8C00),
-        Color(0xFFBA68C8) to Color(0xFF8E24AA),
-        Color(0xFF4DB6AC) to Color(0xFF00897B),
-        Color(0xFFF06292) to Color(0xFFD81B60),
-        Color(0xFF9575CD) to Color(0xFF5E35B1),
-    )
+private const val AVATAR_HUES = 8
 
-private fun avatarGradient(key: String): Pair<Color, Color> = AvatarGradients[(key.hashCode() and 0x7fffffff) % AvatarGradients.size]
+/** A stable per-person turn of the accent's hue, so avatars differ yet follow the theme. */
+private fun hueTurn(key: String): Float = (key.hashCode() and 0x7fffffff) % AVATAR_HUES * (360f / AVATAR_HUES)
 
-/** The sender's avatar hue, for their name in group chats; the readable shade for the current theme. */
 @Composable
-internal fun senderNameColor(key: String): Color = avatarGradient(key).let { (light, dark) -> if (isLightTheme()) dark else light }
+private fun avatarGradient(key: String): Pair<Color, Color> {
+    val cs = MaterialTheme.colorScheme
+    val turn = hueTurn(key)
+    return lerp(cs.primary, cs.onPrimary, 0.12f).rotateHue(turn) to cs.primary.rotateHue(turn)
+}
+
+/** The sender's avatar hue, for their name in group chats (primary is readable on surfaces). */
+@Composable
+internal fun senderNameColor(key: String): Color = MaterialTheme.colorScheme.primary.rotateHue(hueTurn(key))
 
 /** Up to two initials from the first letters of the first words: "Анна Петрова" -> "АП". */
 internal fun initials(name: String): String =

@@ -360,15 +360,28 @@ private fun roleLabel(
         else -> null
     }
 
-private fun participantsLabel(count: Int): String {
+/** "243 783 участника" (or "подписчика" for a [channel]), digits grouped by thousands. */
+internal fun participantsLabel(
+    count: Int,
+    channel: Boolean = false,
+): String {
     val n = count % 100
     val d = count % 10
-    val word =
+    val form =
         when {
-            n in 11..14 -> "участников"
-            d == 1 -> "участник"
-            d in 2..4 -> "участника"
-            else -> "участников"
+            n in 11..14 -> 2
+            d == 1 -> 0
+            d in 2..4 -> 1
+            else -> 2
         }
-    return "$count $word"
+    val word = (if (channel) listOf("подписчик", "подписчика", "подписчиков") else listOf("участник", "участника", "участников"))[form]
+    // Non-breaking spaces, so the number never wraps mid-way.
+    val digits =
+        count
+            .toString()
+            .reversed()
+            .chunked(3)
+            .joinToString("\u00A0")
+            .reversed()
+    return "$digits $word"
 }

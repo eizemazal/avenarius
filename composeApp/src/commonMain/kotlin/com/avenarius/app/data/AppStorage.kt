@@ -58,6 +58,16 @@ class Prefs(
         get() = storage.getString(KEY_THEME) ?: "system"
         set(value) = storage.putString(KEY_THEME, value)
 
+    /** Locally pinned chat ids (comma-separated); belong to the account, so [clear] drops them. */
+    var pinnedChats: Set<Long>
+        get() =
+            storage
+                .getString(KEY_PINNED)
+                ?.split(',')
+                ?.mapNotNull { it.toLongOrNull() }
+                ?.toSet() ?: emptySet()
+        set(value) = storage.putString(KEY_PINNED, value.joinToString(",").ifEmpty { null })
+
     /** Accent color name (see Accent); like the theme, survives logout. */
     var accent: String?
         get() = storage.getString(KEY_ACCENT)
@@ -96,12 +106,14 @@ class Prefs(
     fun clear() {
         token = null
         userId = null
+        pinnedChats = emptySet()
     }
 
     companion object {
         val UI_SCALE_RANGE = 0.8f..1.3f
         val FONT_SCALE_RANGE = 0.8f..1.5f
         private const val KEY_ACCENT = "accent"
+        private const val KEY_PINNED = "pinned_chats"
         private const val KEY_UI_SCALE = "ui_scale"
         private const val KEY_FONT_SCALE = "font_scale"
         private const val KEY_TOKEN = "login_token"

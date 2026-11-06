@@ -1,10 +1,13 @@
 package com.avenarius.app.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
@@ -28,7 +31,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -42,6 +48,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -62,6 +69,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -94,6 +104,7 @@ import com.avenarius.app.ui.theme.Accent
 import com.avenarius.app.ui.theme.ThemeMode
 import com.avenarius.app.ui.theme.dynamicColorScheme
 import com.avenarius.app.ui.theme.isLightTheme
+import com.avenarius.app.ui.theme.rotateHue
 import com.avenarius.app.ui.typingText
 import kotlin.math.roundToInt
 import androidx.compose.material3.Tab as MdTab
@@ -461,6 +472,9 @@ internal fun MainScreen(
                         onRefresh = vm::refresh,
                         onOpenChat = vm::openChat,
                         onOpenUser = vm::openUser,
+                        pinned = state.pinnedChats,
+                        onTogglePin = vm::togglePin,
+                        onToggleMute = vm::toggleMute,
                         showRatePrompt = state.showRatePrompt && state.call == null,
                         onRateNow = vm::rateNow,
                         onRateLater = vm::rateLater,
@@ -495,7 +509,7 @@ internal fun MainScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ChatsTab(
     chats: List<Chat>,
@@ -512,6 +526,10 @@ private fun ChatsTab(
     onRefresh: () -> Unit,
     onOpenChat: (Chat) -> Unit,
     onOpenUser: (Long) -> Unit,
+    /** Locally pinned chat ids, kept at the top of the list. */
+    pinned: Set<Long> = emptySet(),
+    onTogglePin: (Long) -> Unit = {},
+    onToggleMute: (Chat) -> Unit = {},
     showRatePrompt: Boolean = false,
     onRateNow: () -> Unit = {},
     onRateLater: () -> Unit = {},
@@ -520,153 +538,231 @@ private fun ChatsTab(
     val launchReview = rememberAppReviewLauncher()
     // Filter the already-loaded chat list by title (= the other party's name for
     // dialogs); the search box that drives [query] lives in the top app bar.
+    var filter by remember { mutableStateOf(ChatFilter.ALL) }
+    var menuFor by remember { mutableStateOf<Long?>(null) }
+    val haptic = LocalHapticFeedback.current
     val visibleChats =
-        remember(chats, query) {
+        remember(chats, query, filter, pinned) {
             val q = query.trim()
-            if (q.isBlank()) chats else chats.filter { it.title.contains(q, ignoreCase = true) }
+            chats
+                .filter { filter.matches(it) && (q.isBlank() || it.title.contains(q, ignoreCase = true)) }
+                .sortedByDescending { it.id in pinned } // stable: recency order kept within each group
         }
     val listState = rememberLazyListState()
     // When a chat jumps to the top (new message, or a deleted dialog revived by an
     // incoming message), a keyed LazyColumn anchors to the previously-visible row,
     // leaving the new top item just above the fold. If the user is already at/near
     // the top, scroll up to reveal it; if they've scrolled down, leave them be.
-    val topChatId = chats.firstOrNull()?.id
+    val topChatId = visibleChats.firstOrNull()?.id // also follows a freshly pinned chat
     LaunchedEffect(topChatId) {
         if (topChatId != null && listState.firstVisibleItemIndex <= 2) {
             listState.animateScrollToItem(0)
         }
     }
-    PullToRefreshBox(isRefreshing = isRefreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
-        if (visibleChats.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    if (query.isBlank()) {
-                        "Чатов пока нет (потяните вниз для обновления)"
-                    } else {
-                        "Ничего не найдено"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-        } else {
-            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                if (showRatePrompt && query.isBlank()) {
-                    item(key = "rate-prompt") {
-                        RatePromptCard(
-                            onRate = {
-                                launchReview()
-                                onRateNow()
-                            },
-                            onLater = onRateLater,
-                            onNever = onRateNever,
-                        )
-                    }
-                }
-                items(visibleChats, key = { it.id }) { chat ->
-                    val otherId = if (chat.isDialog) chat.id xor myId else null
-                    // Dialogs take their avatar from the contact (or a resolved
-                    // non-contact peer); groups carry their own.
-                    val avatarUrl =
-                        if (chat.isDialog) {
-                            otherId?.let { id ->
-                                contacts.firstOrNull { it.id == id }?.avatarUrl ?: peers[id]?.avatarUrl
-                            }
+    Column(Modifier.fillMaxSize()) {
+        ChatFilterRow(chats, filter) { filter = it }
+        PullToRefreshBox(isRefreshing = isRefreshing, onRefresh = onRefresh, modifier = Modifier.weight(1f)) {
+            if (visibleChats.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        if (query.isBlank() && filter == ChatFilter.ALL) {
+                            "Чатов пока нет (потяните вниз для обновления)"
                         } else {
-                            chat.avatarUrl
-                        }
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickableRow { onOpenChat(chat) }
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Avatar(
-                            chat.title,
-                            avatarUrl,
-                            CHAT_AVATAR,
-                            onClick = otherId?.let { id -> { onOpenUser(id) } },
-                            online = otherId != null && otherId in online,
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    chat.title,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f, fill = false),
-                                )
-                                if (chat.muted) {
-                                    Spacer(Modifier.width(4.dp))
-                                    Icon(
-                                        AppIcons.Muted,
-                                        contentDescription = "Без звука",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                }
-                            }
-                            val draft = drafts[chat.id]?.takeIf { it.isNotBlank() }
-                            val typingHere = typing[chat.id]
-                            if (typingHere != null) {
-                                Text(
-                                    typingHere,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            } else if (draft != null) {
-                                Text(
-                                    buildAnnotatedString {
-                                        withStyle(SpanStyle(color = MaterialTheme.colorScheme.error)) {
-                                            append("Черновик: ")
-                                        }
-                                        // Newlines would make the row read oddly on one line.
-                                        append(draft.replace('\n', ' ').trim())
-                                    },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            } else {
-                                chat.lastMessageText?.let {
-                                    Text(
-                                        it,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                            }
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        // Trailing column: last-activity time over the unread badge (as the
-                        // official list does), so a glance shows both recency and backlog.
-                        Column(horizontalAlignment = Alignment.End) {
-                            if (chat.lastEventTime > 0) {
-                                Text(
-                                    formatListTime(chat.lastEventTime),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                )
-                            }
-                            if (chat.unreadCount > 0) {
-                                Spacer(Modifier.height(4.dp))
-                                UnreadBadge(chat.unreadCount, muted = chat.muted)
-                            }
+                            "Ничего не найдено"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            } else {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                    if (showRatePrompt && query.isBlank()) {
+                        item(key = "rate-prompt") {
+                            RatePromptCard(
+                                onRate = {
+                                    launchReview()
+                                    onRateNow()
+                                },
+                                onLater = onRateLater,
+                                onNever = onRateNever,
+                            )
                         }
                     }
-                    // Inset under the text, as messengers do, so avatars read as one column.
-                    HorizontalDivider(Modifier.padding(start = CHAT_AVATAR + 24.dp), thickness = 0.5.dp)
+                    items(visibleChats, key = { it.id }) { chat ->
+                        val otherId = if (chat.isDialog) chat.id xor myId else null
+                        // Dialogs take their avatar from the contact (or a resolved
+                        // non-contact peer); groups carry their own.
+                        val avatarUrl =
+                            if (chat.isDialog) {
+                                otherId?.let { id ->
+                                    contacts.firstOrNull { it.id == id }?.avatarUrl ?: peers[id]?.avatarUrl
+                                }
+                            } else {
+                                chat.avatarUrl
+                            }
+                        Box {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .combinedClickable(
+                                        onClick = { onOpenChat(chat) },
+                                        onLongClick = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            menuFor = chat.id
+                                        },
+                                    ).padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Avatar(
+                                    chat.title,
+                                    avatarUrl,
+                                    CHAT_AVATAR,
+                                    onClick = otherId?.let { id -> { onOpenUser(id) } },
+                                    online = otherId != null && otherId in online,
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            chat.title,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false),
+                                        )
+                                        if (chat.muted) {
+                                            Spacer(Modifier.width(4.dp))
+                                            Icon(
+                                                AppIcons.Muted,
+                                                contentDescription = "Без звука",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                        }
+                                    }
+                                    val draft = drafts[chat.id]?.takeIf { it.isNotBlank() }
+                                    val typingHere = typing[chat.id]
+                                    if (typingHere != null) {
+                                        Text(
+                                            typingHere,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    } else if (draft != null) {
+                                        Text(
+                                            buildAnnotatedString {
+                                                withStyle(SpanStyle(color = MaterialTheme.colorScheme.error)) {
+                                                    append("Черновик: ")
+                                                }
+                                                // Newlines would make the row read oddly on one line.
+                                                append(draft.replace('\n', ' ').trim())
+                                            },
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    } else {
+                                        chat.lastMessageText?.let {
+                                            Text(
+                                                it,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                // Trailing column: last-activity time over the unread badge (as the
+                                // official list does), so a glance shows both recency and backlog.
+                                Column(horizontalAlignment = Alignment.End) {
+                                    if (chat.lastEventTime > 0) {
+                                        Text(
+                                            formatListTime(chat.lastEventTime),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                        )
+                                    }
+                                    if (chat.unreadCount > 0) {
+                                        Spacer(Modifier.height(4.dp))
+                                        UnreadBadge(chat.unreadCount, muted = chat.muted)
+                                    } else if (chat.id in pinned) {
+                                        Spacer(Modifier.height(4.dp))
+                                        Icon(
+                                            AppIcons.Pin,
+                                            contentDescription = "Закреплён",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
+                                }
+                            }
+                            DropdownMenu(expanded = menuFor == chat.id, onDismissRequest = { menuFor = null }) {
+                                val isPinned = chat.id in pinned
+                                DropdownMenuItem(
+                                    text = { Text(if (isPinned) "Открепить" else "Закрепить") },
+                                    leadingIcon = { Icon(AppIcons.Pin, contentDescription = null) },
+                                    onClick = {
+                                        menuFor = null
+                                        onTogglePin(chat.id)
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (chat.muted) "Включить уведомления" else "Отключить уведомления") },
+                                    leadingIcon = { Icon(if (chat.muted) AppIcons.Unmuted else AppIcons.Muted, contentDescription = null) },
+                                    onClick = {
+                                        menuFor = null
+                                        onToggleMute(chat)
+                                    },
+                                )
+                            }
+                        }
+                        // Inset under the text, as messengers do, so avatars read as one column.
+                        HorizontalDivider(Modifier.padding(start = CHAT_AVATAR + 24.dp), thickness = 0.5.dp)
+                    }
                 }
             }
+        }
+    }
+}
+
+/** Client-side folders over the loaded chat list, like a messenger's chat tabs. */
+private enum class ChatFilter(
+    val label: String,
+    val matches: (Chat) -> Boolean,
+) {
+    ALL("Все", { true }),
+    PERSONAL("Личные", { it.isDialog }),
+    GROUPS("Группы", { !it.isDialog && !it.isChannel }),
+    CHANNELS("Каналы", { it.isChannel }),
+    UNREAD("Непрочитанные", { it.unreadCount > 0 }),
+}
+
+/** Folder chips; each shows how many of its chats have unread messages (muted ones aside). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatFilterRow(
+    chats: List<Chat>,
+    selected: ChatFilter,
+    onSelect: (ChatFilter) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        ChatFilter.entries.forEach { f ->
+            val unread = chats.count { f.matches(it) && it.unreadCount > 0 && !it.muted }
+            FilterChip(
+                selected = f == selected,
+                onClick = { onSelect(f) },
+                label = { Text(if (unread > 0) "${f.label}  $unread" else f.label) },
+                shape = CircleShape,
+            )
         }
     }
 }
@@ -778,111 +874,147 @@ private fun SettingsTab(
             },
         )
     }
+    val cacheSummary =
+        when {
+            imageCacheBytes <= 0 && dataCacheBytes <= 0 -> "Кэш пуст"
+            imageCacheBytes <= 0 -> "Данные ${formatBytes(dataCacheBytes)}"
+            // Split out, because the thumbnails are almost always the bulk of it
+            // and a single total made the number look implausibly small.
+            else -> "Изображения ${formatBytes(imageCacheBytes)} · данные ${formatBytes(dataCacheBytes)}"
+        }
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        Row(
-            Modifier.fillMaxWidth().clickableRow(onOpenProfile).padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Avatar(account?.firstName ?: "Я", account?.avatarUrl, 64.dp)
-            Spacer(Modifier.width(16.dp))
-            Column {
-                Text(
-                    listOfNotNull(account?.firstName, account?.lastName).joinToString(" ").ifBlank { "Профиль" },
-                    style = MaterialTheme.typography.titleLarge,
-                )
-                Text("Открыть профиль", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-        TextButton(onClick = { confirmLogout = true }) { Text("Выйти из аккаунта") }
-        HorizontalDivider()
-
-        // Authorize the web/desktop version by scanning its login QR code.
-        if (qrScanSupported && !demoMode) {
+        SettingsCard {
             Row(
-                Modifier.fillMaxWidth().clickableRow { scanWebLogin() }.padding(vertical = 8.dp),
+                Modifier.fillMaxWidth().clickableRow(onOpenProfile).padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(AppIcons.Search, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(12.dp))
-                Text(
-                    "Войти в веб-версию по QR-коду",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            HorizontalDivider()
-        }
-
-        // Security: the login password (2FA), as in the official Settings → Безопасность.
-        if (!demoMode) {
-            Row(
-                Modifier.fillMaxWidth().clickableRow(onOpenTwoFa).padding(vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Пароль для входа", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
+                Avatar(account?.firstName ?: "Я", account?.avatarUrl, 64.dp)
+                Spacer(Modifier.width(16.dp))
+                Column {
                     Text(
-                        when (twoFaEnabled) {
-                            true -> "Включён"
-                            false -> "Отключён"
-                            null -> "Дополнительная защита профиля"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        listOfNotNull(account?.firstName, account?.lastName).joinToString(" ").ifBlank { "Профиль" },
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
                     )
+                    Text("Открыть профиль", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
                 }
             }
-            HorizontalDivider()
         }
 
-        // Settings block.
-        Text("Тема оформления", style = MaterialTheme.typography.titleMedium)
-        Column(Modifier.selectableGroup()) {
-            ThemeOption("Системная", ThemeMode.SYSTEM, theme, onSetTheme)
-            ThemeOption("Тёмная", ThemeMode.DARK, theme, onSetTheme)
-            ThemeOption("Светлая", ThemeMode.LIGHT, theme, onSetTheme)
-        }
-        Text("Цвет акцента", style = MaterialTheme.typography.titleMedium)
-        AccentPicker(accent, onSetAccent)
-        ScaleSlider("Масштаб интерфейса", uiScale, Prefs.UI_SCALE_RANGE, onSetUiScale)
-        ScaleSlider("Размер шрифта", fontScale, Prefs.FONT_SCALE_RANGE, onSetFontScale)
-        HorizontalDivider()
-
-        // Cached chat list / contacts (the warm-start snapshot).
-        Row(
-            Modifier.fillMaxWidth().clickableRow { confirmClearCache = true }.padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Очистить кэш", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
-                // Split out, because the thumbnails are almost always the bulk of it
-                // and a single total made the number look implausibly small.
-                val summary =
-                    when {
-                        imageCacheBytes <= 0 && dataCacheBytes <= 0 -> "Кэш пуст"
-                        imageCacheBytes <= 0 -> "Данные ${formatBytes(dataCacheBytes)}"
-                        else ->
-                            "Изображения ${formatBytes(imageCacheBytes)} · " +
-                                "данные ${formatBytes(dataCacheBytes)}"
-                    }
-                Text(
-                    summary,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        if (!demoMode) {
+            SettingsCard("Аккаунт") {
+                // Authorize the web/desktop version by scanning its login QR code.
+                if (qrScanSupported) {
+                    SettingsRow(AppIcons.QrScan, tile(0f), "Войти в веб-версию по QR-коду", onClick = { scanWebLogin() })
+                }
+                // Security: the login password (2FA), as in the official Settings → Безопасность.
+                SettingsRow(
+                    AppIcons.Lock,
+                    tile(-60f),
+                    "Пароль для входа",
+                    when (twoFaEnabled) {
+                        true -> "Включён"
+                        false -> "Отключён"
+                        null -> "Дополнительная защита профиля"
+                    },
+                    onClick = onOpenTwoFa,
                 )
             }
         }
-        HorizontalDivider()
-        Text(
-            "О программе",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.fillMaxWidth().clickableRow(onOpenAbout).padding(vertical = 8.dp),
-        )
+
+        SettingsCard("Оформление") {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Тема", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(Modifier.selectableGroup()) {
+                    ThemeOption("Системная", ThemeMode.SYSTEM, theme, onSetTheme)
+                    ThemeOption("Тёмная", ThemeMode.DARK, theme, onSetTheme)
+                    ThemeOption("Светлая", ThemeMode.LIGHT, theme, onSetTheme)
+                }
+                Text("Цвет акцента", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                AccentPicker(accent, onSetAccent)
+                ScaleSlider("Масштаб интерфейса", uiScale, Prefs.UI_SCALE_RANGE, onSetUiScale)
+                ScaleSlider("Размер шрифта", fontScale, Prefs.FONT_SCALE_RANGE, onSetFontScale)
+            }
+        }
+
+        SettingsCard("Данные") {
+            SettingsRow(AppIcons.Clean, tile(150f), "Очистить кэш", cacheSummary, onClick = { confirmClearCache = true })
+        }
+
+        SettingsCard {
+            SettingsRow(AppIcons.Info, tile(60f), "О программе", onClick = onOpenAbout)
+            SettingsRow(
+                AppIcons.Logout,
+                MaterialTheme.colorScheme.error,
+                "Выйти из аккаунта",
+                danger = true,
+                onClick = { confirmLogout = true },
+            )
+        }
+    }
+}
+
+/** Settings tile color: the accent with its hue turned, so rows differ yet follow the theme. */
+@Composable
+private fun tile(turn: Float): Color = MaterialTheme.colorScheme.primary.rotateHue(turn)
+
+/** A rounded settings group with an optional caption above it. */
+@Composable
+private fun SettingsCard(
+    title: String? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column {
+        if (title != null) {
+            Text(
+                title,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 16.dp, bottom = 8.dp),
+            )
+        }
+        Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), content = content)
+        }
+    }
+}
+
+/** One tappable settings row: white glyph on a colored tile, title and optional subtitle. */
+@Composable
+private fun SettingsRow(
+    icon: Painter,
+    tile: Color,
+    title: String,
+    subtitle: String? = null,
+    danger: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().clickableRow(onClick).padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(tile), contentAlignment = Alignment.Center) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = if (danger) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            )
+            if (subtitle != null) {
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 }
 
