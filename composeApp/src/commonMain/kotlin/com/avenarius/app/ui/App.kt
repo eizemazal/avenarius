@@ -52,6 +52,7 @@ import com.avenarius.app.ui.screens.UserScreen
 import com.avenarius.app.ui.theme.AvenariusColorsDark
 import com.avenarius.app.ui.theme.AvenariusColorsLight
 import com.avenarius.app.ui.theme.ThemeMode
+import com.avenarius.app.ui.theme.dynamicColorScheme
 import okio.Path.Companion.toPath
 
 /** Ceiling for the on-disk thumbnail cache. */
@@ -96,7 +97,7 @@ fun App(viewModel: AppViewModel) {
             ThemeMode.DARK -> true
             ThemeMode.LIGHT -> false
         }
-    MaterialTheme(colorScheme = if (dark) AvenariusColorsDark else AvenariusColorsLight) {
+    MaterialTheme(colorScheme = dynamicColorScheme(dark) ?: if (dark) AvenariusColorsDark else AvenariusColorsLight) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             // Intercept the Android system back so leaving a chat returns to the
             // list (and code/password screens return to login) instead of exiting.

@@ -398,19 +398,25 @@ internal fun MainScreen(
                 NavigationBarItem(
                     selected = state.tab == Tab.CHATS,
                     onClick = { vm.selectTab(Tab.CHATS) },
-                    icon = { Icon(AppIcons.Chats, contentDescription = null) },
+                    icon = {
+                        Icon(if (state.tab == Tab.CHATS) AppIcons.ChatsSelected else AppIcons.Chats, contentDescription = null)
+                    },
                     label = { Text("Чаты") },
                 )
                 NavigationBarItem(
                     selected = state.tab == Tab.CONTACTS,
                     onClick = { vm.selectTab(Tab.CONTACTS) },
-                    icon = { Icon(AppIcons.Contacts, contentDescription = null) },
+                    icon = {
+                        Icon(if (state.tab == Tab.CONTACTS) AppIcons.ContactsSelected else AppIcons.Contacts, contentDescription = null)
+                    },
                     label = { Text("Контакты") },
                 )
                 NavigationBarItem(
                     selected = state.tab == Tab.SETTINGS,
                     onClick = { vm.selectTab(Tab.SETTINGS) },
-                    icon = { Icon(AppIcons.Settings, contentDescription = null) },
+                    icon = {
+                        Icon(if (state.tab == Tab.SETTINGS) AppIcons.SettingsSelected else AppIcons.Settings, contentDescription = null)
+                    },
                     label = { Text("Настройки") },
                 )
             }
