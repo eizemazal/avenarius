@@ -227,6 +227,7 @@ fun App(viewModel: AppViewModel) {
                                             state.contacts + state.groupMembers.mapValues { it.value.name },
                                         ),
                                     onlineUsers = state.onlineUsers,
+                                    presence = state.presence,
                                     onLoadOlder = viewModel::loadOlder,
                                     onBack = viewModel::backToChats,
                                     onStartCall = viewModel::startCall,

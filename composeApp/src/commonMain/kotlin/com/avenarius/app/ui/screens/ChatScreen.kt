@@ -105,6 +105,7 @@ import com.avenarius.app.model.RecordedVoice
 import com.avenarius.app.model.ServiceEvent
 import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.VoiceAttach
+import com.avenarius.app.net.Presence
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.MediaViewer
 import com.avenarius.app.ui.PlatformBackHandler
@@ -119,6 +120,8 @@ import com.avenarius.app.ui.components.openUriSafely
 import com.avenarius.app.ui.components.senderNameColor
 import com.avenarius.app.ui.formatClock
 import com.avenarius.app.ui.formatDay
+import com.avenarius.app.ui.lastSeenText
+import com.avenarius.app.ui.nowMillis
 import com.avenarius.app.ui.rememberCameraPhotoLauncher
 import com.avenarius.app.ui.rememberCameraVideoLauncher
 import com.avenarius.app.ui.rememberFilePickLauncher
@@ -152,6 +155,8 @@ internal fun ChatScreen(
     typingText: String? = null,
     /** Who is online now; a dialog's header says "в сети" when the partner is. */
     onlineUsers: Set<Long> = emptySet(),
+    /** Last-seen info, for "был(а) в сети …" when the partner is offline. */
+    presence: Map<Long, Presence> = emptyMap(),
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     /** Starts a call with the dialog partner ([userId], [isVideo]). */
@@ -326,13 +331,16 @@ internal fun ChatScreen(
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.SemiBold,
                             )
-                            val status = typingText ?: if (otherUserId != null && otherUserId in onlineUsers) "в сети" else null
+                            val partnerOnline = otherUserId != null && otherUserId in onlineUsers
+                            val active = typingText != null || partnerOnline
+                            val lastSeen = otherUserId?.let { presence[it] }?.let { lastSeenText(it, nowMillis()) }
+                            val status = typingText ?: if (partnerOnline) "в сети" else lastSeen
                             if (status != null) {
                                 Text(
                                     status,
                                     maxLines = 1,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary,
+                                    color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }

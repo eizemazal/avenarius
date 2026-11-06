@@ -39,6 +39,7 @@ import com.avenarius.app.net.DemoMaxApi
 import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
 import com.avenarius.app.net.PasswordSetupRequiredException
+import com.avenarius.app.net.Presence
 import com.avenarius.app.ui.AppLinks.MAX_RECOVERY_DEFAULT
 import com.avenarius.app.ui.theme.Accent
 import com.avenarius.app.ui.theme.ThemeMode
@@ -253,6 +254,8 @@ data class AppState(
     val contactsList: List<UserInfo> = emptyList(),
     /** Ids of users currently online (for the green presence dot). */
     val onlineUsers: Set<Long> = emptySet(),
+    /** Last-seen info per user, for the chat header ("был(а) в сети в 08:15"). */
+    val presence: Map<Long, Presence> = emptyMap(),
     /** Who is typing where: chatId → (userId → epoch-ms until which the hint is valid). */
     val typing: Map<Long, Map<Long, Long>> = emptyMap(),
     /** The user whose profile page is open (Screen.USER). */
@@ -961,6 +964,7 @@ class AppViewModel(
                 _state.update {
                     it.copy(
                         onlineUsers = if (p.online) it.onlineUsers + p.userId else it.onlineUsers - p.userId,
+                        presence = it.presence + (p.userId to p),
                     )
                 }
             }
@@ -1291,6 +1295,7 @@ class AppViewModel(
                                 contacts = result.contacts,
                                 contactsList = result.contactsList,
                                 onlineUsers = result.online,
+                                presence = result.presence,
                                 reconnecting = false,
                                 busy = false,
                                 error = null,
@@ -1449,6 +1454,7 @@ class AppViewModel(
                     contacts = result.contacts,
                     contactsList = result.contactsList,
                     onlineUsers = result.online,
+                    presence = result.presence,
                     busy = false,
                     error = null,
                     reconnecting = false,
@@ -1593,6 +1599,7 @@ class AppViewModel(
                 contacts = result.contacts,
                 contactsList = result.contactsList,
                 onlineUsers = result.online,
+                presence = result.presence,
                 busy = false,
                 error = null,
                 syncedOnce = true,
@@ -2190,6 +2197,7 @@ class AppViewModel(
                 contacts = result.contacts,
                 contactsList = result.contactsList,
                 onlineUsers = result.online,
+                presence = result.presence,
                 error = null,
             )
         }
