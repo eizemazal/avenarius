@@ -727,8 +727,6 @@ private fun ChatsTab(
                                 )
                             }
                         }
-                        // Inset under the text, as messengers do, so avatars read as one column.
-                        HorizontalDivider(Modifier.padding(start = CHAT_AVATAR + 24.dp), thickness = 0.5.dp)
                     }
                 }
             }

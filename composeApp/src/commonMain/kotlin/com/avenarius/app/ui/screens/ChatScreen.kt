@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -89,6 +90,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -640,7 +642,10 @@ internal fun ChatScreen(
             }
         },
     ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
+            // Bubbles may span most of the screen, as messengers do; a fixed cap left a wide
+            // empty margin on large or scaled-down screens and wrapped text early.
+            val bubbleMax = maxWidth * 0.85f
             if (busy && messages.isEmpty()) {
                 CenteredSpinner()
             }
@@ -662,7 +667,7 @@ internal fun ChatScreen(
             }
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 itemsIndexed(messages, key = { _, m -> m.id ?: m.cid ?: m.time }) { index, msg ->
@@ -684,6 +689,7 @@ internal fun ChatScreen(
                     MessageRow(
                         msg = msg,
                         isMine = isMine,
+                        maxWidth = bubbleMax,
                         senderName = contacts[msg.senderId] ?: "—",
                         senderAvatar = senderAvatars[msg.senderId],
                         isGroup = !isDialog,
@@ -846,6 +852,8 @@ internal fun ChatScreen(
 private fun MessageRow(
     msg: Message,
     isMine: Boolean,
+    /** Widest a bubble may grow (a share of the chat's width). */
+    maxWidth: Dp,
     senderName: String,
     senderAvatar: String?,
     isGroup: Boolean,
@@ -974,13 +982,13 @@ private fun MessageRow(
             Column(horizontalAlignment = if (isMine) Alignment.End else Alignment.Start) {
                 Box(
                     Modifier
-                        .widthIn(max = 300.dp)
+                        .widthIn(max = maxWidth)
                         .then(if (bareVideoNote) Modifier else Modifier.shadow(0.5.dp, bubbleShape))
                         .clip(bubbleShape)
                         .background(bg)
                         .clickable(onClick = onClick)
                         .padding(
-                            horizontal = if (bareVideoNote) 0.dp else 12.dp,
+                            horizontal = if (bareVideoNote) 0.dp else 10.dp,
                             vertical = if (bareVideoNote) 0.dp else 6.dp,
                         ),
                 ) {
