@@ -6,10 +6,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -101,13 +105,15 @@ fun App(viewModel: AppViewModel) {
                 Column(Modifier.fillMaxSize()) {
                     // Thin "reconnecting" strip while we transparently re-establish the
                     // connection — shown over the chat list / open chat, never a bounce.
-                    if (state.reconnecting && (state.screen == Screen.CHATS || state.screen == Screen.CHAT)) {
+                    val showBar = state.reconnecting && (state.screen == Screen.CHATS || state.screen == Screen.CHAT)
+                    if (showBar) {
                         // On a cold start the cached chat list is already on screen while
                         // the first sync runs, so the strip says "connecting" — calling
                         // that a *re*connection would be wrong.
                         ReconnectingBar(reconnecting = state.syncedOnce)
                     }
-                    Box(Modifier.weight(1f)) {
+                    // The strip took the status-bar inset, so the screen's top bar mustn't add it again.
+                    Box(Modifier.weight(1f).then(if (showBar) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier)) {
                         when (state.screen) {
                             Screen.LOADING -> LoadingScreen(reconnecting = state.reconnecting)
                             Screen.LOGIN ->
@@ -334,7 +340,12 @@ private fun LoadingScreen(reconnecting: Boolean) {
 @Composable
 private fun ReconnectingBar(reconnecting: Boolean) {
     Row(
-        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.secondaryContainer).padding(vertical = 4.dp),
+        // Edge-to-edge: sit below the status bar instead of under its icons.
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .statusBarsPadding()
+            .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
