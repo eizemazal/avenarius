@@ -108,6 +108,7 @@ import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.RecordedVoice
 import com.avenarius.app.model.ServiceEvent
 import com.avenarius.app.model.UploadState
+import com.avenarius.app.model.UserInfo
 import com.avenarius.app.model.VoiceAttach
 import com.avenarius.app.net.Presence
 import com.avenarius.app.ui.AppIcons
@@ -206,6 +207,18 @@ internal fun ChatScreen(
     onDeleteChat: () -> Unit,
     onLeaveGroup: () -> Unit,
     onOpenGroup: () -> Unit,
+    /** Read marks of this chat's members (userId → ms), for the "who read" list. */
+    readMarks: Map<Long, Long> = emptyMap(),
+    /** The message whose read-by sheet is open, if any. */
+    readingMessageId: String? = null,
+    /** True while the read-by sheet is refreshing its data. */
+    readMarksLoading: Boolean = false,
+    /** Opens the read-by sheet for a message. */
+    onShowReadBy: (Message) -> Unit = {},
+    /** Closes the read-by sheet. */
+    onCloseReadBy: () -> Unit = {},
+    /** Resolves a reader's name + avatar for the sheet. */
+    readerInfo: (Long) -> UserInfo = { UserInfo(it, "Пользователь $it") },
 ) {
     var draft by remember(chat?.id) { mutableStateOf(initialDraft) }
     // What was typed before an edit took over the input, so cancelling an edit puts
@@ -778,6 +791,10 @@ internal fun ChatScreen(
             // Editing is for our own text messages (not media/service messages).
             canEdit = target.senderId == myId && target.service == null && target.media.isEmpty() && target.files.isEmpty(),
             isMine = target.senderId == myId,
+            // Read receipts are only meaningful where several people can read one
+            // message: groups and channels, never a 1:1 dialog.
+            canShowReadBy = target.senderId == myId && !isDialog,
+            readByCount = if (readMarks.isEmpty()) null else readMarks.count { it.value >= target.time },
             onDismiss = { menuTarget = null },
             onReact = { emoji ->
                 onReact(target, emoji)
@@ -800,6 +817,32 @@ internal fun ChatScreen(
             onDelete = {
                 deleteTarget = target
                 menuTarget = null
+            },
+            onShowReadBy = {
+                onShowReadBy(target)
+                menuTarget = null
+            },
+        )
+    }
+
+    // "Who read this message" sheet (groups/channels).
+    val readingMessage = messages.firstOrNull { it.id != null && it.id == readingMessageId }
+    if (readingMessage != null) {
+        // Readers are those whose mark reached this message; newest reader first.
+        val readers =
+            readMarks
+                .filterValues { it >= readingMessage.time }
+                .entries
+                .sortedByDescending { it.value }
+                .map { readerInfo(it.key) }
+        ReadBySheet(
+            readers = readers,
+            totalMembers = chat?.participantsCount ?: 0,
+            loading = readMarksLoading,
+            onDismiss = onCloseReadBy,
+            onOpenUser = {
+                onCloseReadBy()
+                onOpenUser(it)
             },
         )
     }
@@ -1540,12 +1583,17 @@ private fun MessageContextMenu(
     message: Message,
     canEdit: Boolean,
     isMine: Boolean,
+    /** Whether this message can show a "who read" entry (our message in a group). */
+    canShowReadBy: Boolean = false,
+    /** How many members have read it; null when unknown (no read data yet). */
+    readByCount: Int? = null,
     onDismiss: () -> Unit,
     onReact: (String) -> Unit,
     onReply: () -> Unit,
     onForward: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onShowReadBy: () -> Unit = {},
 ) {
     val clipboard = LocalClipboardManager.current
     var expanded by remember { mutableStateOf(false) }
@@ -1613,8 +1661,94 @@ private fun MessageContextMenu(
                             onDismiss()
                         }
                     }
+                    if (canShowReadBy) {
+                        val label = if (readByCount == null || readByCount == 0) "Кто прочитал" else "Кто прочитал ($readByCount)"
+                        ContextMenuItem(AppIcons.Read, label, onClick = onShowReadBy)
+                    }
                     if (isMine || message.service == null) {
                         ContextMenuItem(AppIcons.Delete, "Удалить", onClick = onDelete)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * "Who read this message" list, shown over the conversation like the context menu
+ * (same scrim + back handling). Rows open the reader's profile.
+ */
+@Composable
+private fun ReadBySheet(
+    readers: List<UserInfo>,
+    totalMembers: Int,
+    loading: Boolean,
+    onDismiss: () -> Unit,
+    onOpenUser: (Long) -> Unit,
+) {
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(Unit) { focusManager.clearFocus() }
+    PlatformBackHandler(enabled = true, onBack = onDismiss)
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.6f))
+            .clickable(onClick = onDismiss),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            // Swallow taps so a tap inside the card doesn't dismiss it.
+            modifier = Modifier.fillMaxWidth().padding(32.dp).clickable(enabled = false) {},
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(Modifier.padding(vertical = 12.dp)) {
+                Text(
+                    "Кто прочитал",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                )
+                Text(
+                    if (totalMembers > 0) "Прочитали ${readers.size} из $totalMembers" else "Прочитали ${readers.size}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                )
+                Spacer(Modifier.height(8.dp))
+                when {
+                    loading && readers.isEmpty() ->
+                        Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(28.dp))
+                        }
+                    readers.isEmpty() ->
+                        Text(
+                            "Пока никто не прочитал",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                        )
+                    else -> {
+                        HorizontalDivider()
+                        LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                            items(readers, key = { it.id }) { reader ->
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onOpenUser(reader.id) }
+                                        .padding(horizontal = 20.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Avatar(reader.name, reader.avatarUrl, 40.dp)
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(
+                                        reader.name,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

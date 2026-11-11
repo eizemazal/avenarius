@@ -92,6 +92,10 @@ private class FakeMaxClient : MaxApi {
     var userToReturn: UserInfo? = null
     var searchResultsToReturn: List<SearchResult> = emptyList()
 
+    /** What [getReadMarks] returns (userId → mark), for the "who read" sheet. */
+    var readMarksToReturn: Map<Long, Long> = emptyMap()
+    var readMarksRequested = mutableListOf<Long>()
+
     // --- recorded calls ---
     var connectCount = 0
     var disconnectCount = 0
@@ -438,6 +442,11 @@ private class FakeMaxClient : MaxApi {
     }
 
     override suspend fun getChatMembers(chatId: Long): List<UserInfo> = emptyList()
+
+    override suspend fun getReadMarks(chatId: Long): Map<Long, Long> {
+        readMarksRequested += chatId
+        return readMarksToReturn
+    }
 
     override suspend fun addMembers(
         chatId: Long,
@@ -2483,6 +2492,88 @@ class AppViewModelTest {
                 .first { it.id == "mine" }
                 .status,
         )
+    }
+
+    // --- "who read this message" (issue #50) ---
+
+    private val groupChat = Chat(id = 7, title = "Группа", lastMessageText = null, lastEventTime = 1, isDialog = false)
+
+    @Test
+    fun readMarkPushRecordsWhoRead() {
+        val chat = groupChat.copy(readMarks = mapOf(200L to 500L))
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+
+        fake.emitReadMark(ReadMark(chatId = 7, userId = 300, mark = 900))
+
+        // Both readers are remembered — the old code kept only the highest mark.
+        assertEquals(
+            mapOf(200L to 500L, 300L to 900L),
+            vm.state.value.currentChat
+                ?.readMarks,
+        )
+    }
+
+    @Test
+    fun readMarkNeverMovesBackwards() {
+        val chat = groupChat.copy(readMarks = mapOf(200L to 900L))
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+
+        // A late/duplicate push with an older mark must not un-read anything.
+        fake.emitReadMark(ReadMark(chatId = 7, userId = 200, mark = 400))
+
+        assertEquals(
+            mapOf(200L to 900L),
+            vm.state.value.currentChat
+                ?.readMarks,
+        )
+    }
+
+    @Test
+    fun openReadByRefreshesMarksFromServer() {
+        val chat = groupChat.copy(readMarks = mapOf(200L to 500L))
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        fake.readMarksToReturn = mapOf(200L to 500L, 300L to 900L)
+        val message = Message(id = "m1", cid = 1, chatId = 7, senderId = 100, text = "привет", time = 700)
+
+        vm.openReadBy(message)
+
+        assertEquals("m1", vm.state.value.readingMessageId)
+        assertEquals(listOf(7L), fake.readMarksRequested)
+        // The fresh reply is merged in, so the newer reader appears.
+        assertEquals(mapOf(200L to 500L, 300L to 900L), vm.state.value.readMarks)
+        assertFalse(vm.state.value.readMarksLoading)
+    }
+
+    @Test
+    fun closeReadByClearsTheSheet() {
+        val vm = loggedIn(listOf(groupChat))
+        vm.openChat(groupChat)
+        vm.openReadBy(Message(id = "m1", cid = 1, chatId = 7, senderId = 100, text = "x", time = 700))
+
+        vm.closeReadBy()
+
+        assertNull(vm.state.value.readingMessageId)
+        assertTrue(
+            vm.state.value.readMarks
+                .isEmpty(),
+        )
+    }
+
+    @Test
+    fun openReadBySurvivesAFailingRefresh() {
+        val chat = groupChat.copy(readMarks = mapOf(200L to 500L))
+        val vm = loggedIn(listOf(chat))
+        vm.openChat(chat)
+        // Server refuses (e.g. unsupported opcode): the seeded marks must still show.
+        fake.readMarksToReturn = emptyMap()
+
+        vm.openReadBy(Message(id = "m1", cid = 1, chatId = 7, senderId = 100, text = "x", time = 700))
+
+        assertEquals(mapOf(200L to 500L), vm.state.value.readMarks)
+        assertFalse(vm.state.value.readMarksLoading)
     }
 
     @Test

@@ -74,6 +74,13 @@ data class Chat(
      * chat's `participants` map. Our messages with time <= this are read (✓✓).
      */
     val otherReadMark: Long = 0,
+    /**
+     * Who has read up to which point in this chat: userId → last read time (ms),
+     * taken from the chat's `participants` map and kept current by the op-130
+     * push. Excludes us. [otherReadMark] is just the latest value here; the map is
+     * what backs the "who read this message" list in groups.
+     */
+    val readMarks: Map<Long, Long> = emptyMap(),
     /** True for a CHANNEL (broadcast) vs. a regular CHAT group. Dialogs are neither. */
     val isChannel: Boolean = false,
     /** Group/channel owner's user id (0 if unknown/not applicable). */

@@ -299,6 +299,15 @@ data class AppState(
     /** Transient message shown as a snackbar (e.g. "web login confirmed"). */
     val notice: String? = null,
     /**
+     * The message whose "who read this" sheet is open, if any. The sheet is a chat
+     * overlay keyed by message id, so it survives the live read-mark pushes.
+     */
+    val readingMessageId: String? = null,
+    /** Per-user read marks (userId → ms) for the open sheet's chat, live-updated. */
+    val readMarks: Map<Long, Long> = emptyMap(),
+    /** True while the read marks for a freshly opened sheet are being refreshed. */
+    val readMarksLoading: Boolean = false,
+    /**
      * A URL the app couldn't handle itself and wants opened in a browser. The UI
      * consumes it and calls [consumedExternalLink].
      */
@@ -942,12 +951,28 @@ class AppViewModel(
                     // session) still shows ✓✓ — not just the currently open messages.
                     val chats =
                         s.chats.map {
-                            if (it.id == rm.chatId) it.copy(otherReadMark = maxOf(it.otherReadMark, rm.mark)) else it
+                            if (it.id == rm.chatId) {
+                                it.copy(
+                                    otherReadMark = maxOf(it.otherReadMark, rm.mark),
+                                    readMarks = it.readMarks.plusMark(rm.userId, rm.mark),
+                                )
+                            } else {
+                                it
+                            }
                         }
                     val current =
                         s.currentChat?.let {
-                            if (it.id == rm.chatId) it.copy(otherReadMark = maxOf(it.otherReadMark, rm.mark)) else it
+                            if (it.id == rm.chatId) {
+                                it.copy(
+                                    otherReadMark = maxOf(it.otherReadMark, rm.mark),
+                                    readMarks = it.readMarks.plusMark(rm.userId, rm.mark),
+                                )
+                            } else {
+                                it
+                            }
                         }
+                    // Keep an open "who read this" sheet current too.
+                    val sheetMarks = if (s.currentChat?.id == rm.chatId) s.readMarks.plusMark(rm.userId, rm.mark) else s.readMarks
                     val messages =
                         if (s.currentChat?.id == rm.chatId) {
                             s.messages.map { m ->
@@ -960,7 +985,7 @@ class AppViewModel(
                         } else {
                             s.messages
                         }
-                    s.copy(chats = chats, currentChat = current, messages = messages)
+                    s.copy(chats = chats, currentChat = current, messages = messages, readMarks = sheetMarks)
                 }
             }
         }
@@ -1776,6 +1801,52 @@ class AppViewModel(
         _state.update {
             it.copy(screen = if (it.currentChat != null) Screen.CHAT else Screen.CHATS, viewingGroup = null)
         }
+    }
+
+    /**
+     * Opens the "who read this message" sheet for [message] (group/channel chats).
+     *
+     * Seeded from the chat's `participants` read marks we already have, then refreshed
+     * from the server — our copy can be hours old by the time the user asks. The
+     * refresh is best-effort: if it fails the seed is still shown.
+     */
+    fun openReadBy(message: Message) {
+        val chatId = message.chatId
+        val seed =
+            _state.value.currentChat
+                ?.takeIf { it.id == chatId }
+                ?.readMarks ?: emptyMap()
+        _state.update { it.copy(readingMessageId = message.id, readMarks = seed, readMarksLoading = true) }
+        viewModelScope.launch {
+            val fresh = runCatching { client.getReadMarks(chatId) }.getOrNull()
+            _state.update { s ->
+                // The user may have closed the sheet (or switched chats) meanwhile.
+                if (s.currentChat?.id != chatId) {
+                    s
+                } else {
+                    s.copy(
+                        readMarksLoading = false,
+                        // Merge rather than replace: pushes that landed during the fetch
+                        // are at least as new as the reply.
+                        readMarks = fresh?.let { f -> seed.plusMarks(f) } ?: s.readMarks,
+                    )
+                }
+            }
+        }
+    }
+
+    /** Closes the "who read this message" sheet. */
+    fun closeReadBy() =
+        _state.update {
+            it.copy(readingMessageId = null, readMarksLoading = false, readMarks = emptyMap())
+        }
+
+    /** Reader [userId] as a name+avatar pair, preferring the open group's member list. */
+    fun readerInfo(userId: Long): UserInfo {
+        val s = _state.value
+        return s.groupMembers[userId]
+            ?: s.contactsList.firstOrNull { it.id == userId }
+            ?: UserInfo(id = userId, name = s.contacts[userId] ?: "Пользователь $userId")
     }
 
     /** Adds [userIds] to the currently-open group, then refreshes the member list. */
@@ -3286,6 +3357,22 @@ data class PlayingVideoNote(
     /** The playable stream, or null while it is being resolved. */
     val url: String? = null,
 )
+
+/**
+ * Records [userId]'s read mark, keeping the highest — marks only move forward, and a
+ * late/duplicate push must never pull a reader back.
+ */
+private fun Map<Long, Long>.plusMark(
+    userId: Long,
+    mark: Long,
+): Map<Long, Long> {
+    val current = this[userId] ?: Long.MIN_VALUE
+    return if (current >= mark) this else this + (userId to mark)
+}
+
+/** Per-user merge of two read-mark maps (see [plusMark]). */
+private fun Map<Long, Long>.plusMarks(other: Map<Long, Long>): Map<Long, Long> =
+    other.entries.fold(this) { acc, (userId, mark) -> acc.plusMark(userId, mark) }
 
 /** Adds [message] to the pending-send list of [chatId]. */
 private fun Map<Long, List<Message>>.plusPending(

@@ -1,7 +1,10 @@
 package com.avenarius.app.net
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class MaxClientTest {
     private val client = MaxClient() // constructible without a connection
@@ -37,6 +40,37 @@ class MaxClientTest {
         assertEquals("отчёт 2026.xlsx", "отчёт 2026.xlsx".cleanFileName())
         // A quote in the middle of a name isn't decoration — keep it.
         assertEquals("say\"hi\".txt", "say\"hi\".txt".cleanFileName())
+    }
+
+    // --- chat read marks (issue #50: "who read this message") ---
+
+    private fun readMarks(
+        participants: String,
+        myId: Long,
+    ) = Json.parseToJsonElement(participants).jsonObject.toReadMarks(myId)
+
+    @Test
+    fun readMarksKeepEveryReaderExceptMe() {
+        // Shape seen in a real chat object: participants = {userId: lastReadMarkMs}.
+        val marks = readMarks("""{"100":1500,"200":900,"300":1700}""", myId = 100)
+
+        assertEquals(mapOf(200L to 900L, 300L to 1700L), marks)
+        // Our own mark says nothing about who read our messages.
+        assertTrue(100L !in marks)
+    }
+
+    @Test
+    fun readMarksSkipJunkEntries() {
+        // A non-numeric key or value must not drop the chat — just that entry.
+        val marks = readMarks("""{"200":900,"abc":5,"300":"nope"}""", myId = 100)
+
+        assertEquals(mapOf(200L to 900L), marks)
+    }
+
+    @Test
+    fun readMarksAreEmptyWhenNobodyReadYet() {
+        assertEquals(emptyMap(), readMarks("""{"100":1500}""", myId = 100))
+        assertEquals(emptyMap(), readMarks("{}", myId = 100))
     }
 
     @Test

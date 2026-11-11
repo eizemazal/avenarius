@@ -526,6 +526,13 @@ interface MaxApi {
     /** Returns the members of a group/channel chat (with names + avatars). */
     suspend fun getChatMembers(chatId: Long): List<UserInfo>
 
+    /**
+     * Fresh per-user read marks for [chatId]: userId → last read time (ms), us
+     * excluded. Backs the "who read this message" list. Defaults to empty so the
+     * demo/test fakes need not implement it.
+     */
+    suspend fun getReadMarks(chatId: Long): Map<Long, Long> = emptyMap()
+
     /** Adds [userIds] to a group/channel chat as regular members. */
     suspend fun addMembers(
         chatId: Long,
@@ -586,6 +593,19 @@ interface MaxApi {
         fileId: Long,
     ): String?
 }
+
+/**
+ * Parses a chat `participants` object into per-user read marks (userId → ms), leaving
+ * out [myId] — our own mark says nothing about who read our messages. Entries with a
+ * non-numeric key or value are skipped rather than failing the whole chat.
+ */
+internal fun JsonObject.toReadMarks(myId: Long): Map<Long, Long> =
+    entries
+        .mapNotNull { (key, value) ->
+            val userId = key.toLongOrNull()?.takeIf { it != myId } ?: return@mapNotNull null
+            val mark = value.jsonPrimitive.longOrNullSafe() ?: return@mapNotNull null
+            userId to mark
+        }.toMap()
 
 /**
  * A file name fit for the upload's `Content-Disposition`.
@@ -776,6 +796,7 @@ class MaxClient : MaxApi {
         private const val OP_CHAT_JOIN = 57 // CHAT_JOIN: join a chat/channel by its invite link
         private const val OP_LEAVE_CHAT = 58 // CHAT_LEAVE
         private const val OP_CHAT_MEMBERS = 59 // CHAT_MEMBERS: paginated member list
+        private const val OP_CHAT_INFO = 48 // CHAT_INFO: one chat's full object (incl. read marks)
         private const val OP_CHAT_MEMBERS_UPDATE = 77 // CHAT_MEMBERS_UPDATE: add/remove members
         private const val OP_MSG_DELETE = 66 // MSG_DELETE
         private const val OP_MSG_EDIT = 67 // MSG_EDIT
@@ -998,15 +1019,11 @@ class MaxClient : MaxApi {
         val lastTime = c["lastEventTime"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
         val unread = c["newMessages"]?.jsonPrimitive?.intOrNullSafe() ?: 0
         val isDialog = type == "DIALOG"
-        // participants = {userId: lastReadMarkMs}; the other side's mark tells us how
-        // far they've read (so our messages up to it show ✓✓).
-        val otherReadMark =
-            c["participants"]
-                ?.jsonObject
-                ?.entries
-                ?.filter { it.key.toLongOrNull() != null && it.key.toLong() != myId }
-                ?.mapNotNull { it.value.jsonPrimitive.longOrNullSafe() }
-                ?.maxOrNull() ?: 0L
+        // participants = {userId: lastReadMarkMs}: who has read up to which point.
+        // The per-user map backs the "who read this message" list in groups; the
+        // highest mark is all a dialog needs for its ✓✓.
+        val readMarks = c["participants"]?.jsonObject?.toReadMarks(myId) ?: emptyMap()
+        val otherReadMark = readMarks.values.maxOrNull() ?: 0L
         val title =
             when {
                 !rawTitle.isNullOrBlank() -> rawTitle
@@ -1076,6 +1093,7 @@ class MaxClient : MaxApi {
             // groups/channels carry their own avatar on the chat object.
             avatarUrl = if (isDialog) null else c.avatarUrl(),
             otherReadMark = otherReadMark,
+            readMarks = readMarks,
             isChannel = isChannel,
             ownerId = ownerId,
             adminIds = adminIds,
@@ -2435,6 +2453,26 @@ class MaxClient : MaxApi {
     override suspend fun leaveGroup(chatId: Long) {
         // CHAT_LEAVE payload is just {chatId}.
         transport.request(OP_LEAVE_CHAT, buildJsonObject { put("chatId", chatId) })
+    }
+
+    /**
+     * Re-reads [chatId]'s chat object to get its `participants` read marks. Synchronous
+     * refresh for the "who read this message" list: the sync call's copy can be stale
+     * by the time the user opens a message hours later.
+     */
+    override suspend fun getReadMarks(chatId: Long): Map<Long, Long> {
+        val payload =
+            transport.request(
+                OP_CHAT_INFO,
+                buildJsonObject { put("chatId", chatId) },
+                // Best-effort: the list is also seeded from sync + op-130 pushes, so a
+                // slow or unsupported opcode must not hold the sheet hostage.
+                timeoutMs = 10_000,
+            )
+        val chat =
+            (payload["chat"] as? JsonObject)
+                ?: (payload["chats"] as? JsonArray)?.firstOrNull()?.jsonObject
+        return chat?.let { parseChat(it, emptyMap()) }?.readMarks ?: emptyMap()
     }
 
     override suspend fun approveQrLogin(qrLink: String) {

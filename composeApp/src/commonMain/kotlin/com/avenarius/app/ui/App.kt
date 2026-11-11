@@ -260,6 +260,12 @@ fun App(viewModel: AppViewModel) {
                                     onDeleteChat = viewModel::deleteCurrentChat,
                                     onLeaveGroup = viewModel::leaveCurrentGroup,
                                     onOpenGroup = { state.currentChat?.let { viewModel.openGroup(it) } },
+                                    readMarks = state.readMarks,
+                                    readingMessageId = state.readingMessageId,
+                                    readMarksLoading = state.readMarksLoading,
+                                    onShowReadBy = viewModel::openReadBy,
+                                    onCloseReadBy = viewModel::closeReadBy,
+                                    readerInfo = viewModel::readerInfo,
                                 )
                             Screen.GROUP ->
                                 GroupScreen(

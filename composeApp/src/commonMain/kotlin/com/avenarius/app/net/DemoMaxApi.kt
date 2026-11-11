@@ -237,6 +237,14 @@ class DemoMaxApi : MaxApi {
 
     override suspend fun getChatMembers(chatId: Long): List<UserInfo> = contactsList
 
+    /** Demo: everyone but us has read the group up to its latest demo message. */
+    override suspend fun getReadMarks(chatId: Long): Map<Long, Long> =
+        if (chatId != GROUP_ID) {
+            emptyMap()
+        } else {
+            contactsList.filter { it.id != ME }.associate { it.id to BASE + 4 }
+        }
+
     override suspend fun addMembers(
         chatId: Long,
         userIds: List<Long>,
