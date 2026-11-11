@@ -79,7 +79,9 @@ case "$cmd" in
                    done
                    bump_opts=()
                    ((dry_run)) && bump_opts=(--dry-run)
-                   .github/scripts/bump_version.sh "${bump_arg:-patch}" "${bump_opts[@]}" ;;
+                   # ${arr[@]+...} rather than "${arr[@]}": bash < 4.4 (macOS's 3.2)
+                   # treats an empty array as an unbound variable under `set -u`.
+                   .github/scripts/bump_version.sh "${bump_arg:-patch}" ${bump_opts[@]+"${bump_opts[@]}"} ;;
   tag)             # ./dev.sh tag [<bump>] [-n|--dry-run]  → bump + commit + tag + push + release
                    dry_run=0
                    bump_arg=""
