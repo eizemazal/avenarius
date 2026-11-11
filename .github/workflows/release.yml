@@ -46,10 +46,21 @@ jobs:
           else
             NAME="${GITHUB_REF_NAME#v}"
           fi
+          # A malformed tag would otherwise become a malformed versionName.
+          if ! [[ "$NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '$NAME' is not X.Y.Z — tag as v1.2.3."
+            exit 1
+          fi
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           # versionCode must increase on every Play upload; the run number is monotonic.
           echo "code=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
           echo "Releasing versionName=$NAME versionCode=${{ github.run_number }}"
+
+      - name: Check About box version matches the tag
+        # The About screen shows its own APP_VERSION constant; refuse to publish a
+        # release whose About box would display a different number. `./dev.sh tag`
+        # keeps the two in sync by construction.
+        run: ./.github/scripts/check_app_version.sh "${{ steps.version.outputs.name }}"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4

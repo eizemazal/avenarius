@@ -17,6 +17,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check About box version is not stale
+        # Catches the "released but forgot to bump About" drift early, long before a
+        # release run fails on it. Strict on pushes (main must stay in sync); on pull
+        # requests it only warns, so contributors aren't blocked by version bookkeeping.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            ./.github/scripts/check_app_version_stale.sh
+          else
+            ./.github/scripts/check_app_version_stale.sh --strict
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
