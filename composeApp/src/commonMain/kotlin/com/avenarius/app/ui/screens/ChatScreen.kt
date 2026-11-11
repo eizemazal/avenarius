@@ -9,7 +9,10 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -65,11 +68,14 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -80,9 +86,11 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -101,6 +109,7 @@ import com.avenarius.app.model.RecordedVoice
 import com.avenarius.app.model.ServiceEvent
 import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.VoiceAttach
+import com.avenarius.app.net.Presence
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.MediaViewer
 import com.avenarius.app.ui.PlatformBackHandler
@@ -112,14 +121,19 @@ import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.CenteredSpinner
 import com.avenarius.app.ui.components.LinkedText
 import com.avenarius.app.ui.components.openUriSafely
+import com.avenarius.app.ui.components.senderNameColor
 import com.avenarius.app.ui.formatClock
 import com.avenarius.app.ui.formatDay
+import com.avenarius.app.ui.lastSeenText
+import com.avenarius.app.ui.nowMillis
 import com.avenarius.app.ui.rememberCameraPhotoLauncher
 import com.avenarius.app.ui.rememberCameraVideoLauncher
 import com.avenarius.app.ui.rememberFilePickLauncher
 import com.avenarius.app.ui.rememberPhotoPickLauncher
 import com.avenarius.app.ui.rememberVoiceRecorder
 import com.avenarius.app.ui.sameDay
+import com.avenarius.app.ui.theme.isLightTheme
+import com.avenarius.app.ui.theme.onScrim
 import com.avenarius.app.ui.voiceRecordingSupported
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -144,6 +158,10 @@ internal fun ChatScreen(
     initialDraft: String,
     /** "печатает…" line for the header, or null when nobody is typing. */
     typingText: String? = null,
+    /** Who is online now; a dialog's header says "в сети" when the partner is. */
+    onlineUsers: Set<Long> = emptySet(),
+    /** Last-seen info, for "был(а) в сети …" when the partner is offline. */
+    presence: Map<Long, Presence> = emptyMap(),
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     /** Starts a call with the dialog partner ([userId], [isVideo]). */
@@ -289,6 +307,9 @@ internal fun ChatScreen(
     // Heading avatar: a 1:1 dialog uses the contact's photo; a group uses its own.
     val headingAvatar = if (isDialog) otherUserId?.let { senderAvatars[it] } else chat?.avatarUrl
     Scaffold(
+        modifier = Modifier.background(chatWallpaper()),
+        containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onSurface,
         topBar = {
             TopAppBar(
                 title = {
@@ -305,16 +326,30 @@ internal fun ChatScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = if (onHeaderClick != null) Modifier.clickable(onClick = onHeaderClick) else Modifier,
                     ) {
-                        Avatar(chat?.title ?: "Чат", headingAvatar, 36.dp)
+                        Avatar(chat?.title ?: "Чат", headingAvatar, 40.dp)
                         Spacer(Modifier.width(10.dp))
                         Column {
-                            Text(chat?.title ?: "Чат", maxLines = 1, style = MaterialTheme.typography.titleMedium)
-                            if (typingText != null) {
+                            Text(
+                                chat?.title ?: "Чат",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            val partnerOnline = otherUserId != null && otherUserId in onlineUsers
+                            val active = typingText != null || partnerOnline
+                            val lastSeen = otherUserId?.let { presence[it] }?.let { lastSeenText(it, nowMillis()) }
+                            val members =
+                                chat?.takeIf { !isDialog && it.participantsCount > 0 }?.let {
+                                    participantsLabel(it.participantsCount, it.isChannel)
+                                }
+                            val status = typingText ?: if (partnerOnline) "в сети" else lastSeen ?: members
+                            if (status != null) {
                                 Text(
-                                    typingText,
+                                    status,
                                     maxLines = 1,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary,
+                                    color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
@@ -387,7 +422,8 @@ internal fun ChatScreen(
                 // Telegram-style rounded input pill: attach + text field + send button.
                 Surface(
                     shape = RoundedCornerShape(24.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    color = incomingBubbleColor(),
+                    shadowElevation = 1.dp,
                     modifier =
                         Modifier
                             .fillMaxWidth()
@@ -606,7 +642,10 @@ internal fun ChatScreen(
             }
         },
     ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
+            // Bubbles may span most of the screen, as messengers do; a fixed cap left a wide
+            // empty margin on large or scaled-down screens and wrapped text early.
+            val bubbleMax = maxWidth * 0.85f
             if (busy && messages.isEmpty()) {
                 CenteredSpinner()
             }
@@ -628,8 +667,8 @@ internal fun ChatScreen(
             }
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 itemsIndexed(messages, key = { _, m -> m.id ?: m.cid ?: m.time }) { index, msg ->
                     // A day chip at every date change, as the official client does; the
@@ -650,6 +689,7 @@ internal fun ChatScreen(
                     MessageRow(
                         msg = msg,
                         isMine = isMine,
+                        maxWidth = bubbleMax,
                         senderName = contacts[msg.senderId] ?: "—",
                         senderAvatar = senderAvatars[msg.senderId],
                         isGroup = !isDialog,
@@ -807,10 +847,13 @@ internal fun ChatScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MessageRow(
     msg: Message,
     isMine: Boolean,
+    /** Widest a bubble may grow (a share of the chat's width). */
+    maxWidth: Dp,
     senderName: String,
     senderAvatar: String?,
     isGroup: Boolean,
@@ -848,7 +891,7 @@ private fun MessageRow(
     val maxPx = with(density) { 88.dp.toPx() }
     var triggered by remember(rowKey) { mutableStateOf(false) }
 
-    Box(Modifier.fillMaxWidth()) {
+    Box(Modifier.fillMaxWidth().padding(top = if (startsRun) 6.dp else 0.dp)) {
         val progress = (-offsetX.value / triggerPx).coerceIn(0f, 1f)
         Icon(
             AppIcons.Reply,
@@ -915,32 +958,48 @@ private fun MessageRow(
             val bg =
                 when {
                     bareVideoNote -> Color.Transparent
-                    isMine -> MaterialTheme.colorScheme.primary
-                    else -> MaterialTheme.colorScheme.surfaceVariant
+                    isMine -> MaterialTheme.colorScheme.primaryContainer
+                    else -> incomingBubbleColor()
                 }
             // Without a bubble behind it, the footer sits on the chat background, so it
             // can't use the on-bubble colour.
             val fg =
                 when {
                     bareVideoNote -> MaterialTheme.colorScheme.onSurfaceVariant
-                    isMine -> MaterialTheme.colorScheme.onPrimary
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    isMine -> MaterialTheme.colorScheme.onPrimaryContainer
+                    else -> MaterialTheme.colorScheme.onSurface
+                }
+            // Messages in a run hug each other: the sender-side corners are tight, the first
+            // bubble of a run keeps a round top on that side.
+            val big = 18.dp
+            val tight = 6.dp
+            val bubbleShape =
+                if (isMine) {
+                    RoundedCornerShape(topStart = big, topEnd = if (startsRun) big else tight, bottomEnd = tight, bottomStart = big)
+                } else {
+                    RoundedCornerShape(topStart = if (startsRun) big else tight, topEnd = big, bottomEnd = big, bottomStart = tight)
                 }
             Column(horizontalAlignment = if (isMine) Alignment.End else Alignment.Start) {
                 Box(
                     Modifier
-                        .widthIn(max = 280.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .widthIn(max = maxWidth)
+                        .then(if (bareVideoNote) Modifier else Modifier.shadow(0.5.dp, bubbleShape))
+                        .clip(bubbleShape)
                         .background(bg)
                         .clickable(onClick = onClick)
                         .padding(
-                            horizontal = if (bareVideoNote) 0.dp else 12.dp,
+                            horizontal = if (bareVideoNote) 0.dp else 10.dp,
                             vertical = if (bareVideoNote) 0.dp else 6.dp,
                         ),
                 ) {
                     Column {
                         if (isGroup && !isMine && startsRun) {
-                            Text(senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                            Text(
+                                senderName,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = senderNameColor(senderName),
+                            )
                         }
                         if (forwardAuthor != null) {
                             Text(
@@ -1008,7 +1067,15 @@ private fun MessageRow(
                             Spacer(Modifier.height(4.dp))
                         }
                         if (msg.text.isNotEmpty()) {
-                            LinkedText(msg.text, MaterialTheme.typography.bodyLarge, fg, onLinkClick)
+                            // Own bubbles are accent-tinted, so an accent link could vanish (issue #49):
+                            // draw it in the bubble's text color, underlined.
+                            LinkedText(
+                                msg.text,
+                                MaterialTheme.typography.bodyLarge,
+                                fg,
+                                onLinkClick,
+                                linkColor = if (isMine) fg else MaterialTheme.colorScheme.primary,
+                            )
                         }
                         msg.linkPreview?.let { preview -> LinkPreviewCard(preview, fg) }
                         // Footer line inside the bubble: reactions then time + delivery
@@ -1016,15 +1083,15 @@ private fun MessageRow(
                         // width) so a short message keeps a snug bubble instead of being
                         // stretched out by the meta row.
                         Spacer(Modifier.height(2.dp))
-                        Row(
+                        // Wraps instead of overflowing the bubble when there are many reactions;
+                        // each line is end-aligned, so the time stays at the trailing edge.
+                        FlowRow(
                             modifier = Modifier.align(Alignment.End),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            if (msg.reactions.isNotEmpty()) {
-                                ReactionChips(msg.reactions, fg, onReactionClick)
-                            }
-                            MessageMeta(msg, isMine, fg)
+                            msg.reactions.forEach { r -> ReactionChip(r, fg) { onReactionClick(r.emoji) } }
+                            MessageMeta(msg, isMine, fg, Modifier.align(Alignment.CenterVertically))
                         }
                     }
                 }
@@ -1352,8 +1419,10 @@ private fun MessageMeta(
     msg: Message,
     isMine: Boolean,
     fg: Color,
+    modifier: Modifier = Modifier,
 ) {
     Row(
+        modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1363,40 +1432,32 @@ private fun MessageMeta(
             Icon(
                 if (read) AppIcons.Read else AppIcons.Delivered,
                 contentDescription = if (read) "Прочитано" else "Доставлено",
-                tint = if (read) Color(0xFF8AB4F8) else fg.copy(alpha = 0.7f),
+                tint = if (read) MaterialTheme.colorScheme.primary else fg.copy(alpha = 0.7f),
                 modifier = Modifier.size(16.dp),
             )
         }
     }
 }
 
-/**
- * Row of tappable reaction chips, shown inside the message bubble. Chip
- * backgrounds are derived from the bubble's foreground color [fg] so they read
- * on either bubble color; our own reaction is denser.
- */
+/** One tappable reaction chip; its background derives from the bubble's [fg], denser for our own. */
 @Composable
-private fun ReactionChips(
-    reactions: List<com.avenarius.app.model.Reaction>,
+private fun ReactionChip(
+    r: com.avenarius.app.model.Reaction,
     fg: Color,
-    onClick: (String) -> Unit,
+    onClick: () -> Unit,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        reactions.forEach { r ->
-            val chipBg = if (r.mine) fg.copy(alpha = 0.30f) else fg.copy(alpha = 0.12f)
-            Row(
-                Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(chipBg)
-                    .clickable { onClick(r.emoji) }
-                    .padding(horizontal = 7.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                Text(r.emoji, style = MaterialTheme.typography.labelMedium)
-                if (r.count > 1) Text("${r.count}", style = MaterialTheme.typography.labelMedium, color = fg)
-            }
-        }
+    val chipBg = if (r.mine) fg.copy(alpha = 0.30f) else fg.copy(alpha = 0.12f)
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(chipBg)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(r.emoji, style = MaterialTheme.typography.labelMedium)
+        if (r.count > 1) Text("${r.count}", style = MaterialTheme.typography.labelMedium, color = fg)
     }
 }
 
@@ -1496,7 +1557,7 @@ private fun MessageContextMenu(
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color(0x99000000))
+            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.6f))
             .clickable(onClick = onDismiss)
             .imePadding(),
         contentAlignment = Alignment.Center,
@@ -1625,10 +1686,10 @@ private fun PendingThumbnail(item: PendingAttach) {
             )
         }
         // Scrim, so a light photo doesn't swallow the indicator.
-        Box(Modifier.matchParentSize().background(Color(0x66000000)))
+        Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.4f)))
         when {
             failed ->
-                Text("Не отправлено", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                Text("Не отправлено", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onScrim)
             // A closed ring with a tick: this one is up, and the message is only
             // waiting on its siblings.
             item.state == UploadState.DONE ->
@@ -1637,12 +1698,12 @@ private fun PendingThumbnail(item: PendingAttach) {
                         progress = { 1f },
                         modifier = Modifier.size(32.dp),
                         strokeWidth = 3.dp,
-                        color = Color.White,
+                        color = MaterialTheme.colorScheme.onScrim,
                     )
                     Icon(
                         AppIcons.Delivered,
                         contentDescription = "Загружено",
-                        tint = Color.White,
+                        tint = MaterialTheme.colorScheme.onScrim,
                         modifier = Modifier.size(16.dp),
                     )
                 }
@@ -1651,13 +1712,13 @@ private fun PendingThumbnail(item: PendingAttach) {
                     progress = { item.progress },
                     modifier = Modifier.size(32.dp),
                     strokeWidth = 3.dp,
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.onScrim,
                 )
             else ->
                 CircularProgressIndicator(
                     modifier = Modifier.size(32.dp),
                     strokeWidth = 3.dp,
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.onScrim,
                 )
         }
     }
@@ -1691,16 +1752,16 @@ private fun VideoNoteView(
             )
             if (state != null) {
                 // Tapped, waiting for the stream.
-                CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp, color = Color.White)
+                CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp, color = MaterialTheme.colorScheme.onScrim)
             } else {
                 Box(
-                    Modifier.size(44.dp).clip(CircleShape).background(Color(0x88000000)),
+                    Modifier.size(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.53f)),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         AppIcons.Play,
                         contentDescription = "Воспроизвести",
-                        tint = Color.White,
+                        tint = MaterialTheme.colorScheme.onScrim,
                         modifier = Modifier.size(28.dp),
                     )
                 }
@@ -1765,22 +1826,27 @@ private fun MediaThumbnail(
         )
         if (media.type == MediaType.VIDEO) {
             Box(
-                Modifier.size(44.dp).clip(CircleShape).background(Color(0x88000000)),
+                Modifier.size(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.53f)),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(AppIcons.Play, contentDescription = "Воспроизвести", tint = Color.White, modifier = Modifier.size(28.dp))
+                Icon(
+                    AppIcons.Play,
+                    contentDescription = "Воспроизвести",
+                    tint = MaterialTheme.colorScheme.onScrim,
+                    modifier = Modifier.size(28.dp),
+                )
             }
             if (media.durationSec > 0) {
                 Text(
                     formatDuration(media.durationSec),
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.onScrim,
                     style = MaterialTheme.typography.labelSmall,
                     modifier =
                         Modifier
                             .align(Alignment.BottomEnd)
                             .padding(6.dp)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0x88000000))
+                            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.53f))
                             .padding(horizontal = 5.dp, vertical = 1.dp),
                 )
             }
@@ -1809,11 +1875,11 @@ internal fun MediaViewerOverlay(
     PlatformBackHandler(enabled = true, onBack = onClose)
     var menuOpen by remember { mutableStateOf(false) }
     Box(
-        Modifier.fillMaxSize().background(Color(0xF2000000)).clickable(onClick = onClose),
+        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.95f)).clickable(onClick = onClose),
         contentAlignment = Alignment.Center,
     ) {
         when (viewer) {
-            is MediaViewer.Loading -> CircularProgressIndicator(color = Color.White)
+            is MediaViewer.Loading -> CircularProgressIndicator(color = MaterialTheme.colorScheme.onScrim)
             is MediaViewer.Image -> ZoomableImage(viewer.url)
             is MediaViewer.Video -> VideoPlayer(viewer.url, Modifier.fillMaxWidth().heightIn(max = 480.dp))
         }
@@ -1822,7 +1888,7 @@ internal fun MediaViewerOverlay(
             if (viewer.url != null) {
                 Box {
                     IconButton(onClick = { menuOpen = true }) {
-                        Icon(AppIcons.More, contentDescription = "Действия", tint = Color.White)
+                        Icon(AppIcons.More, contentDescription = "Действия", tint = MaterialTheme.colorScheme.onScrim)
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         DropdownMenuItem(
@@ -1852,7 +1918,7 @@ internal fun MediaViewerOverlay(
                 }
             }
             IconButton(onClick = onClose) {
-                Icon(AppIcons.Close, contentDescription = "Закрыть", tint = Color.White)
+                Icon(AppIcons.Close, contentDescription = "Закрыть", tint = MaterialTheme.colorScheme.onScrim)
             }
         }
     }
@@ -1882,15 +1948,25 @@ private fun ZoomableImage(url: String) {
 /** A centered, muted chip for a group service/system event. */
 @Composable
 private fun ServiceMessageChip(text: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center) {
+    // A translucent pill that reads on the wallpaper in either theme.
+    val light = isLightTheme()
+    val chipBg =
+        if (light) {
+            MaterialTheme.colorScheme.scrim.copy(
+                alpha = 0.25f,
+            )
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.85f)
+        }
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.Center) {
         Text(
             text,
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (light) MaterialTheme.colorScheme.onScrim else MaterialTheme.colorScheme.onSurface,
             modifier =
                 Modifier
                     .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                    .background(chipBg)
                     .padding(horizontal = 12.dp, vertical = 4.dp),
         )
     }
@@ -1940,3 +2016,19 @@ private fun NewMessagesDivider() {
         HorizontalDivider(Modifier.weight(1f))
     }
 }
+
+/** Soft diagonal gradient behind the conversation, derived from the scheme's accent colors. */
+@Composable
+private fun chatWallpaper(): Brush {
+    val cs = MaterialTheme.colorScheme
+    return if (isLightTheme()) {
+        Brush.linearGradient(listOf(lerp(cs.primaryContainer, cs.primary, 0.25f), lerp(cs.tertiaryContainer, cs.tertiary, 0.25f)))
+    } else {
+        Brush.linearGradient(listOf(cs.surfaceContainerLowest, lerp(cs.surface, cs.primaryContainer, 0.2f)))
+    }
+}
+
+/** Incoming bubbles (and the input pill): white on the light wallpaper, a raised tone on the dark one. */
+@Composable
+private fun incomingBubbleColor(): Color =
+    if (isLightTheme()) MaterialTheme.colorScheme.surfaceContainerLowest else MaterialTheme.colorScheme.surfaceContainerHigh

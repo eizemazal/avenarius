@@ -17,8 +17,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.text.LinkAnnotation
@@ -27,11 +30,13 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.avenarius.app.ui.theme.rotateHue
 
 @Composable
 internal fun CenteredSpinner() {
@@ -60,8 +65,9 @@ internal fun LinkedText(
      * externally as before.
      */
     onInternalLink: ((String) -> Boolean)? = null,
+    /** Must contrast with what the text sits on; an accent-filled bubble needs its own. */
+    linkColor: Color = MaterialTheme.colorScheme.primary,
 ) {
-    val linkColor = MaterialTheme.colorScheme.primary
     // Open links via our safe handler so an unhandled scheme (mailto: with no email
     // app, etc.) can't crash the app.
     val uriHandler = LocalUriHandler.current
@@ -120,20 +126,20 @@ internal fun Avatar(
     online: Boolean = false,
 ) {
     Box(Modifier.size(size)) {
-        var mod = Modifier.size(size).clip(CircleShape).background(avatarColor(name))
+        val (light, dark) = avatarGradient(name)
+        var mod = Modifier.size(size).clip(CircleShape).background(Brush.verticalGradient(listOf(light, dark)))
         if (onClick != null) mod = mod.clickable(onClick = onClick)
         if (!url.isNullOrBlank()) {
             AsyncImage(model = url, contentDescription = name, contentScale = ContentScale.Crop, modifier = mod)
         } else {
             Box(mod, contentAlignment = Alignment.Center) {
                 Text(
-                    name
-                        .trim()
-                        .firstOrNull()
-                        ?.uppercaseChar()
-                        ?.toString() ?: "?",
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
+                    initials(name),
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    // Sized from the circle, not the user's font scale, so two letters always fit.
+                    fontSize = with(LocalDensity.current) { (size * 0.38f).toSp() },
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
                 )
             }
         }
@@ -141,7 +147,7 @@ internal fun Avatar(
     }
 }
 
-/** Green presence dot, with a ring in the surface colour so it reads against the avatar. */
+/** Accent presence dot, with a ring in the surface colour so it reads against the avatar. */
 
 @Composable
 internal fun OnlineDot(
@@ -153,23 +159,35 @@ internal fun OnlineDot(
         modifier.size(ring).clip(CircleShape).background(MaterialTheme.colorScheme.surface),
         contentAlignment = Alignment.Center,
     ) {
-        Box(Modifier.size(ring * 0.7f).clip(CircleShape).background(Color(0xFF4CAF50)))
+        Box(Modifier.size(ring * 0.7f).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
     }
 }
 
-private val AvatarColors =
-    listOf(
-        Color(0xFFE57373),
-        Color(0xFF64B5F6),
-        Color(0xFF81C784),
-        Color(0xFFFFB74D),
-        Color(0xFFBA68C8),
-        Color(0xFF4DB6AC),
-        Color(0xFFF06292),
-        Color(0xFF9575CD),
-    )
+private const val AVATAR_HUES = 8
 
-private fun avatarColor(key: String): Color = AvatarColors[(key.hashCode() and 0x7fffffff) % AvatarColors.size]
+/** A stable per-person turn of the accent's hue, so avatars differ yet follow the theme. */
+private fun hueTurn(key: String): Float = (key.hashCode() and 0x7fffffff) % AVATAR_HUES * (360f / AVATAR_HUES)
+
+@Composable
+private fun avatarGradient(key: String): Pair<Color, Color> {
+    val cs = MaterialTheme.colorScheme
+    val turn = hueTurn(key)
+    return lerp(cs.primary, cs.onPrimary, 0.12f).rotateHue(turn) to cs.primary.rotateHue(turn)
+}
+
+/** The sender's avatar hue, for their name in group chats (primary is readable on surfaces). */
+@Composable
+internal fun senderNameColor(key: String): Color = MaterialTheme.colorScheme.primary.rotateHue(hueTurn(key))
+
+/** Up to two initials from the first letters of the first words: "Анна Петрова" -> "АП". */
+internal fun initials(name: String): String =
+    name
+        .split(' ')
+        .mapNotNull { word -> word.firstOrNull { it.isLetterOrDigit() } }
+        .take(2)
+        .joinToString("")
+        .uppercase()
+        .ifEmpty { "?" }
 
 @Composable
 internal fun ErrorText(error: String?) {

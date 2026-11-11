@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,6 +21,7 @@ import com.avenarius.app.ui.App
 import com.avenarius.app.ui.AppViewModel
 import com.avenarius.app.ui.Screen
 import com.avenarius.app.ui.readSharedMedia
+import com.avenarius.app.ui.theme.isDark
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
@@ -59,6 +61,18 @@ class MainActivity : ComponentActivity() {
         setContent {
             val vm: AppViewModel = viewModel { AppViewModel(Session.prefs, Session.client, callSession = Session.callSession) }
             val state by vm.state.collectAsStateWithLifecycle()
+            // System-bar icons follow the app's theme, not the OS one: otherwise a light app
+            // theme on a dark phone gets white, invisible status-bar icons.
+            val dark = state.theme.isDark()
+            LaunchedEffect(dark) {
+                val bars =
+                    if (dark) {
+                        SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+                    }
+                enableEdgeToEdge(bars, bars)
+            }
 
             // Mirror UI state the background service needs (to suppress notifications
             // for the open chat, and to label notifications with sender names).

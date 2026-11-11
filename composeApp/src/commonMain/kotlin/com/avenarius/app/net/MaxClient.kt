@@ -82,10 +82,30 @@ data class ReadMark(
     val mark: Long,
 )
 
-/** A live presence change: [userId] went [online] (server push, opcode 132). */
+/** Account privacy (CONFIG `settings.user`); the "who" fields are [ALL] or [CONTACTS]. */
+data class Privacy(
+    val searchByPhone: String = ALL,
+    val incomingCall: String = ALL,
+    val chatsInvite: String = ALL,
+    /** Server `HIDDEN`: hide our online status. */
+    val hideOnline: Boolean = false,
+    val showReadMarks: Boolean = true,
+) {
+    companion object {
+        const val ALL = "ALL"
+        const val CONTACTS = "CONTACTS"
+    }
+}
+
+/**
+ * A user's presence (sync reply or push, opcode 132). [status]: 1 online, 2 "recently",
+ * 3 "long ago" (last seen hidden); absent means [seen] (epoch seconds) is exact.
+ */
 data class Presence(
     val userId: Long,
     val online: Boolean,
+    val seen: Long? = null,
+    val status: Int? = null,
 )
 
 /** [userId] is typing in [chatId] (server push NOTIF_TYPING, opcode 129). */
@@ -181,6 +201,10 @@ data class SyncResult(
     val online: Set<Long>,
     /** The server rolls the login token on each sync; persist it if present. */
     val refreshedToken: String?,
+    /** Last-seen info per user, for the chat header. */
+    val presence: Map<Long, Presence> = emptyMap(),
+    /** Privacy settings from the login reply's `config.user`; null if absent. */
+    val privacy: Privacy? = null,
 )
 
 /**
@@ -326,6 +350,9 @@ interface MaxApi {
         reason: String,
         peerId: Long?,
     )
+
+    /** Saves privacy settings; returns what the server now holds. */
+    suspend fun updatePrivacy(privacy: Privacy): Privacy = privacy
 
     /** Mutes or unmutes notifications for [chatId] (server `dontDisturbUntil`). */
     suspend fun setChatMuted(
@@ -698,6 +725,7 @@ class MaxClient : MaxApi {
         private const val OP_REGISTER = 23
         private const val OP_CONTACT_INFO = 32
         private const val OP_CONTACT_UPDATE = 34
+        private const val OP_CONTACT_PRESENCE = 35
         private const val OP_CONTACT_BY_PHONE = 46
         private const val OP_FETCH_HISTORY = 49
         private const val OP_PUBLIC_SEARCH = 60
@@ -944,12 +972,10 @@ class MaxClient : MaxApi {
 
     /**
      * Parses a live presence push: `{userId: <id>, presence: {seen, status?}}`.
-     * Online iff the nested presence carries a `status` field (see [isOnline]).
      */
     private fun parsePresence(payload: JsonObject): Presence? {
         val uid = payload["userId"]?.jsonPrimitive?.longOrNullSafe() ?: return null
-        val p = payload["presence"]?.jsonObject
-        return Presence(uid, p?.isOnline() == true)
+        return (payload["presence"] as? JsonObject)?.toPresence(uid) ?: Presence(uid, online = false)
     }
 
     /** Parses one chat object (from sync's `chats` array or a NOTIF_CHAT push). */
@@ -1175,6 +1201,27 @@ class MaxClient : MaxApi {
     override suspend fun sendTyping(chatId: Long) {
         // Fire-and-forget like the official client; a reply, if any, is just ignored.
         runCatching { transport.notify(OP_MSG_TYPING, buildJsonObject { put("chatId", chatId) }) }
+    }
+
+    override suspend fun updatePrivacy(privacy: Privacy): Privacy {
+        // CONFIG (op 22) with settings.user; the reply carries the full updated `user` map.
+        val payload =
+            transport.request(
+                OP_CHAT_SETTINGS,
+                buildJsonObject {
+                    putJsonObject("settings") {
+                        putJsonObject("user") {
+                            put("SEARCH_BY_PHONE", privacy.searchByPhone)
+                            put("INCOMING_CALL", privacy.incomingCall)
+                            put("CHATS_INVITE", privacy.chatsInvite)
+                            put("HIDDEN", privacy.hideOnline)
+                            put("SHOW_READ_MARK", privacy.showReadMarks)
+                        }
+                    }
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось сохранить настройки")) }
+        return (payload["user"] as? JsonObject)?.toPrivacy() ?: privacy
     }
 
     override suspend fun setChatMuted(
@@ -1639,6 +1686,22 @@ class MaxClient : MaxApi {
         return contact.displayName()
     }
 
+    /** CONTACT_PRESENCE (op 35): presence of [ids]; a failed chunk is just left out. */
+    private suspend fun fetchPresence(ids: List<Long>): Map<Long, Presence> {
+        val out = HashMap<Long, Presence>()
+        ids.chunked(100).forEach { chunk ->
+            val payload =
+                runCatching {
+                    transport.request(
+                        OP_CONTACT_PRESENCE,
+                        buildJsonObject { put("contactIds", buildJsonArray { chunk.forEach { add(it) } }) },
+                    )
+                }.getOrNull()
+            out += presenceIn(payload?.get("presence"))
+        }
+        return out
+    }
+
     /**
      * Batch-resolves users by id via CONTACT_INFO. Since app 26.31.0 the login reply no
      * longer includes contacts inline, [sync] uses this to fetch the people we have
@@ -1799,14 +1862,10 @@ class MaxClient : MaxApi {
 
         // presence = {userId: {seen: <unixSec>, status: <int>}} — a user is online
         // when a `status` field is present (offline entries carry only `seen`).
-        val online =
-            payload["presence"]
-                ?.jsonObject
-                ?.entries
-                ?.mapNotNull { (key, value) ->
-                    val uid = key.toLongOrNull() ?: return@mapNotNull null
-                    if ((value as? JsonObject)?.isOnline() == true) uid else null
-                }?.toSet() ?: emptySet()
+        // Newer servers no longer put presence in the login reply; ask for the people we
+        // talk to explicitly (this also subscribes us to their NOTIF_PRESENCE pushes).
+        val presence = presenceIn(payload["presence"]) + fetchPresence(contactsList.map { it.id })
+        val online = presence.filterValues { it.online }.keys
 
         // The server returns a (possibly rolled) login token here — persist it.
         val refreshedToken = payload["token"]?.jsonPrimitive?.contentOrNullSafe()
@@ -1817,7 +1876,8 @@ class MaxClient : MaxApi {
         // on our own scope so it never delays the sync result.
         scope.launch { runCatching { reportHostReachability() } }
 
-        return SyncResult(account, chats, names, contactsList, online, refreshedToken)
+        val privacy = ((payload["config"] as? JsonObject)?.get("user") as? JsonObject)?.toPrivacy()
+        return SyncResult(account, chats, names, contactsList, online, refreshedToken, presence, privacy)
     }
 
     /** Full profile of a single user (for the user page). */
@@ -2921,6 +2981,30 @@ private fun JsonObject.displayName(): String? {
     val last = lastName()
     return listOfNotNull(first, last).joinToString(" ").ifBlank { null }
 }
+
+internal fun JsonObject.toPrivacy() =
+    Privacy(
+        searchByPhone = this["SEARCH_BY_PHONE"]?.jsonPrimitive?.contentOrNullSafe() ?: Privacy.ALL,
+        incomingCall = this["INCOMING_CALL"]?.jsonPrimitive?.contentOrNullSafe() ?: Privacy.ALL,
+        chatsInvite = this["CHATS_INVITE"]?.jsonPrimitive?.contentOrNullSafe() ?: Privacy.ALL,
+        hideOnline = this["HIDDEN"]?.jsonPrimitive?.asBoolean() ?: false,
+        showReadMarks = this["SHOW_READ_MARK"]?.jsonPrimitive?.asBoolean() ?: true,
+    )
+
+/** Parses a presence map `{userId: {seen, status?}}`. */
+private fun presenceIn(presence: JsonElement?): Map<Long, Presence> =
+    (presence as? JsonObject)
+        ?.entries
+        ?.mapNotNull { (key, value) -> key.toLongOrNull()?.let { uid -> (value as? JsonObject)?.toPresence(uid) } }
+        ?.associateBy { it.userId } ?: emptyMap()
+
+private fun JsonObject.toPresence(userId: Long) =
+    Presence(
+        userId = userId,
+        online = isOnline(),
+        seen = this["seen"]?.jsonPrimitive?.longOrNullSafe(),
+        status = this["status"]?.jsonPrimitive?.intOrNullSafe(),
+    )
 
 /**
  * A presence object means "online" only when its `status` is 1. The official client's

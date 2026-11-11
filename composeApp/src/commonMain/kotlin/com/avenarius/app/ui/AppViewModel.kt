@@ -39,8 +39,12 @@ import com.avenarius.app.net.DemoMaxApi
 import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
 import com.avenarius.app.net.PasswordSetupRequiredException
+import com.avenarius.app.net.Presence
+import com.avenarius.app.net.Privacy
 import com.avenarius.app.ui.AppLinks.MAX_RECOVERY_DEFAULT
+import com.avenarius.app.ui.theme.Accent
 import com.avenarius.app.ui.theme.ThemeMode
+import com.avenarius.app.ui.theme.accentOf
 import com.avenarius.app.ui.theme.prefValue
 import com.avenarius.app.ui.theme.themeModeOf
 import kotlinx.coroutines.CancellationException
@@ -251,6 +255,10 @@ data class AppState(
     val contactsList: List<UserInfo> = emptyList(),
     /** Ids of users currently online (for the green presence dot). */
     val onlineUsers: Set<Long> = emptySet(),
+    /** Last-seen info per user, for the chat header ("был(а) в сети в 08:15"). */
+    val presence: Map<Long, Presence> = emptyMap(),
+    /** Account privacy settings; null until the first sync (and in demo mode). */
+    val privacy: Privacy? = null,
     /** Who is typing where: chatId → (userId → epoch-ms until which the hint is valid). */
     val typing: Map<Long, Map<Long, Long>> = emptyMap(),
     /** The user whose profile page is open (Screen.USER). */
@@ -276,6 +284,12 @@ data class AppState(
     val groupMembers: Map<Long, UserInfo> = emptyMap(),
     /** Selected app theme (System/Dark/Light). */
     val theme: ThemeMode = ThemeMode.SYSTEM,
+    /** Chats pinned to the top of the list (per device, cleared on logout). */
+    val pinnedChats: Set<Long> = emptySet(),
+    /** Appearance settings, persisted like [theme]. */
+    val accent: Accent = Accent.BLUE,
+    val uiScale: Float = 1f,
+    val fontScale: Float = 1f,
     /** A message awaiting a chat pick to forward it (Screen.SHARE_PICK). */
     val forwarding: Message? = null,
     /** True in the offline Google Play review "demo account" session. */
@@ -362,7 +376,16 @@ class AppViewModel(
     /** The live media engine, for the call screen's video renderers. */
     fun currentCallEngine(): CallEngine? = callSession.engine
 
-    private val _state = MutableStateFlow(AppState(theme = themeModeOf(prefs.theme)))
+    private val _state =
+        MutableStateFlow(
+            AppState(
+                theme = themeModeOf(prefs.theme),
+                accent = accentOf(prefs.accent),
+                uiScale = prefs.uiScale,
+                fontScale = prefs.fontScale,
+                pinnedChats = prefs.pinnedChats,
+            ),
+        )
 
     /** Who qualifies for the rating card; persisted per install. */
     private val ratePrompt = RatePrompt(prefs.storage)
@@ -375,6 +398,21 @@ class AppViewModel(
     fun setTheme(mode: ThemeMode) {
         prefs.theme = mode.prefValue()
         _state.update { it.copy(theme = mode) }
+    }
+
+    fun setAccent(accent: Accent) {
+        prefs.accent = accent.name
+        _state.update { it.copy(accent = accent) }
+    }
+
+    fun setUiScale(scale: Float) {
+        prefs.uiScale = scale
+        _state.update { it.copy(uiScale = prefs.uiScale) }
+    }
+
+    fun setFontScale(scale: Float) {
+        prefs.fontScale = scale
+        _state.update { it.copy(fontScale = prefs.fontScale) }
     }
 
     /**
@@ -932,6 +970,7 @@ class AppViewModel(
                 _state.update {
                     it.copy(
                         onlineUsers = if (p.online) it.onlineUsers + p.userId else it.onlineUsers - p.userId,
+                        presence = it.presence + (p.userId to p),
                     )
                 }
             }
@@ -1262,6 +1301,8 @@ class AppViewModel(
                                 contacts = result.contacts,
                                 contactsList = result.contactsList,
                                 onlineUsers = result.online,
+                                presence = result.presence,
+                                privacy = result.privacy,
                                 reconnecting = false,
                                 busy = false,
                                 error = null,
@@ -1420,6 +1461,8 @@ class AppViewModel(
                     contacts = result.contacts,
                     contactsList = result.contactsList,
                     onlineUsers = result.online,
+                    presence = result.presence,
+                    privacy = result.privacy,
                     busy = false,
                     error = null,
                     reconnecting = false,
@@ -1564,6 +1607,8 @@ class AppViewModel(
                 contacts = result.contacts,
                 contactsList = result.contactsList,
                 onlineUsers = result.online,
+                presence = result.presence,
+                privacy = result.privacy,
                 busy = false,
                 error = null,
                 syncedOnce = true,
@@ -2161,6 +2206,8 @@ class AppViewModel(
                 contacts = result.contacts,
                 contactsList = result.contactsList,
                 onlineUsers = result.online,
+                presence = result.presence,
+                privacy = result.privacy,
                 error = null,
             )
         }
@@ -2971,15 +3018,42 @@ class AppViewModel(
 
     /** Mutes/unmutes notifications for the open chat (optimistic; persisted server-side). */
     fun toggleMuteCurrentChat() {
-        val chat = _state.value.currentChat ?: return
+        _state.value.currentChat?.let(::toggleMute)
+    }
+
+    /** Mutes/unmutes [chat] (from the open chat's menu or a chat-list long press). */
+    fun toggleMute(chat: Chat) {
         val newMuted = !chat.muted
         _state.update { s ->
             s.copy(
-                currentChat = s.currentChat?.copy(muted = newMuted),
+                currentChat = s.currentChat?.let { if (it.id == chat.id) it.copy(muted = newMuted) else it },
                 chats = s.chats.map { if (it.id == chat.id) it.copy(muted = newMuted) else it },
             )
         }
         viewModelScope.launch { runCatching { client.setChatMuted(chat.id, newMuted) } }
+    }
+
+    /** Saves privacy settings optimistically; reverts and says so if the server refuses. */
+    fun updatePrivacy(privacy: Privacy) {
+        val before = _state.value.privacy
+        _state.update { it.copy(privacy = privacy) }
+        viewModelScope.launch {
+            try {
+                val saved = client.updatePrivacy(privacy)
+                _state.update { it.copy(privacy = saved) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(privacy = before, notice = e.message ?: "Не удалось сохранить настройки") }
+            }
+        }
+    }
+
+    /** Pins/unpins a chat at the top of the list (local to this device). */
+    fun togglePin(chatId: Long) {
+        val pins = _state.value.pinnedChats.let { if (chatId in it) it - chatId else it + chatId }
+        prefs.pinnedChats = pins
+        _state.update { it.copy(pinnedChats = pins) }
     }
 
     /** Deletes the current 1:1 chat (removes it locally and returns to the list). */
@@ -3047,7 +3121,8 @@ class AppViewModel(
         client = originalClient // leave demo mode if we were in it
         demoPending = false
         _state.update {
-            AppState(screen = Screen.LOGIN, theme = it.theme)
+            // Appearance is per device, not per account.
+            AppState(screen = Screen.LOGIN, theme = it.theme, accent = it.accent, uiScale = it.uiScale, fontScale = it.fontScale)
         }
     }
 

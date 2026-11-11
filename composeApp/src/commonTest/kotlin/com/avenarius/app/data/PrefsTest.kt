@@ -1,5 +1,7 @@
 package com.avenarius.app.data
 
+import com.avenarius.app.ui.theme.Accent
+import com.avenarius.app.ui.theme.accentOf
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -53,5 +55,43 @@ class PrefsTest {
         val prefs = Prefs(InMemoryStorage())
         assertNotEquals(prefs.deviceId, prefs.mtInstance)
         assertTrue(UUID.matches(prefs.mtInstance))
+    }
+
+    @Test
+    fun scalesDefaultRoundTripAndClampBadValues() {
+        val storage = InMemoryStorage()
+        val prefs = Prefs(storage)
+        assertEquals(1f, prefs.uiScale)
+        assertEquals(1f, prefs.fontScale)
+
+        prefs.uiScale = 1.2f
+        prefs.fontScale = 1.4f
+        assertEquals(1.2f, prefs.uiScale)
+        assertEquals(1.4f, prefs.fontScale)
+
+        storage.putString("ui_scale", "9")
+        storage.putString("font_scale", "garbage")
+        assertEquals(Prefs.UI_SCALE_RANGE.endInclusive, prefs.uiScale)
+        assertEquals(1f, prefs.fontScale)
+    }
+
+    @Test
+    fun unknownAccentFallsBackToBlue() {
+        assertEquals(Accent.BLUE, accentOf(null))
+        assertEquals(Accent.BLUE, accentOf("NEON"))
+        assertEquals(Accent.GREEN, accentOf("GREEN"))
+    }
+
+    @Test
+    fun pinnedChatsRoundTripAndClearOnLogout() {
+        val storage = InMemoryStorage()
+        val prefs = Prefs(storage)
+        assertEquals(emptySet(), prefs.pinnedChats)
+        prefs.pinnedChats = setOf(5L, -12L)
+        assertEquals(setOf(5L, -12L), prefs.pinnedChats)
+        storage.putString("pinned_chats", "7,junk,,9")
+        assertEquals(setOf(7L, 9L), prefs.pinnedChats)
+        prefs.clear()
+        assertEquals(emptySet(), prefs.pinnedChats)
     }
 }

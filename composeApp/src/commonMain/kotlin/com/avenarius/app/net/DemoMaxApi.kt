@@ -53,6 +53,7 @@ class DemoMaxApi : MaxApi {
                 lastMessageText = "Борис: Готово ✅",
                 lastEventTime = BASE + 3,
                 isDialog = false,
+                participantsCount = 3,
             ),
         )
 
