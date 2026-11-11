@@ -28,7 +28,7 @@ import com.avenarius.app.ui.AppLinks
 import com.avenarius.app.ui.components.openUriSafely
 import com.avenarius.app.ui.rememberAppReviewLauncher
 
-private const val APP_VERSION = "1.0.11"
+private const val APP_VERSION = "1.0.12"
 
 /** "About" screen: what the app is, its version, and how to support it (rating, GitHub). */
 @OptIn(ExperimentalMaterial3Api::class)
