@@ -37,6 +37,7 @@ import com.avenarius.app.ui.components.CircleIconButton
 import com.avenarius.app.ui.components.PillTextField
 import com.avenarius.app.ui.components.clickableRow
 import com.avenarius.app.ui.plural
+import com.avenarius.app.ui.theme.Spacing
 
 /** "Send to…" chat picker shown when media is shared into the app from elsewhere. */
 @Composable
@@ -77,9 +78,9 @@ internal fun SharePickScreen(
     var query by remember { mutableStateOf("") }
     val shown = remember(chats, query) { chats.filter { it.title.contains(query.trim(), ignoreCase = true) } }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            CircleIconButton(AppIcons.Close, "Отмена", onCancel)
-            Spacer(Modifier.width(12.dp))
+        Row(Modifier.fillMaxWidth().padding(horizontal = Spacing.m, vertical = Spacing.s), verticalAlignment = Alignment.CenterVertically) {
+            CircleIconButton(AppIcons.Close, "Отмена", onCancel, size = 48.dp, container = MaterialTheme.colorScheme.surfaceContainer)
+            Spacer(Modifier.width(Spacing.m))
             Text(
                 if (count > 1) "Отправить ($count) в…" else "Отправить в…",
                 style = MaterialTheme.typography.titleLarge,
@@ -87,14 +88,14 @@ internal fun SharePickScreen(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        PillTextField(query, { query = it }, "Поиск", Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp))
+        PillTextField(query, { query = it }, "Поиск", Modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.xs))
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding =
                 PaddingValues(
-                    top = 4.dp,
+                    top = Spacing.xs,
                     bottom =
-                        16.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
+                        Spacing.l + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
                 ),
         ) {
             items(shown, key = { it.id }) { chat ->
@@ -109,11 +110,11 @@ internal fun SharePickScreen(
                     Modifier
                         .fillMaxWidth()
                         .clickableRow { confirmTarget = chat }
-                        .padding(horizontal = 16.dp, vertical = 9.dp),
+                        .padding(horizontal = Spacing.l, vertical = Spacing.s),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (chat.isSavedMessages) SavedMessagesAvatar(48.dp) else Avatar(chat.title, avatarUrl, 48.dp)
-                    Spacer(Modifier.width(14.dp))
+                    Spacer(Modifier.width(Spacing.m))
                     Column(Modifier.weight(1f)) {
                         Text(chat.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
                         chat.lastMessageText?.let {

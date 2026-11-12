@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.add
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -39,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -59,7 +62,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,14 +77,20 @@ import com.avenarius.app.ui.AppState
 import com.avenarius.app.ui.AppViewModel
 import com.avenarius.app.ui.MediaKind
 import com.avenarius.app.ui.components.AppSheet
-import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.CircleIconButton
+import com.avenarius.app.ui.components.GroupCard
 import com.avenarius.app.ui.components.LinkedText
+import com.avenarius.app.ui.components.QuickAction
 import com.avenarius.app.ui.components.SheetAction
+import com.avenarius.app.ui.components.avatarColor
 import com.avenarius.app.ui.components.fadingEndScroll
+import com.avenarius.app.ui.components.groupRowDivider
+import com.avenarius.app.ui.components.initials
 import com.avenarius.app.ui.components.openUriSafely
 import com.avenarius.app.ui.formatDate
-import com.avenarius.app.ui.theme.aurora
+import com.avenarius.app.ui.theme.Radius
+import com.avenarius.app.ui.theme.Spacing
+import com.avenarius.app.ui.theme.lightStatusBarIcons
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 /** «Стереть переписку?»: shared by the chat's ⋮ menu and the info pages. */
@@ -104,7 +113,7 @@ internal fun ClearHistoryDialog(
     )
 }
 
-/** A tile over the info page's hero, or an entry of its ⋮ / «Ещё» sheet. */
+/** A tile under the info page's hero, or an entry of its ⋮ / «Ещё» sheet. */
 internal class InfoAction(
     val icon: Painter,
     val label: String,
@@ -126,8 +135,8 @@ internal class InfoTab(
 )
 
 /**
- * The info page of a user, group or channel: a full-bleed photo hero with the name and
- * the action tiles over it, a card of facts, then tabs (an optional [extraTab] and the
+ * The info page of a user, group or channel: a full-bleed photo hero with the name over it,
+ * the action tiles under it, a card of facts, then tabs (an optional [extraTab] and the
  * chat's Медиа / Файлы / Ссылки / Голосовые from [chatId]) that stick under a compact
  * bar once the hero has scrolled away.
  */
@@ -172,6 +181,11 @@ internal fun InfoPage(
                     ?.let { it.offset + it.size < heroGoneAt } == true
         }
     }
+    // The hero is a dark photo or colour under the status bar: light icons over it in every theme.
+    DisposableEffect(heroGone) {
+        lightStatusBarIcons.value = !heroGone
+        onDispose { lightStatusBarIcons.value = false }
+    }
     // The user scrolling to the end of a tab asks for its next (older) page: one page per such
     // scroll, never on its own as the list grows or a spinner comes and goes.
     LaunchedEffect(listState, chatId, kind) {
@@ -189,7 +203,7 @@ internal fun InfoPage(
                     item.onClick()
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(Spacing.m))
         }
     }
     val openMenu = { menuOpen = true }.takeIf { menu.isNotEmpty() }
@@ -198,7 +212,7 @@ internal fun InfoPage(
         androidx.compose.foundation.lazy.LazyColumn(
             Modifier.fillMaxSize().background(cs.background),
             state = listState,
-            contentPadding = PaddingValues(bottom = 24.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()),
+            contentPadding = PaddingValues(bottom = Spacing.xl + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()),
         ) {
             item(key = "hero") {
                 InfoHero(title, avatarUrl, official, status, online, onBack, openMenu, vm::openImage, tiles)
@@ -231,14 +245,46 @@ private fun CompactBar(
     title: String,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+) = SubPageBar(title, onBack, modifier, titleStyle = MaterialTheme.typography.titleMedium)
+
+/**
+ * The top of a sub-page, under the status bar: a round tonal back button at the start and the
+ * [title] centred, with optional [actions] at the end.
+ */
+@Composable
+internal fun SubPageBar(
+    title: String,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    titleStyle: TextStyle = MaterialTheme.typography.titleLarge,
+    actions: @Composable RowScope.() -> Unit = {},
 ) {
-    Row(
-        modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    Box(
+        modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = Spacing.m, vertical = Spacing.s)
+            .heightIn(min = 48.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        CircleIconButton(AppIcons.Back, "Назад", onBack)
-        Spacer(Modifier.width(12.dp))
-        Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        CircleIconButton(
+            AppIcons.Back,
+            "Назад",
+            onBack,
+            Modifier.align(Alignment.CenterStart),
+            size = 48.dp,
+            container = MaterialTheme.colorScheme.surfaceContainer,
+        )
+        Text(
+            title,
+            style = titleStyle,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            // Clear of the back button on both sides, so the title stays centred on the screen.
+            modifier = Modifier.padding(horizontal = 48.dp + Spacing.m),
+        )
+        Row(Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically, content = actions)
     }
 }
 
@@ -254,8 +300,8 @@ private fun InfoHero(
     onAvatarClick: (String) -> Unit,
     actions: List<InfoAction>,
 ) {
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        Box(Modifier.fillMaxWidth().height(maxWidth * 1.15f)) {
+    Column(Modifier.fillMaxWidth()) {
+        Box(Modifier.fillMaxWidth().aspectRatio(1f)) {
             if (avatarUrl != null) {
                 AsyncImage(
                     model = avatarUrl,
@@ -264,44 +310,52 @@ private fun InfoHero(
                     modifier = Modifier.fillMaxSize().clickable { onAvatarClick(avatarUrl) },
                 )
             } else {
-                Box(Modifier.fillMaxSize().aurora(1.5f).padding(bottom = 120.dp), contentAlignment = Alignment.Center) {
-                    Avatar(title, null, 132.dp)
+                // No photo: the avatar's own flat colour, its initials large.
+                Box(Modifier.fillMaxSize().background(avatarColor(title)).padding(bottom = 56.dp), contentAlignment = Alignment.Center) {
+                    Text(initials(title), style = MaterialTheme.typography.displayLarge, color = Color.White)
                 }
             }
-            // Keeps the white name and tiles readable on any photo.
-            Box(
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .fillMaxHeight(0.55f)
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.82f)))),
-            )
-            // And the status bar and the top buttons on a light photo.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .windowInsetsTopHeight(WindowInsets.statusBars.add(WindowInsets(top = 72.dp)))
-                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.5f), Color.Transparent))),
-            )
-            Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
+            if (avatarUrl != null) {
+                // One soft scrim under the name, eased in so it has no visible start.
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.45f)
+                        .background(
+                            Brush.verticalGradient(
+                                0f to Color.Transparent,
+                                0.5f to Color.Black.copy(alpha = 0.25f),
+                                1f to Color.Black.copy(alpha = 0.6f),
+                            ),
+                        ),
+                )
+                // And the status bar and the top buttons on a light photo.
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .windowInsetsTopHeight(WindowInsets.statusBars.add(WindowInsets(top = 72.dp)))
+                        .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.4f), Color.Transparent))),
+                )
+            }
+            Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = Spacing.m, vertical = Spacing.s)) {
                 ScrimButton(AppIcons.Back, "Назад", onBack)
                 Spacer(Modifier.weight(1f))
                 onMenu?.let { ScrimButton(AppIcons.More, "Ещё", it) }
             }
-            Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(16.dp)) {
+            Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(Spacing.l)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         title,
                         style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
                         color = Color.White,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
                     if (official) {
-                        Spacer(Modifier.width(6.dp))
-                        Icon(AppIcons.Verified, contentDescription = "Официальный", tint = Color.White, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(Spacing.xs))
+                        Icon(AppIcons.Verified, contentDescription = "Официальный", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
                 }
                 if (status != null) {
@@ -310,34 +364,18 @@ private fun InfoHero(
                         style = MaterialTheme.typography.bodyMedium,
                         color = if (online) Color.White else Color.White.copy(alpha = 0.72f),
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                if (actions.isNotEmpty()) {
-                    Spacer(Modifier.height(14.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        actions.forEach { a ->
-                            Column(
-                                Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(Color.Black.copy(alpha = 0.32f))
-                                    .clickable(onClick = a.onClick)
-                                    .padding(vertical = 10.dp, horizontal = 4.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                Icon(a.icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
-                                Text(
-                                    a.label,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = Color.White,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                    }
-                }
+            }
+        }
+        // The tiles sit under the photo, on the page background.
+        if (actions.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = Spacing.l, end = Spacing.l, top = Spacing.m),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.s),
+            ) {
+                actions.forEach { a -> QuickAction(a.icon, a.label, Modifier.weight(1f), a.onClick) }
             }
         }
     }
@@ -359,32 +397,26 @@ private fun FactsCard(
     onLinkClick: (String) -> Boolean,
 ) {
     if (facts.isEmpty()) {
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(Spacing.s))
         return
     }
     val cs = MaterialTheme.colorScheme
     val clipboard = LocalClipboardManager.current
-    Column(
-        Modifier
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(cs.surfaceContainer)
-            .padding(vertical = 6.dp),
-    ) {
+    GroupCard(modifier = Modifier.padding(horizontal = Spacing.l, vertical = Spacing.m).fillMaxWidth()) {
         facts.forEach { f ->
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .groupRowDivider(Spacing.l)
                     .clickable { clipboard.setText(AnnotatedString(f.value)) }
-                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                    .padding(horizontal = Spacing.l, vertical = Spacing.s),
             ) {
                 if (f.rich) {
                     LinkedText(f.value, MaterialTheme.typography.bodyLarge, cs.onSurface, onLinkClick)
                 } else {
                     Text(f.value, style = MaterialTheme.typography.bodyLarge)
                 }
-                Text(f.label, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                Text(f.label, style = MaterialTheme.typography.bodyMedium, color = cs.onSurfaceVariant)
             }
         }
     }
@@ -400,18 +432,18 @@ private fun TabPills(
     val style = MaterialTheme.typography.titleSmall
     val measurer = rememberTextMeasurer()
     val scroll = rememberScrollState()
-    BoxWithConstraints(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).fillMaxWidth()) {
-        // Equal pills when every label fits its share of the row (4 dp row inset, 6 dp pill padding a side);
+    BoxWithConstraints(Modifier.padding(horizontal = Spacing.l, vertical = Spacing.s).fillMaxWidth()) {
+        // Equal pills when every label fits its share of the row (xs row inset, s pill padding a side);
         // otherwise the row scrolls, its end faded.
         val widest = remember(labels, style) { labels.maxOf { measurer.measure(it, style, maxLines = 1).size.width } }
-        val equal = with(LocalDensity.current) { (widest.toDp() + 12.dp) * labels.size <= maxWidth - 8.dp }
+        val equal = with(LocalDensity.current) { (widest.toDp() + Spacing.s * 2) * labels.size <= maxWidth - Spacing.xs * 2 }
         Row(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
+                .clip(CircleShape)
                 .background(cs.surfaceContainer)
                 .then(if (equal) Modifier else Modifier.fadingEndScroll(scroll))
-                .padding(4.dp),
+                .padding(Spacing.xs),
         ) {
             labels.forEachIndexed { i, label ->
                 val on = i == selected
@@ -424,9 +456,9 @@ private fun TabPills(
                     modifier =
                         (if (equal) Modifier.weight(1f) else Modifier)
                             .clip(CircleShape)
-                            .background(if (on) cs.primary.copy(alpha = 0.16f) else Color.Transparent)
+                            .background(if (on) cs.surfaceContainerHighest else Color.Transparent)
                             .clickable { onSelect(i) }
-                            .padding(horizontal = if (equal) 6.dp else 16.dp, vertical = 8.dp),
+                            .padding(horizontal = if (equal) Spacing.s else Spacing.l, vertical = Spacing.s),
                 )
             }
         }
@@ -435,7 +467,7 @@ private fun TabPills(
 
 @Composable
 private fun TabSpinner() {
-    Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxWidth().padding(Spacing.xl), contentAlignment = Alignment.Center) {
         CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
     }
 }
@@ -446,8 +478,8 @@ private fun TabEmpty() {
         "Здесь пока ничего нет",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
-        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().padding(vertical = Spacing.xxl),
+        textAlign = TextAlign.Center,
     )
 }
 
@@ -505,10 +537,10 @@ private fun MediaTile(
             Row(
                 Modifier
                     .align(Alignment.BottomStart)
-                    .padding(4.dp)
-                    .clip(RoundedCornerShape(6.dp))
+                    .padding(Spacing.xs)
+                    .clip(CircleShape)
                     .background(Color.Black.copy(alpha = 0.55f))
-                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                    .padding(horizontal = Spacing.s, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(AppIcons.Play, contentDescription = "Видео", tint = Color.White, modifier = Modifier.size(14.dp))
@@ -531,16 +563,16 @@ private fun TabRow(
 ) {
     val cs = MaterialTheme.colorScheme
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 9.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = Spacing.l, vertical = Spacing.s),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(46.dp).clip(RoundedCornerShape(14.dp)).background(cs.primary.copy(alpha = 0.14f)),
+            Modifier.size(44.dp).clip(RoundedCornerShape(Radius.small)).background(cs.surfaceContainerHigh),
             contentAlignment = Alignment.Center,
         ) {
             tile()
         }
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(Spacing.m))
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
@@ -574,7 +606,6 @@ private fun FileTabRow(
                         .uppercase()
                         .ifBlank { "FILE" },
                     style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary,
                 )
         }
@@ -593,7 +624,7 @@ private fun LinkTabRow(
         Modifier
             .fillMaxWidth()
             .clickable { if (!onLinkClick(preview.url)) uriHandler.openUriSafely(preview.url) }
-            .padding(horizontal = 16.dp, vertical = 9.dp),
+            .padding(horizontal = Spacing.l, vertical = Spacing.s),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -603,7 +634,8 @@ private fun LinkTabRow(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            Text(formatDate(message.time), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(Spacing.s))
+            Text(formatDate(message.time), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Text(
             preview.url,

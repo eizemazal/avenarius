@@ -12,16 +12,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,18 +28,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.TwoFaFlow
 import com.avenarius.app.ui.TwoFaStep
 import com.avenarius.app.ui.components.ErrorText
 import com.avenarius.app.ui.components.SmallSpinner
+import com.avenarius.app.ui.theme.Spacing
 
 /**
  * Settings → "Пароль для входа": the official client's set-up / change / remove flow
  * for the login password (2FA), one step per [TwoFaStep]. Wording follows the official
  * app's strings.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun TwoFaScreen(
     flow: TwoFaFlow,
@@ -61,12 +56,7 @@ internal fun TwoFaScreen(
     onDisable: () -> Unit,
 ) {
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Пароль для входа") },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.Back, contentDescription = "Назад") } },
-            )
-        },
+        topBar = { SubPageBar("Пароль для входа", onBack) },
     ) { padding ->
         // Keyed on the step so each step starts with empty fields.
         androidx.compose.runtime.key(flow.step) {
@@ -108,9 +98,9 @@ private fun StepForm(
                 .fillMaxSize()
                 .imePadding()
                 .verticalScroll(rememberScrollState())
-                .padding(24.dp)
+                .padding(Spacing.xl)
                 .widthIn(max = 420.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(Spacing.m),
         horizontalAlignment = Alignment.Start,
         content = content,
     )

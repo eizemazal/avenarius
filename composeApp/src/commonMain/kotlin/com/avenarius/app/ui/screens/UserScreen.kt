@@ -5,8 +5,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -18,16 +16,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.Chat
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.AppState
 import com.avenarius.app.ui.AppViewModel
 import com.avenarius.app.ui.components.CenteredSpinner
-import com.avenarius.app.ui.components.CircleIconButton
 import com.avenarius.app.ui.formatDate
 import com.avenarius.app.ui.lastSeenText
 import com.avenarius.app.ui.nowMillis
+import com.avenarius.app.ui.theme.Spacing
 
 /** A user's info page; for our own profile its tabs show «Избранное» (chat 0). */
 @Composable
@@ -39,7 +36,7 @@ internal fun UserScreen(
     if (user == null) {
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             CenteredSpinner()
-            CircleIconButton(AppIcons.Back, "Назад", vm::closeUser, Modifier.statusBarsPadding().padding(12.dp))
+            SubPageBar("", vm::closeUser)
         }
         return
     }
@@ -62,7 +59,7 @@ internal fun UserScreen(
             onDismissRequest = { renaming = false },
             title = { Text("Изменить контакт") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
                     OutlinedTextField(first, { first = it }, label = { Text("Имя") }, singleLine = true)
                     OutlinedTextField(last, { last = it }, label = { Text("Фамилия") }, singleLine = true)
                 }

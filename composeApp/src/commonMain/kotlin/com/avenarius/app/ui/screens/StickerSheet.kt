@@ -39,6 +39,8 @@ import com.avenarius.app.model.StickerShelf
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.components.AppSheet
 import com.avenarius.app.ui.components.initials
+import com.avenarius.app.ui.theme.Radius
+import com.avenarius.app.ui.theme.Spacing
 
 /** Key of the «Недавние» tab in the set row (a real set has a numeric id). */
 private const val RECENT = -1L
@@ -72,7 +74,7 @@ internal fun StickerSheet(
         }
     LaunchedEffect(current, ids) { if (ids.isNotEmpty()) onLoad(ids) }
     AppSheet(onDismiss) {
-        Column(Modifier.padding(bottom = 12.dp)) {
+        Column(Modifier.padding(bottom = Spacing.m)) {
             when {
                 shelf == null ->
                     Box(Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
@@ -84,12 +86,12 @@ internal fun StickerSheet(
                         style = MaterialTheme.typography.bodyMedium,
                         color = cs.onSurfaceVariant,
                         textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 48.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.xxl, vertical = Spacing.xxl),
                     )
                 else -> {
                     LazyRow(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        Modifier.fillMaxWidth().padding(horizontal = Spacing.m),
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
                     ) {
                         if (shelf.recent.isNotEmpty()) {
                             item(key = "recent") {
@@ -118,20 +120,20 @@ internal fun StickerSheet(
                         Modifier
                             .fillMaxWidth()
                             .height(320.dp)
-                            .padding(horizontal = 12.dp)
-                            .padding(top = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                            .padding(horizontal = Spacing.m)
+                            .padding(top = Spacing.s),
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+                        verticalArrangement = Arrangement.spacedBy(Spacing.xs),
                     ) {
                         items(ids, key = { it }) { id ->
                             val sticker = stickers[id]
                             Box(
                                 Modifier
                                     .aspectRatio(1f)
-                                    .clip(RoundedCornerShape(12.dp))
+                                    .clip(RoundedCornerShape(Radius.small))
                                     .background(if (sticker == null) cs.surfaceContainerHigh else Color.Transparent)
                                     .clickable(enabled = sticker != null) { sticker?.let(onSend) }
-                                    .padding(4.dp),
+                                    .padding(Spacing.xs),
                             ) {
                                 if (sticker !=
                                     null
@@ -157,8 +159,8 @@ private fun SetTab(
     Box(
         Modifier
             .size(48.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (active) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f) else Color.Transparent)
+            .clip(RoundedCornerShape(Radius.small))
+            .background(if (active) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent)
             .clickable(onClickLabel = label, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) { icon() }

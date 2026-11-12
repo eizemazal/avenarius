@@ -91,12 +91,11 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
@@ -114,12 +113,14 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.Hyphens
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -180,11 +181,12 @@ import com.avenarius.app.ui.rememberFilePickLauncher
 import com.avenarius.app.ui.rememberPhotoPickLauncher
 import com.avenarius.app.ui.rememberVoiceRecorder
 import com.avenarius.app.ui.sameDay
-import com.avenarius.app.ui.theme.accentGradient
+import com.avenarius.app.ui.theme.Radius
+import com.avenarius.app.ui.theme.Spacing
 import com.avenarius.app.ui.theme.chatWallpaper
 import com.avenarius.app.ui.theme.isLightTheme
-import com.avenarius.app.ui.theme.onAccentGradient
 import com.avenarius.app.ui.theme.onScrim
+import com.avenarius.app.ui.theme.outgoingBubbleColor
 import com.avenarius.app.ui.voiceRecordingSupported
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -432,11 +434,14 @@ internal fun ChatScreen(
             title = { Text("Закрепить сообщение?") },
             text = {
                 Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).toggleable(value = notify, onValueChange = { notify = it }),
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(Radius.small))
+                        .toggleable(value = notify, onValueChange = { notify = it }),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Checkbox(checked = notify, onCheckedChange = null)
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(Spacing.s))
                     Text(if (chat?.isChannel == true) "Уведомить подписчиков" else "Уведомить участников")
                 }
             },
@@ -621,7 +626,7 @@ internal fun ChatScreen(
                     }
                     else -> null
                 }
-            Surface(color = cs.surface.copy(alpha = 0.9f)) {
+            Surface(color = cs.surfaceContainer) {
                 Column {
                     if (selecting) {
                         val picked = messages.filter { it.id in selected }
@@ -666,29 +671,29 @@ internal fun ChatScreen(
                                 .fillMaxWidth()
                                 .statusBarsPadding()
                                 .height(64.dp)
-                                .padding(horizontal = 4.dp),
+                                .padding(horizontal = Spacing.xs),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             IconButton(onClick = onBack) { Icon(AppIcons.Back, contentDescription = "Назад") }
                             Row(
                                 Modifier
                                     .weight(1f)
-                                    .clip(RoundedCornerShape(18.dp))
+                                    .clip(RoundedCornerShape(Radius.medium))
                                     .then(if (onHeaderClick != null) Modifier.clickable(onClick = onHeaderClick) else Modifier)
-                                    .padding(horizontal = 4.dp, vertical = 6.dp),
+                                    .padding(Spacing.xs),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 if (isSaved) {
-                                    SavedMessagesAvatar(42.dp)
+                                    SavedMessagesAvatar(40.dp)
                                 } else {
                                     Avatar(
                                         chat?.title ?: "Чат",
                                         headingAvatar,
-                                        42.dp,
+                                        40.dp,
                                         online = otherUserId != null && otherUserId in onlineUsers,
                                     )
                                 }
-                                Spacer(Modifier.width(12.dp))
+                                Spacer(Modifier.width(Spacing.m))
                                 Column {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
@@ -699,7 +704,7 @@ internal fun ChatScreen(
                                             modifier = Modifier.weight(1f, fill = false),
                                         )
                                         if (chat?.official == true) {
-                                            Spacer(Modifier.width(4.dp))
+                                            Spacer(Modifier.width(Spacing.xs))
                                             Icon(
                                                 AppIcons.Verified,
                                                 contentDescription = "Официальный",
@@ -839,11 +844,11 @@ internal fun ChatScreen(
                         modifier =
                             Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 8.dp, vertical = 8.dp)
+                                .padding(Spacing.s)
                                 .clip(CircleShape)
                                 .background(incomingBubbleColor())
                                 .then(if (chat.isChannel) Modifier.clickable(onClick = onToggleMute) else Modifier)
-                                .padding(vertical = 15.dp),
+                                .padding(horizontal = Spacing.l, vertical = Spacing.l),
                     )
                     return@Column
                 }
@@ -873,14 +878,14 @@ internal fun ChatScreen(
                 // Nothing to send yet: the round button records a voice message instead.
                 val micMode = voiceRecordingSupported && !recording && !canSend && !sendingAttachment
                 Row(
-                    Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
+                    Modifier.fillMaxWidth().padding(start = Spacing.s, end = Spacing.s, top = Spacing.xs, bottom = Spacing.s),
                     verticalAlignment = Alignment.Bottom,
                 ) {
                     // The input pill: reply/edit strip and staged attachments ride on top of the field.
                     Surface(
+                        // Half the single-line height (44 + 2 × 4), so one line is a full pill.
                         shape = RoundedCornerShape(26.dp),
                         color = incomingBubbleColor(),
-                        shadowElevation = 2.dp,
                         modifier = Modifier.weight(1f),
                     ) {
                         Column {
@@ -896,7 +901,7 @@ internal fun ChatScreen(
                                 StagedAttachments(pending, onRemove = { item -> pending = pending - item })
                             }
                             Row(
-                                Modifier.padding(horizontal = 4.dp, vertical = 4.dp).heightIn(min = 44.dp),
+                                Modifier.padding(Spacing.xs).heightIn(min = 44.dp),
                                 verticalAlignment = Alignment.Bottom,
                             ) {
                                 if (recording) {
@@ -917,13 +922,12 @@ internal fun ChatScreen(
                                     Row(
                                         Modifier.weight(1f).height(44.dp),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(Spacing.s),
                                     ) {
                                         RecordingDot()
                                         Text(
                                             "${recordedSeconds / 60}:${(recordedSeconds % 60).toString().padStart(2, '0')}",
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            fontWeight = FontWeight.Medium,
+                                            style = MaterialTheme.typography.titleMedium,
                                             color = cs.onSurface,
                                         )
                                         Text(
@@ -980,7 +984,7 @@ internal fun ChatScreen(
                                         modifier =
                                             Modifier
                                                 .weight(1f)
-                                                .padding(vertical = 11.dp, horizontal = 2.dp)
+                                                .padding(horizontal = 2.dp)
                                                 .focusRequester(composerFocus),
                                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = cs.onSurface),
                                         cursorBrush = SolidColor(cs.primary),
@@ -988,14 +992,21 @@ internal fun ChatScreen(
                                         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                                         maxLines = 6,
                                         decorationBox = { inner ->
-                                            if (field.text.isEmpty()) {
-                                                Text(
-                                                    if (pending.isNotEmpty()) "Подпись…" else "Сообщение",
-                                                    style = MaterialTheme.typography.bodyLarge,
-                                                    color = cs.onSurfaceVariant,
-                                                )
+                                            // As tall as the icon buttons, so a single line sits on their centre line.
+                                            Box(
+                                                Modifier.heightIn(min = 44.dp).padding(vertical = Spacing.s),
+                                                contentAlignment = Alignment.CenterStart,
+                                            ) {
+                                                if (field.text.isEmpty()) {
+                                                    Text(
+                                                        if (pending.isNotEmpty()) "Подпись…" else "Сообщение",
+                                                        style = MaterialTheme.typography.bodyLarge,
+                                                        color = cs.onSurfaceVariant,
+                                                        maxLines = 1,
+                                                    )
+                                                }
+                                                inner()
                                             }
-                                            inner()
                                         },
                                     )
                                     // Round video messages share the "nothing typed yet" state with the mic.
@@ -1009,7 +1020,7 @@ internal fun ChatScreen(
                                             )
                                         }
                                     } else {
-                                        Spacer(Modifier.width(10.dp))
+                                        Spacer(Modifier.width(Spacing.m))
                                     }
                                 }
                             }
@@ -1022,15 +1033,14 @@ internal fun ChatScreen(
                             }
                         }
                     }
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(Spacing.s))
                     // The round action button: mic when idle, otherwise send.
                     val enabled = micMode || canSend
                     Box(
                         Modifier
                             .size(52.dp)
-                            .then(if (enabled) Modifier.shadow(4.dp, CircleShape) else Modifier)
                             .clip(CircleShape)
-                            .background(if (enabled) accentGradient() else SolidColor(incomingBubbleColor()))
+                            .background(if (enabled) cs.primary else incomingBubbleColor())
                             .clickable(enabled = enabled) {
                                 if (micMode) {
                                     recording = true
@@ -1076,7 +1086,7 @@ internal fun ChatScreen(
                                             2 -> "Сохранить"
                                             else -> "Отправить"
                                         },
-                                    tint = if (enabled) onAccentGradient() else cs.onSurfaceVariant.copy(alpha = 0.5f),
+                                    tint = if (enabled) cs.onPrimary else cs.onSurfaceVariant.copy(alpha = 0.5f),
                                     modifier = Modifier.size(24.dp),
                                 )
                             }
@@ -1095,7 +1105,7 @@ internal fun ChatScreen(
             }
             if (loadingOlder) {
                 CircularProgressIndicator(
-                    modifier = Modifier.align(Alignment.TopCenter).padding(8.dp).size(24.dp),
+                    modifier = Modifier.align(Alignment.TopCenter).padding(Spacing.s).size(24.dp),
                 )
             }
             if (error != null) {
@@ -1106,14 +1116,14 @@ internal fun ChatScreen(
                     modifier =
                         Modifier
                             .align(Alignment.TopCenter)
-                            .padding(8.dp),
+                            .padding(Spacing.s),
                 )
             }
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = Spacing.s),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
-                contentPadding = PaddingValues(vertical = 6.dp),
+                contentPadding = PaddingValues(vertical = Spacing.s),
             ) {
                 itemsIndexed(messages, key = { _, m -> m.id ?: m.cid ?: m.time }) { index, msg ->
                     // New bubbles fade in; placement stays instant so prepending history never slides the view.
@@ -1196,14 +1206,14 @@ internal fun ChatScreen(
                 visible = listState.isScrollInProgress && topTime != null,
                 enter = androidx.compose.animation.fadeIn(),
                 exit = androidx.compose.animation.fadeOut(),
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp),
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = Spacing.s),
             ) {
-                Surface(shape = CircleShape, color = incomingBubbleColor(), shadowElevation = 4.dp) {
+                Surface(shape = CircleShape, color = incomingBubbleColor()) {
                     Text(
                         topTime?.let { formatDay(it) } ?: "",
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+                        modifier = Modifier.padding(horizontal = Spacing.m, vertical = Spacing.xs),
                         style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
                     )
                 }
             }
@@ -1221,7 +1231,7 @@ internal fun ChatScreen(
                 visible = notAtBottom,
                 enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(),
                 exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(),
-                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 12.dp),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = Spacing.m, bottom = Spacing.m),
             ) {
                 Surface(
                     onClick = {
@@ -1229,15 +1239,16 @@ internal fun ChatScreen(
                     },
                     shape = CircleShape,
                     color = incomingBubbleColor(),
-                    shadowElevation = 6.dp,
-                    modifier = Modifier.size(46.dp),
+                    // Just enough to lift it off a bubble of the same tone passing underneath.
+                    shadowElevation = 2.dp,
+                    modifier = Modifier.size(44.dp),
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             AppIcons.ArrowDown,
                             contentDescription = "К последним сообщениям",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(28.dp),
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(24.dp),
                         )
                     }
                 }
@@ -1384,14 +1395,14 @@ internal fun ChatScreen(
                     "Удалить ${targets.size} ${plural(targets.size, "сообщение", "сообщения", "сообщений")}?"
                 },
                 style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.padding(start = 24.dp, bottom = 8.dp),
+                modifier = Modifier.padding(start = Spacing.xl, end = Spacing.xl, bottom = Spacing.s),
             )
             if (targets.all { it.senderId == myId }) {
                 SheetAction(AppIcons.Delete, "Удалить у всех", danger = true) { delete(true) }
             }
             SheetAction(AppIcons.Delete, "Удалить у меня", danger = true) { delete(false) }
             SheetAction(AppIcons.Close, "Отмена") { deleteTargets = emptyList() }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(Spacing.m))
         }
     }
 
@@ -1480,8 +1491,8 @@ private fun MessageRow(
     Box(
         Modifier
             .fillMaxWidth()
-            .padding(top = if (startsRun) 6.dp else 0.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .padding(top = if (startsRun) Spacing.s else 0.dp)
+            .clip(RoundedCornerShape(Radius.small))
             .background(tint),
     ) {
         if (selecting) {
@@ -1489,7 +1500,7 @@ private fun MessageRow(
             Box(
                 Modifier
                     .align(if (isMine) Alignment.CenterStart else Alignment.CenterEnd)
-                    .padding(horizontal = 12.dp)
+                    .padding(horizontal = Spacing.m)
                     .size(22.dp)
                     .clip(CircleShape)
                     .then(
@@ -1506,7 +1517,7 @@ private fun MessageRow(
                         AppIcons.Delivered,
                         contentDescription = "Выбрано",
                         tint = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.size(15.dp),
+                        modifier = Modifier.size(16.dp),
                     )
                 }
             }
@@ -1519,8 +1530,8 @@ private fun MessageRow(
             modifier =
                 Modifier
                     .align(Alignment.CenterEnd)
-                    .padding(end = 20.dp)
-                    .size(22.dp)
+                    .padding(end = Spacing.l)
+                    .size(24.dp)
                     .graphicsLayer {
                         alpha = progress
                         scaleX = progress
@@ -1561,7 +1572,7 @@ private fun MessageRow(
             // other participant is obvious, so no avatar gutter is shown.
             if (!isMine && isGroup) {
                 if (startsRun) Avatar(senderName, senderAvatar, 32.dp, onClick = onAvatarClick) else Spacer(Modifier.size(32.dp))
-                Spacer(Modifier.width(6.dp))
+                Spacer(Modifier.width(Spacing.s))
             }
             // A message that is nothing but a round video gets no bubble: the circle
             // floats on the conversation, the way other messengers draw them.
@@ -1576,24 +1587,24 @@ private fun MessageRow(
                     msg.media.single().isVideoNote ||
                     // …and so does a sticker.
                     (msg.stickerUrl != null && msg.text.isBlank() && msg.media.isEmpty() && msg.replyTo == null)
-            // Own bubbles carry the accent gradient; incoming ones sit on a neutral raised tone.
-            val bubbleBrush: Brush =
+            // Own bubbles are a flat accent; incoming ones sit on a neutral raised tone.
+            val bubbleColor =
                 when {
-                    bare -> SolidColor(Color.Transparent)
-                    isMine -> accentGradient()
-                    else -> SolidColor(incomingBubbleColor())
+                    bare -> Color.Transparent
+                    isMine -> outgoingBubbleColor()
+                    else -> incomingBubbleColor()
                 }
             // Without a bubble behind it, the footer sits on the chat background, so it
             // can't use the on-bubble colour.
             val fg =
                 when {
                     bare -> MaterialTheme.colorScheme.onSurfaceVariant
-                    isMine -> onAccentGradient()
+                    isMine -> MaterialTheme.colorScheme.onPrimary
                     else -> MaterialTheme.colorScheme.onSurface
                 }
             // Messages in a run hug each other: the sender-side corners are tight, the first
             // bubble of a run keeps a round top on that side.
-            val big = 20.dp
+            val big = 18.dp
             val tight = 6.dp
             val bubbleShape =
                 if (isMine) {
@@ -1603,43 +1614,42 @@ private fun MessageRow(
                 }
             // Photos and videos run almost edge to edge; text keeps a comfortable inset.
             val mediaBubble = !bare && (msg.media.isNotEmpty() || msg.pending.isNotEmpty())
-            val inset = if (mediaBubble) Modifier.padding(horizontal = 6.dp) else Modifier
+            val inset = if (mediaBubble) Modifier.padding(horizontal = Spacing.s) else Modifier
             // A bare sticker or circle has no bubble padding: its name and «Переслано от» lines get the text
             // bubble's inset, or the clipped corner cuts them.
-            val headerInset = if (bare) Modifier.padding(horizontal = 12.dp) else inset
+            val headerInset = if (bare) Modifier.padding(horizontal = Spacing.m) else inset
             Column(horizontalAlignment = if (isMine) Alignment.End else Alignment.Start) {
                 Box(
                     Modifier
                         .widthIn(max = maxWidth)
-                        .then(if (bare) Modifier else Modifier.shadow(1.dp, bubbleShape))
                         .clip(bubbleShape)
-                        .background(bubbleBrush)
+                        .background(bubbleColor)
                         .combinedClickable(onClick = onClick, onLongClick = onLongClick, onDoubleClick = onDoubleClick)
                         .padding(
                             horizontal =
                                 if (bare) {
                                     0.dp
                                 } else if (mediaBubble) {
-                                    4.dp
+                                    Spacing.xs
                                 } else {
-                                    12.dp
+                                    Spacing.m
                                 },
                             vertical =
                                 if (bare) {
                                     0.dp
                                 } else if (mediaBubble) {
-                                    4.dp
+                                    Spacing.xs
                                 } else {
-                                    7.dp
+                                    Spacing.s
                                 },
                         ),
                 ) {
-                    Column {
+                    // A media bubble wraps its 260dp media: captions, buttons and the footer wrap to it too.
+                    Column(if (mediaBubble) Modifier.widthIn(max = 260.dp) else Modifier) {
                         if (isGroup && !isMine && startsRun) {
                             Text(
                                 senderName,
                                 style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.SemiBold,
                                 color = senderNameColor(senderName),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -1649,8 +1659,10 @@ private fun MessageRow(
                         if (forwardAuthor != null) {
                             Text(
                                 "Переслано от $forwardAuthor",
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelMedium,
                                 color = fg.copy(alpha = if (onForwardClick != null) 0.95f else 0.75f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 modifier =
                                     if (onForwardClick != null) {
                                         headerInset.clickable(onClick = onForwardClick)
@@ -1666,7 +1678,7 @@ private fun MessageRow(
                                     if (onReplyClick !=
                                         null
                                     ) {
-                                        Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onReplyClick)
+                                        Modifier.clip(RoundedCornerShape(Radius.small)).clickable(onClick = onReplyClick)
                                     } else {
                                         Modifier
                                     },
@@ -1683,7 +1695,7 @@ private fun MessageRow(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 if (failed) {
                                     PendingAction(AppIcons.Retry, "Повторить отправку", fg, onRetry)
-                                    Spacer(Modifier.width(12.dp))
+                                    Spacer(Modifier.width(Spacing.m))
                                 }
                                 // Always available: an upload in flight can be abandoned,
                                 // and a failed one has to be dismissable.
@@ -1735,7 +1747,7 @@ private fun MessageRow(
                             Box(inset) {
                                 LinkedText(
                                     msg.text,
-                                    MaterialTheme.typography.bodyLarge,
+                                    MessageTextStyle(),
                                     fg,
                                     onLinkClick,
                                     linkColor = if (isMine) fg else MaterialTheme.colorScheme.primary,
@@ -1747,7 +1759,9 @@ private fun MessageRow(
                         msg.linkPreview?.let { preview -> Box(inset) { LinkPreviewCard(preview, fg) } }
                         msg.poll?.let { poll -> Box(inset) { PollView(poll, fg, onVote) } }
                         msg.location?.let { place -> Box(inset) { LocationCard(place, fg) } }
-                        msg.contact?.let { card -> Box(inset) { ContactCardView(card, fg, onWriteTo) } }
+                        msg.contact?.let { card ->
+                            Box(inset) { ContactCardView(card, fg, if (isMine) fg else MaterialTheme.colorScheme.primary, onWriteTo) }
+                        }
                         // A bot's buttons: full width, one per line, as the official client lays them out.
                         msg.buttons.flatten().forEach { button ->
                             BotButtonView(
@@ -1755,7 +1769,7 @@ private fun MessageRow(
                                 fg,
                                 busy = button in pressingButtons,
                                 onPress = { onBotButton(button) },
-                                modifier = inset.padding(top = 4.dp).fillMaxWidth(),
+                                modifier = inset.padding(top = Spacing.xs).fillMaxWidth(),
                             )
                         }
                         // Footer line inside the bubble: reactions then time + delivery
@@ -1767,8 +1781,8 @@ private fun MessageRow(
                         // each line is end-aligned, so the time stays at the trailing edge.
                         FlowRow(
                             modifier = Modifier.align(Alignment.End).then(inset),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(Spacing.xs, Alignment.End),
+                            verticalArrangement = Arrangement.spacedBy(Spacing.xs),
                         ) {
                             msg.reactions.forEach { r -> ReactionChip(r, fg) { onReactionClick(r.emoji) } }
                             MessageMeta(msg, isMine, fg, Modifier.align(Alignment.CenterVertically))
@@ -1788,15 +1802,15 @@ private fun StagedAttachments(
 ) {
     Box {
         LazyRow(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            Modifier.fillMaxWidth().padding(horizontal = Spacing.m, vertical = Spacing.s),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.s),
         ) {
             items(items) { media ->
                 Box(Modifier.size(56.dp)) {
                     Box(
                         Modifier
                             .fillMaxSize()
-                            .clip(RoundedCornerShape(12.dp))
+                            .clip(RoundedCornerShape(Radius.small))
                             .background(MaterialTheme.colorScheme.surfaceContainerHighest),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -1818,7 +1832,7 @@ private fun StagedAttachments(
                     Box(
                         Modifier
                             .align(Alignment.TopEnd)
-                            .size(18.dp)
+                            .size(20.dp)
                             .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.surface)
                             .clickable { onRemove(media) },
@@ -1841,9 +1855,9 @@ private fun LinkPreviewCard(
     val uriHandler = LocalUriHandler.current
     Column(
         Modifier
-            .padding(top = 4.dp)
+            .padding(top = Spacing.xs)
             .widthIn(max = 260.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(Radius.small))
             .background(fg.copy(alpha = 0.10f))
             .clickable { uriHandler.openUriSafely(preview.url) },
     ) {
@@ -1855,7 +1869,7 @@ private fun LinkPreviewCard(
                 modifier = Modifier.fillMaxWidth().height(120.dp),
             )
         }
-        Column(Modifier.padding(8.dp)) {
+        Column(Modifier.padding(Spacing.s)) {
             (preview.title ?: preview.url).let {
                 Text(it, style = MaterialTheme.typography.labelLarge, color = fg, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
@@ -1889,13 +1903,13 @@ private fun VoiceMessageView(
     val progress = state?.progress
     val shown = progress ?: 0f
     Row(
-        Modifier.padding(vertical = 4.dp, horizontal = 2.dp),
+        Modifier.padding(vertical = Spacing.xs),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.s),
     ) {
         Box(
             Modifier
-                .size(36.dp)
+                .size(40.dp)
                 .clip(CircleShape)
                 .background(fg.copy(alpha = 0.15f))
                 .clickable(onClick = onClick),
@@ -1944,8 +1958,9 @@ private fun VoiceMessageView(
                     voice.durationSeconds
                 },
             ),
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.bodySmall,
             color = fg.copy(alpha = 0.7f),
+            maxLines = 1,
         )
     }
 }
@@ -2007,14 +2022,14 @@ private fun FileAttachView(
 ) {
     Row(
         Modifier
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(Radius.small))
             .clickable(onClick = onClick)
-            .padding(vertical = 4.dp, horizontal = 2.dp),
+            .padding(vertical = Spacing.xs),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.m),
     ) {
         Box(
-            Modifier.size(36.dp).clip(CircleShape).background(fg.copy(alpha = 0.15f)),
+            Modifier.size(40.dp).clip(CircleShape).background(fg.copy(alpha = 0.15f)),
             contentAlignment = Alignment.Center,
         ) {
             if (progress != null) {
@@ -2050,8 +2065,9 @@ private fun FileAttachView(
                 }
             Text(
                 "${formatFileSize(file.size)} · $action",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.bodySmall,
                 color = fg.copy(alpha = 0.7f),
+                maxLines = 1,
             )
         }
     }
@@ -2074,15 +2090,15 @@ private fun ReplyQuote(
 ) {
     Row(
         Modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(Radius.small))
             // Light text (own bubbles, dark theme) gets a darker well, not a grey veil it can't stand out on.
             .background(if (fg.luminance() > 0.5f) Color.Black.copy(alpha = 0.22f) else fg.copy(alpha = 0.12f))
             .height(IntrinsicSize.Min)
-            .padding(end = 8.dp),
+            .padding(end = Spacing.s),
     ) {
         Box(Modifier.width(3.dp).fillMaxHeight().background(fg.copy(alpha = 0.7f)))
-        Column(Modifier.padding(start = 6.dp, top = 3.dp, bottom = 3.dp)) {
-            Text(author, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = fg, maxLines = 1)
+        Column(Modifier.padding(start = Spacing.s, top = Spacing.xs, bottom = Spacing.xs)) {
+            Text(author, style = MaterialTheme.typography.labelLarge, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 text,
                 style = MaterialTheme.typography.bodySmall,
@@ -2114,7 +2130,7 @@ private fun PollView(
     val choosing = poll.multiple && poll.canChoose
     val results = (poll.voted || poll.closed) && !(choosing && picks != mine)
     Column(Modifier.widthIn(min = 220.dp).padding(vertical = 2.dp)) {
-        Text(poll.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = fg)
+        Text(poll.title, style = MaterialTheme.typography.titleSmall.copy(lineBreak = LineBreak.Paragraph), color = fg)
         Text(
             when {
                 poll.closed -> "Опрос завершён"
@@ -2124,31 +2140,31 @@ private fun PollView(
                         "несколько ответов".takeIf { poll.multiple },
                     ).joinToString(" · ")
             },
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.bodySmall,
             color = fg.copy(alpha = 0.7f),
         )
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(Spacing.xs))
         poll.answers.forEach { a ->
             val share = if (poll.total > 0) a.votes * 100 / poll.total else 0
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(Radius.small))
                     .clickable(enabled = if (choosing) true else poll.votesAfterTapping(a.id) != null) {
                         if (choosing) {
                             picks = if (a.id in picks) picks - a.id else picks + a.id
                         } else {
                             poll.votesAfterTapping(a.id)?.let(onVote)
                         }
-                    }.padding(vertical = 6.dp),
+                    }.padding(vertical = Spacing.s),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (results) {
                         Text(
                             "$share%",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.labelLarge,
                             color = fg,
+                            maxLines = 1,
                             modifier = Modifier.width(40.dp),
                         )
                     } else {
@@ -2167,7 +2183,7 @@ private fun PollView(
                                     },
                                 ),
                         )
-                        Spacer(Modifier.width(10.dp))
+                        Spacer(Modifier.width(Spacing.m))
                     }
                     Text(a.text, style = MaterialTheme.typography.bodyMedium, color = fg, modifier = Modifier.weight(1f))
                     if (a.mine) Icon(AppIcons.CheckCircle, contentDescription = "Ваш голос", tint = fg, modifier = Modifier.size(16.dp))
@@ -2175,7 +2191,7 @@ private fun PollView(
                 if (results) {
                     Box(
                         Modifier
-                            .padding(top = 4.dp)
+                            .padding(top = Spacing.xs)
                             .fillMaxWidth()
                             .height(4.dp)
                             .clip(CircleShape)
@@ -2195,10 +2211,10 @@ private fun PollView(
         }
         if (choosing && picks != mine && (picks.isNotEmpty() || poll.voted)) {
             TextButton(onClick = { onVote(picks) }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (picks.isEmpty()) "Отменить голос" else "Проголосовать", color = fg, fontWeight = FontWeight.SemiBold)
+                Text(if (picks.isEmpty()) "Отменить голос" else "Проголосовать", color = fg, maxLines = 1)
             }
         }
-        Text(votesLabel(poll.total), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
+        Text(votesLabel(poll.total), style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f))
     }
 }
 
@@ -2215,19 +2231,19 @@ private fun LocationCard(
     val lon = short(place.longitude)
     Row(
         Modifier
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(Radius.small))
             .background(fg.copy(alpha = 0.10f))
             .clickable { uriHandler.openUriSafely("https://www.openstreetmap.org/?mlat=$lat&mlon=$lon#map=16/$lat/$lon") }
-            .padding(10.dp),
+            .padding(Spacing.m),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(AppIcons.Location, contentDescription = null, tint = fg, modifier = Modifier.size(28.dp))
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(Spacing.m))
         Column {
             Text("Местоположение", style = MaterialTheme.typography.titleSmall, color = fg)
             Text("$lat, $lon", style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.75f))
         }
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(Spacing.s))
         Icon(AppIcons.Open, contentDescription = "Открыть на карте", tint = fg.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
     }
 }
@@ -2237,30 +2253,38 @@ private fun LocationCard(
 private fun ContactCardView(
     card: com.avenarius.app.model.ContactCard,
     fg: Color,
+    accent: Color,
     onWriteTo: (UserInfo) -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
     Column(
         Modifier
             .widthIn(min = 200.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(fg.copy(alpha = 0.10f))
-            .padding(10.dp),
+            .clip(RoundedCornerShape(Radius.small))
+            .background(fg.copy(alpha = 0.10f)),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(Spacing.m), verticalAlignment = Alignment.CenterVertically) {
             Avatar(card.name, null, 40.dp)
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(Spacing.m))
             Column {
                 Text(card.name, style = MaterialTheme.typography.titleSmall, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 card.phone?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.75f)) }
             }
         }
-        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (card.userId != 0L) {
-                TextButton(onClick = { onWriteTo(UserInfo(card.userId, card.name)) }) { Text("Написать", color = fg) }
-            }
-            card.phone?.let { phone ->
-                TextButton(onClick = { clipboard.setText(AnnotatedString(phone)) }) { Text("Скопировать номер", color = fg) }
+        if (card.userId != 0L || card.phone != null) {
+            HorizontalDivider(color = fg.copy(alpha = 0.12f))
+            Row(Modifier.padding(horizontal = Spacing.xs)) {
+                val pad = PaddingValues(horizontal = Spacing.s)
+                if (card.userId != 0L) {
+                    TextButton(onClick = { onWriteTo(UserInfo(card.userId, card.name)) }, contentPadding = pad) {
+                        Text("Написать", color = accent, maxLines = 1)
+                    }
+                }
+                card.phone?.let { phone ->
+                    TextButton(onClick = { clipboard.setText(AnnotatedString(phone)) }, contentPadding = pad) {
+                        Text("Скопировать номер", color = accent, maxLines = 1)
+                    }
+                }
             }
         }
     }
@@ -2299,16 +2323,15 @@ private fun MessageMeta(
 ) {
     Row(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (msg.views > 0) {
-            Icon(AppIcons.Visibility, contentDescription = "Просмотры", tint = fg.copy(alpha = 0.7f), modifier = Modifier.size(13.dp))
-            Text(formatViews(msg.views), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
-            Spacer(Modifier.width(3.dp))
+            Icon(AppIcons.Visibility, contentDescription = "Просмотры", tint = fg.copy(alpha = 0.7f), modifier = Modifier.size(14.dp))
+            Text(formatViews(msg.views), style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f), maxLines = 1)
         }
-        if (msg.edited) Text("изм.", style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
-        Text(formatClock(msg.time), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
+        if (msg.edited) Text("изм.", style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f), maxLines = 1)
+        Text(formatClock(msg.time), style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f), maxLines = 1)
         if (isMine) {
             val read = msg.status == MessageStatus.READ
             Icon(
@@ -2342,12 +2365,12 @@ private fun ReactionChip(
             .clip(CircleShape)
             .background(chipBg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
+            .padding(horizontal = Spacing.s, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
     ) {
         Text(r.emoji, style = MaterialTheme.typography.bodyMedium)
-        if (r.count > 1) Text("${r.count}", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = fg)
+        if (r.count > 1) Text("${r.count}", style = MaterialTheme.typography.labelMedium, color = fg, maxLines = 1)
     }
 }
 
@@ -2385,11 +2408,11 @@ private fun ComposerBanner(
 ) {
     val cs = MaterialTheme.colorScheme
     Row(
-        Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 8.dp),
+        Modifier.fillMaxWidth().padding(start = Spacing.m, end = Spacing.xs, top = Spacing.s),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(icon, contentDescription = null, tint = cs.primary, modifier = Modifier.size(20.dp))
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(Spacing.m))
         Box(
             Modifier
                 .width(3.dp)
@@ -2397,9 +2420,9 @@ private fun ComposerBanner(
                 .clip(CircleShape)
                 .background(cs.primary),
         )
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(Spacing.s))
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = cs.primary, maxLines = 1)
+            Text(title, style = MaterialTheme.typography.labelLarge, color = cs.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 text,
                 style = MaterialTheme.typography.bodySmall,
@@ -2408,8 +2431,8 @@ private fun ComposerBanner(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        IconButton(onClick = onCancel, modifier = Modifier.size(36.dp)) {
-            Icon(AppIcons.Close, contentDescription = "Отменить", modifier = Modifier.size(18.dp))
+        IconButton(onClick = onCancel, modifier = Modifier.size(40.dp)) {
+            Icon(AppIcons.Close, contentDescription = "Отменить", modifier = Modifier.size(20.dp))
         }
     }
 }
@@ -2478,12 +2501,12 @@ private fun MessageContextMenu(
                     scaleX = 0.86f + 0.14f * v
                     scaleY = 0.86f + 0.14f * v
                 }.verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 24.dp),
+                .padding(horizontal = Spacing.l, vertical = Spacing.xl),
             horizontalAlignment = if (isMine) Alignment.End else Alignment.Start,
         ) {
-            // Reactions bar (expandable).
-            Surface(shape = RoundedCornerShape(28.dp), color = cs.surfaceContainerHigh, shadowElevation = 8.dp) {
-                Column(Modifier.padding(6.dp).widthIn(max = REACTION_PICK * 8)) {
+            // Reactions bar (expandable): a full pill while it is one row.
+            Surface(shape = RoundedCornerShape(REACTION_PICK / 2 + Spacing.xs), color = cs.surfaceContainerHigh) {
+                Column(Modifier.padding(Spacing.xs).widthIn(max = REACTION_PICK * 8)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         quick.take(7).forEach { emoji -> ReactionPick(emoji, emoji == mineEmoji) { onReact(emoji) } }
                         Box(
@@ -2498,7 +2521,7 @@ private fun MessageContextMenu(
                             Icon(
                                 AppIcons.ArrowDown,
                                 contentDescription = if (expanded) "Свернуть" else "Больше реакций",
-                                modifier = Modifier.size(22.dp).graphicsLayer { rotationZ = if (expanded) 180f else 0f },
+                                modifier = Modifier.size(20.dp).graphicsLayer { rotationZ = if (expanded) 180f else 0f },
                             )
                         }
                     }
@@ -2511,26 +2534,26 @@ private fun MessageContextMenu(
                     }
                 }
             }
-            Spacer(Modifier.height(12.dp))
-            // What the menu is about: a short quote of the message.
+            Spacer(Modifier.height(Spacing.m))
+            // What the menu is about: a short quote of the message, in its bubble's colours.
             Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = if (isMine) cs.primaryContainer else cs.surfaceContainerHigh,
-                contentColor = if (isMine) cs.onPrimaryContainer else cs.onSurface,
+                shape = RoundedCornerShape(Radius.medium),
+                color = if (isMine) outgoingBubbleColor() else incomingBubbleColor(),
+                contentColor = if (isMine) cs.onPrimary else cs.onSurface,
                 modifier = Modifier.widthIn(max = 300.dp),
             ) {
                 Text(
                     message.previewLabel().ifBlank { "Сообщение" },
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyMedium.copy(lineBreak = LineBreak.Paragraph),
                     maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    modifier = Modifier.padding(horizontal = Spacing.m, vertical = Spacing.s),
                 )
             }
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(Spacing.m))
             // Action items.
-            Surface(shape = RoundedCornerShape(22.dp), color = cs.surfaceContainerHigh, shadowElevation = 8.dp) {
-                Column(Modifier.width(250.dp).padding(vertical = 6.dp)) {
+            Surface(shape = RoundedCornerShape(Radius.medium), color = cs.surfaceContainerHigh) {
+                Column(Modifier.width(250.dp).padding(vertical = Spacing.xs)) {
                     ContextMenuItem(AppIcons.Reply, "Ответить", onClick = onReply)
                     ContextMenuItem(AppIcons.Forward, "Переслать", onClick = onForward)
                     if (canEdit) {
@@ -2579,32 +2602,32 @@ private fun ReactionsSheet(
 ) {
     val cs = MaterialTheme.colorScheme
     AppSheet(onDismiss) {
-        Text("Реакции", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 24.dp, bottom = 8.dp))
+        Text("Реакции", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = Spacing.xl, bottom = Spacing.s))
         if (byEmoji == null) {
             Box(
-                Modifier.fillMaxWidth().padding(24.dp),
+                Modifier.fillMaxWidth().padding(Spacing.xl),
                 contentAlignment = Alignment.Center,
             ) { CircularProgressIndicator(Modifier.size(28.dp)) }
         } else {
-            LazyColumn(Modifier.heightIn(max = 480.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
+            LazyColumn(Modifier.heightIn(max = 480.dp), contentPadding = PaddingValues(bottom = Spacing.l)) {
                 byEmoji.entries.sortedByDescending { it.value.size }.forEach { (emoji, users) ->
                     item(key = "e$emoji") {
                         Text(
                             "$emoji  ${users.size}",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = cs.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 24.dp, top = 12.dp, bottom = 4.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = cs.primary,
+                            modifier = Modifier.padding(start = Spacing.xl, top = Spacing.m, bottom = Spacing.xs),
                         )
                     }
                     items(users, key = { "e$emoji:$it" }) { id ->
                         val info = userInfo(id)
                         val name = if (id == myId) "Вы" else info.name
                         Row(
-                            Modifier.fillMaxWidth().clickable { onOpenUser(id) }.padding(horizontal = 24.dp, vertical = 8.dp),
+                            Modifier.fillMaxWidth().clickable { onOpenUser(id) }.padding(horizontal = Spacing.xl, vertical = Spacing.s),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Avatar(name, info.avatarUrl, 40.dp)
-                            Spacer(Modifier.width(14.dp))
+                            Spacer(Modifier.width(Spacing.l))
                             Text(name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
@@ -2625,7 +2648,7 @@ private fun ReactionPick(
         Modifier
             .size(REACTION_PICK)
             .clip(CircleShape)
-            .then(if (mine) Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)) else Modifier)
+            .then(if (mine) Modifier.background(MaterialTheme.colorScheme.surfaceContainerHighest) else Modifier)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -2657,26 +2680,26 @@ private fun ReadBySheet(
     ) {
         Surface(
             // Swallow taps so a tap inside the card doesn't dismiss it.
-            modifier = Modifier.fillMaxWidth().padding(32.dp).clickable(enabled = false) {},
-            shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.fillMaxWidth().padding(Spacing.xxl).clickable(enabled = false) {},
+            shape = RoundedCornerShape(Radius.medium),
+            color = MaterialTheme.colorScheme.surfaceContainer,
         ) {
-            Column(Modifier.padding(vertical = 12.dp)) {
+            Column(Modifier.padding(vertical = Spacing.m)) {
                 Text(
                     "Кто прочитал",
                     style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                    modifier = Modifier.padding(horizontal = Spacing.l, vertical = Spacing.xs),
                 )
                 Text(
                     if (totalMembers > 0) "Прочитали ${readers.size} из $totalMembers" else "Прочитали ${readers.size}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 20.dp),
+                    modifier = Modifier.padding(horizontal = Spacing.l),
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(Spacing.s))
                 when {
                     loading && readers.isEmpty() ->
-                        Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxWidth().padding(Spacing.xl), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator(Modifier.size(28.dp))
                         }
                     readers.isEmpty() ->
@@ -2684,7 +2707,7 @@ private fun ReadBySheet(
                             "Пока никто не прочитал",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                            modifier = Modifier.padding(horizontal = Spacing.l, vertical = Spacing.m),
                         )
                     else -> {
                         HorizontalDivider()
@@ -2694,11 +2717,11 @@ private fun ReadBySheet(
                                     Modifier
                                         .fillMaxWidth()
                                         .clickable { onOpenUser(reader.id) }
-                                        .padding(horizontal = 20.dp, vertical = 8.dp),
+                                        .padding(horizontal = Spacing.l, vertical = Spacing.s),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Avatar(reader.name, reader.avatarUrl, 40.dp)
-                                    Spacer(Modifier.width(12.dp))
+                                    Spacer(Modifier.width(Spacing.m))
                                     Text(
                                         reader.name,
                                         style = MaterialTheme.typography.bodyLarge,
@@ -2724,12 +2747,21 @@ private fun ContextMenuItem(
 ) {
     val color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 13.dp),
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .heightIn(min = 48.dp)
+            .padding(horizontal = Spacing.l, vertical = Spacing.s),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.l),
     ) {
-        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(22.dp))
-        Text(label, style = MaterialTheme.typography.bodyLarge, color = color)
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = if (danger) color else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(24.dp),
+        )
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -2759,20 +2791,21 @@ private fun ChatSearchBar(
             .fillMaxWidth()
             .statusBarsPadding()
             .height(64.dp)
-            .padding(horizontal = 4.dp),
+            .padding(horizontal = Spacing.xs),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = onClose) { Icon(AppIcons.Back, contentDescription = "Закрыть поиск") }
         PillTextField(query, onQuery, "Поиск в чате", Modifier.weight(1f), focusRequester = focus)
         if (loading) {
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(Spacing.s))
             CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
         }
         Text(
             position ?: if (nothingFound) "нет" else "",
             style = MaterialTheme.typography.labelMedium,
             color = cs.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 8.dp),
+            maxLines = 1,
+            modifier = Modifier.padding(horizontal = Spacing.s),
         )
         IconButton(onClick = onOlder, enabled = position != null, modifier = Modifier.size(40.dp)) {
             Icon(AppIcons.ArrowDown, contentDescription = "Раньше", modifier = Modifier.graphicsLayer { rotationZ = 180f })
@@ -2787,7 +2820,7 @@ private fun ChatSearchBar(
 @Composable
 private fun FormatBar(onFormat: (String) -> Unit) {
     val cs = MaterialTheme.colorScheme
-    Row(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(Modifier.padding(start = Spacing.m, end = Spacing.m, bottom = Spacing.s), horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
         // Each label drawn the way its run looks: Ж bold, К italic, З struck through, моно monospace.
         listOf("STRONG" to "Ж", "EMPHASIZED" to "К", "STRIKETHROUGH" to "З", "MONOSPACED" to "моно").forEach { (type, label) ->
             Text(
@@ -2799,7 +2832,7 @@ private fun FormatBar(onFormat: (String) -> Unit) {
                         .clip(CircleShape)
                         .background(cs.surfaceContainerHighest)
                         .clickable { onFormat(type) }
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                        .padding(horizontal = Spacing.m, vertical = Spacing.xs),
             )
         }
     }
@@ -2850,7 +2883,7 @@ private fun AttachSheet(
 ) {
     AppSheet(onDismiss) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 4.dp, bottom = 28.dp),
+            Modifier.fillMaxWidth().padding(horizontal = Spacing.m).padding(top = Spacing.xs, bottom = Spacing.xl),
             horizontalArrangement = Arrangement.SpaceEvenly,
         ) {
             AttachOption(AppIcons.Image, "Галерея", tileColor(0f)) {
@@ -2891,14 +2924,14 @@ private fun AttachOption(
     onClick: () -> Unit,
 ) {
     Column(
-        Modifier.clip(RoundedCornerShape(20.dp)).clickable(onClick = onClick).padding(8.dp),
+        Modifier.clip(RoundedCornerShape(Radius.medium)).clickable(onClick = onClick).padding(Spacing.s),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(Spacing.s),
     ) {
-        Box(Modifier.size(60.dp).clip(CircleShape).background(tile), contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(28.dp))
+        Box(Modifier.size(56.dp).clip(CircleShape).background(tile), contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(28.dp))
         }
-        Text(label, style = MaterialTheme.typography.labelLarge)
+        Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1)
     }
 }
 
@@ -2911,12 +2944,12 @@ private fun PendingAction(
     onClick: () -> Unit,
 ) {
     Row(
-        Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick).padding(vertical = 4.dp, horizontal = 2.dp),
+        Modifier.clip(RoundedCornerShape(Radius.small)).clickable(onClick = onClick).padding(vertical = Spacing.xs, horizontal = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(label, style = MaterialTheme.typography.labelLarge, color = fg)
+        Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(Spacing.xs))
+        Text(label, style = MaterialTheme.typography.labelLarge, color = fg, maxLines = 1)
     }
 }
 
@@ -2926,7 +2959,7 @@ private fun PendingAction(
  */
 @Composable
 private fun PendingThumbnail(item: PendingAttach) {
-    val shape = RoundedCornerShape(16.dp)
+    val shape = RoundedCornerShape(Radius.medium)
     val failed = item.state == UploadState.FAILED
     Box(
         Modifier.width(260.dp).heightIn(min = 120.dp, max = 320.dp).clip(shape),
@@ -3077,10 +3110,10 @@ private fun BotButtonView(
     val active = url != null || button.isCallback
     Box(
         modifier
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(Radius.small))
             .background(fg.copy(alpha = 0.12f))
             .clickable(enabled = active && !busy) { if (url != null) uriHandler.openUriSafely(url) else onPress() }
-            .padding(horizontal = 24.dp, vertical = 10.dp),
+            .padding(horizontal = Spacing.xl, vertical = Spacing.s),
         contentAlignment = Alignment.Center,
     ) {
         if (busy) {
@@ -3113,8 +3146,13 @@ private fun PinnedBar(
     onClick: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
+    val divider = cs.outlineVariant
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 7.dp),
+        Modifier
+            .fillMaxWidth()
+            .drawBehind { drawRect(divider, size = Size(size.width, 1.dp.toPx())) }
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.l, vertical = Spacing.s),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -3124,12 +3162,11 @@ private fun PinnedBar(
                 .clip(CircleShape)
                 .background(cs.primary),
         )
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(Spacing.m))
         Column(Modifier.weight(1f)) {
             Text(
                 "Закреплённое сообщение",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.labelLarge,
                 color = cs.primary,
                 maxLines = 1,
             )
@@ -3141,8 +3178,8 @@ private fun PinnedBar(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Spacer(Modifier.width(10.dp))
-        Icon(AppIcons.Pin, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(Spacing.m))
+        Icon(AppIcons.Pin, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(20.dp))
     }
 }
 
@@ -3161,11 +3198,17 @@ private fun SelectionBar(
             .fillMaxWidth()
             .statusBarsPadding()
             .height(64.dp)
-            .padding(horizontal = 4.dp),
+            .padding(horizontal = Spacing.xs),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = onClose) { Icon(AppIcons.Close, contentDescription = "Отменить выбор") }
-        Text("Выбрано: $count", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f).padding(start = 4.dp))
+        Text(
+            "Выбрано: $count",
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(start = Spacing.xs),
+        )
         if (onCopy != null) IconButton(onClick = onCopy) { Icon(AppIcons.Copy, contentDescription = "Копировать") }
         IconButton(onClick = onForward) { Icon(AppIcons.Forward, contentDescription = "Переслать") }
         IconButton(onClick = onDelete) {
@@ -3206,7 +3249,7 @@ private fun MediaThumbnail(
     media: MediaAttach,
     onClick: () -> Unit,
 ) {
-    val shape = RoundedCornerShape(16.dp)
+    val shape = RoundedCornerShape(Radius.medium)
     // The server reports the dimensions, so the tile can take its final shape before
     // the bytes arrive — no blank bubble, and no reflow once the image lands. Without
     // them, fall back to a minimum height so the placeholder still has a box to fill.
@@ -3246,10 +3289,10 @@ private fun MediaThumbnail(
                     modifier =
                         Modifier
                             .align(Alignment.BottomEnd)
-                            .padding(6.dp)
-                            .clip(RoundedCornerShape(6.dp))
+                            .padding(Spacing.s)
+                            .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.53f))
-                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                            .padding(horizontal = Spacing.s, vertical = 2.dp),
                 )
             }
         }
@@ -3361,31 +3404,20 @@ private fun ZoomableImage(url: String) {
     )
 }
 
-/** A centered, translucent pill for a day label or a group service/system event. */
+/** A small, flat, muted pill for a day label, a group service/system event or «Новые сообщения». */
 @Composable
 private fun ServiceMessageChip(text: String) {
-    // Reads on the aurora backdrop in either theme.
-    val light = isLightTheme()
-    val chipBg =
-        if (light) {
-            MaterialTheme.colorScheme.scrim.copy(
-                alpha = 0.22f,
-            )
-        } else {
-            MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.8f)
-        }
-    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp, horizontal = 24.dp), horizontalArrangement = Arrangement.Center) {
+    Row(Modifier.fillMaxWidth().padding(vertical = Spacing.s, horizontal = Spacing.xl), horizontalArrangement = Arrangement.Center) {
         Text(
             text,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Medium,
+            style = MaterialTheme.typography.labelMedium.copy(lineBreak = LineBreak.Paragraph),
             textAlign = TextAlign.Center,
-            color = if (light) MaterialTheme.colorScheme.onScrim else MaterialTheme.colorScheme.onSurface,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier =
                 Modifier
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(chipBg)
-                    .padding(horizontal = 12.dp, vertical = 5.dp),
+                    .clip(RoundedCornerShape(Radius.medium))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    .padding(horizontal = Spacing.m, vertical = Spacing.xs),
         )
     }
 }
@@ -3420,18 +3452,15 @@ private fun serviceMessageText(
 
 @Composable
 private fun NewMessagesDivider() {
-    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.Center) {
-        Text(
-            "Новые сообщения",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = onAccentGradient(),
-            modifier = Modifier.clip(CircleShape).background(accentGradient()).padding(horizontal = 14.dp, vertical = 5.dp),
-        )
-    }
+    ServiceMessageChip("Новые сообщения")
 }
 
-/** Incoming bubbles (and the input pill): white on the light backdrop, a raised tone on the dark one. */
+/** Incoming bubbles (and the input pill): a raised neutral tone that reads on the plain backdrop. */
 @Composable
 internal fun incomingBubbleColor(): Color =
-    if (isLightTheme()) MaterialTheme.colorScheme.surfaceContainerLowest else MaterialTheme.colorScheme.surfaceContainerHigh
+    // Light pages are grey, so incoming bubbles are white there; dark ones sit a step above the page.
+    MaterialTheme.colorScheme.run { if (isLightTheme()) surfaceContainer else surfaceContainerHigh }
+
+/** Message text: paragraph-balanced breaks and hyphenation, so wrapped lines end evenly. */
+@Composable
+private fun MessageTextStyle(): TextStyle = MaterialTheme.typography.bodyLarge.copy(lineBreak = LineBreak.Paragraph, hyphens = Hyphens.Auto)

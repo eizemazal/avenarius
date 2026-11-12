@@ -27,14 +27,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.CallState
 import com.avenarius.app.model.CallStatus
 import com.avenarius.app.net.CallEngine
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.CallVideoRenderer
+import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.nowMillis
+import com.avenarius.app.ui.theme.Radius
+import com.avenarius.app.ui.theme.Spacing
 import kotlinx.coroutines.delay
 
 /**
@@ -60,7 +63,7 @@ internal fun CallScreen(
             onDismiss()
         }
     }
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceContainerLowest) {
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(Modifier.fillMaxSize()) {
             // Any call can carry video (you can switch it on mid-call), so drive the UI
             // off the live media state, not the call's initial kind.
@@ -74,19 +77,7 @@ internal fun CallScreen(
                     Modifier.fillMaxSize().padding(top = 96.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Box(
-                        Modifier
-                            .size(128.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            (call.peerName ?: "?").take(1).uppercase(),
-                            color = MaterialTheme.colorScheme.onSurface,
-                            style = MaterialTheme.typography.displaySmall,
-                        )
-                    }
+                    Avatar(call.peerName ?: "?", call.peerAvatarUrl, 128.dp)
                 }
             }
 
@@ -98,8 +89,10 @@ internal fun CallScreen(
                 Text(
                     call.peerName ?: "Звонок",
                     color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.headlineSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = Spacing.xl),
                 )
                 Text(
                     statusText(call),
@@ -113,10 +106,10 @@ internal fun CallScreen(
                 Box(
                     Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(end = 16.dp, bottom = 120.dp)
+                        .padding(end = Spacing.l, bottom = 120.dp)
                         .width(108.dp)
                         .aspectRatio(3f / 4f)
-                        .clip(RoundedCornerShape(12.dp))
+                        .clip(RoundedCornerShape(Radius.medium))
                         .background(MaterialTheme.colorScheme.scrim),
                 ) {
                     CallVideoRenderer(engine = engine, local = true, modifier = Modifier.fillMaxSize(), mirror = true)
@@ -134,7 +127,7 @@ internal fun CallScreen(
             } else {
                 Row(
                     Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 48.dp),
-                    horizontalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterHorizontally),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.xl, Alignment.CenterHorizontally),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     RoundCallButton(

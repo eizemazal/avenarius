@@ -7,7 +7,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -87,6 +86,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -98,9 +98,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
@@ -133,7 +133,6 @@ import com.avenarius.app.ui.components.CircleIconButton
 import com.avenarius.app.ui.components.GroupCard
 import com.avenarius.app.ui.components.GroupRow
 import com.avenarius.app.ui.components.PillTextField
-import com.avenarius.app.ui.components.QuickAction
 import com.avenarius.app.ui.components.SheetAction
 import com.avenarius.app.ui.components.clickableRow
 import com.avenarius.app.ui.components.fadingEndScroll
@@ -150,29 +149,36 @@ import com.avenarius.app.ui.rememberQrScanLauncher
 import com.avenarius.app.ui.rememberSingleImagePickLauncher
 import com.avenarius.app.ui.shareText
 import com.avenarius.app.ui.theme.Accent
+import com.avenarius.app.ui.theme.Radius
+import com.avenarius.app.ui.theme.Spacing
 import com.avenarius.app.ui.theme.ThemeMode
 import com.avenarius.app.ui.theme.WALLPAPERS
-import com.avenarius.app.ui.theme.accentGradient
-import com.avenarius.app.ui.theme.aurora
 import com.avenarius.app.ui.theme.chatWallpaper
 import com.avenarius.app.ui.theme.dynamicColorScheme
 import com.avenarius.app.ui.theme.isLightTheme
-import com.avenarius.app.ui.theme.onAccentGradient
 import com.avenarius.app.ui.typingText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-private val CHAT_AVATAR = 56.dp
+private val CHAT_AVATAR = 54.dp
+
+private val NAV_BAR = 64.dp
+private val FAB = 56.dp
 
 /** Room the floating bar takes at the bottom of every tab, so the last row scrolls clear of it. */
-private val NAV_SPACE = 92.dp
+private val NAV_SPACE = NAV_BAR + Spacing.m + Spacing.s
 
-/** Bottom padding for a tab's scrolling content: the floating bar plus the system nav inset. */
+/** Extra room on the chats tab, where the compose button sits over the bar. */
+private val FAB_SPACE = FAB + Spacing.m
+
+/** Bottom padding for a tab's scrolling content: the floating bar (and [fab] above it) plus the system nav inset. */
 @Composable
-private fun navClearance(): PaddingValues =
-    PaddingValues(bottom = NAV_SPACE + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding())
+private fun navClearance(fab: Boolean = false): PaddingValues =
+    PaddingValues(
+        bottom = NAV_SPACE + (if (fab) FAB_SPACE else 0.dp) + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
+    )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -266,18 +272,25 @@ internal fun MainScreen(
         )
     }
     val cs = MaterialTheme.colorScheme
+    val connecting = if (state.reconnecting) (if (state.syncedOnce) "Переподключение…" else "Подключение…") else null
     Box(Modifier.fillMaxSize().background(cs.background)) {
-        Column(Modifier.fillMaxSize().statusBarsPadding()) {
-            MainHeader(
-                tab = state.tab,
-                // The connection state lives in the header instead of a strip pushing the UI down.
-                connecting = if (state.reconnecting) (if (state.syncedOnce) "Переподключение…" else "Подключение…") else null,
-                searchActive = searching,
-                query = chatQuery,
-                onQuery = { chatQuery = it },
-                onOpenSearch = { searchActive = true },
-                onCloseSearch = closeSearch,
-            )
+        // Settings scrolls under the status bar (it pads its own content); the other tabs sit below it.
+        Column(Modifier.fillMaxSize().then(if (state.tab == Tab.SETTINGS) Modifier else Modifier.statusBarsPadding())) {
+            if (state.tab == Tab.CHATS) {
+                MainHeader(
+                    // The connection state lives in the search pill instead of a strip pushing the UI down.
+                    connecting = connecting,
+                    searchActive = searching,
+                    query = chatQuery,
+                    onQuery = { chatQuery = it },
+                    onOpenSearch = { searchActive = true },
+                    onCloseSearch = closeSearch,
+                )
+            } else if (state.tab == Tab.CONTACTS) {
+                AnimatedVisibility(connecting != null, Modifier.align(Alignment.CenterHorizontally)) {
+                    ConnectingLabel(connecting ?: "", Modifier.padding(vertical = Spacing.s))
+                }
+            }
             AnimatedContent(
                 targetState = state.tab,
                 transitionSpec = { fadeIn() togetherWith fadeOut() },
@@ -376,14 +389,19 @@ internal fun MainScreen(
                 }
             }
         }
-        // Rows fade out under the floating bar instead of being cut by it.
-        Box(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .height(NAV_SPACE + 48.dp)
-                .background(Brush.verticalGradient(listOf(Color.Transparent, cs.background.copy(alpha = 0.94f)))),
-        )
+        if (state.tab == Tab.SETTINGS) {
+            // Over the settings, which run under the status bar: a small pill instead of a strip pushing them down.
+            AnimatedVisibility(connecting != null, Modifier.align(Alignment.TopCenter).statusBarsPadding()) {
+                ConnectingLabel(
+                    connecting ?: "",
+                    Modifier
+                        .padding(top = Spacing.s)
+                        .clip(CircleShape)
+                        .background(cs.surfaceContainerHigh)
+                        .padding(horizontal = Spacing.m, vertical = Spacing.xs),
+                )
+            }
+        }
         FloatingNav(
             tab = state.tab,
             unreadChats = state.chats.count { it.unreadCount > 0 && !it.muted },
@@ -393,15 +411,31 @@ internal fun MainScreen(
         )
         SnackbarHost(
             snackbarHostState,
-            Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = NAV_SPACE),
+            Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = NAV_SPACE + if (state.tab == Tab.CHATS) FAB_SPACE else 0.dp),
         )
     }
 }
 
-/** Big title + actions; turns into a search field on the chats tab. */
+/** A small spinner with the connection state, for wherever it has to show. */
+@Composable
+private fun ConnectingLabel(
+    text: String,
+    modifier: Modifier = Modifier,
+) {
+    val cs = MaterialTheme.colorScheme
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = cs.onSurfaceVariant)
+        Spacer(Modifier.width(Spacing.s))
+        Text(text, style = MaterialTheme.typography.bodyMedium, color = cs.onSurfaceVariant, maxLines = 1)
+    }
+}
+
+/** The chats tab's top: a search pill (showing the connection state while offline) that turns into a search field. */
 @Composable
 private fun MainHeader(
-    tab: Tab,
     connecting: String?,
     searchActive: Boolean,
     query: String,
@@ -409,45 +443,41 @@ private fun MainHeader(
     onOpenSearch: () -> Unit,
     onCloseSearch: () -> Unit,
 ) {
+    val cs = MaterialTheme.colorScheme
     Row(
-        Modifier.fillMaxWidth().height(68.dp).padding(start = 20.dp, end = 16.dp),
+        Modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.s),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (searchActive) {
             val focusRequester = remember { FocusRequester() }
             LaunchedEffect(Unit) { focusRequester.requestFocus() }
-            CircleIconButton(AppIcons.Back, "Закрыть поиск", onCloseSearch)
-            Spacer(Modifier.width(10.dp))
+            CircleIconButton(AppIcons.Back, "Закрыть поиск", onCloseSearch, size = 48.dp)
+            Spacer(Modifier.width(Spacing.s))
             PillTextField(query, onQuery, "Поиск", Modifier.weight(1f), focusRequester = focusRequester)
         } else {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    when (tab) {
-                        Tab.CHATS -> "Чаты"
-                        Tab.CONTACTS -> "Контакты"
-                        Tab.SETTINGS -> "Настройки"
-                    },
-                    style = MaterialTheme.typography.headlineMedium,
-                    maxLines = 1,
-                )
-                AnimatedVisibility(connecting != null) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(11.dp), strokeWidth = 1.5.dp)
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            connecting ?: "",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+            Row(
+                Modifier
+                    .weight(1f)
+                    .height(48.dp)
+                    .clip(CircleShape)
+                    .background(cs.surfaceContainer)
+                    .clickable(onClickLabel = "Поиск", onClick = onOpenSearch)
+                    .padding(horizontal = Spacing.l),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (connecting != null) {
+                    ConnectingLabel(connecting)
+                } else {
+                    Icon(AppIcons.Search, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(Spacing.m))
+                    Text("Поиск", style = MaterialTheme.typography.bodyLarge, color = cs.onSurfaceVariant, maxLines = 1)
                 }
             }
-            if (tab == Tab.CHATS) CircleIconButton(AppIcons.Search, "Поиск", onOpenSearch)
         }
     }
 }
 
-/** The floating tab pill, with the compose button riding next to it on the chats tab (its slot kept on the others). */
+/** The floating tab pill, centered, with the compose button floating above its end on the chats tab. */
 @Composable
 private fun FloatingNav(
     tab: Tab,
@@ -457,27 +487,17 @@ private fun FloatingNav(
     modifier: Modifier = Modifier,
 ) {
     val cs = MaterialTheme.colorScheme
-    Row(
-        modifier.fillMaxWidth().navigationBarsPadding().padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    Column(
+        modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = Spacing.l)
+            .padding(bottom = Spacing.m),
+        verticalArrangement = Arrangement.spacedBy(Spacing.m),
     ) {
-        Surface(
-            shape = CircleShape,
-            color = cs.surfaceContainerHigh,
-            border = BorderStroke(1.dp, cs.outlineVariant.copy(alpha = 0.6f)),
-            shadowElevation = 10.dp,
-            modifier = Modifier.weight(1f).height(64.dp),
-        ) {
-            Row(Modifier.padding(5.dp).selectableGroup()) {
-                NavItem(AppIcons.Chats, AppIcons.ChatsSelected, "Чаты", tab == Tab.CHATS, unreadChats) { onSelect(Tab.CHATS) }
-                NavItem(AppIcons.Contacts, AppIcons.ContactsSelected, "Контакты", tab == Tab.CONTACTS) { onSelect(Tab.CONTACTS) }
-                NavItem(AppIcons.Settings, AppIcons.SettingsSelected, "Настройки", tab == Tab.SETTINGS) { onSelect(Tab.SETTINGS) }
-            }
-        }
-        // The slot keeps its size on every tab (only the button fades), so the tabs never shift under a finger.
-        Spacer(Modifier.width(12.dp))
         val fab by animateFloatAsState(if (tab == Tab.CHATS) 1f else 0f, label = "fab")
-        Box(Modifier.size(64.dp)) {
+        // The slot keeps its size on every tab (only the button fades), so the bar never moves.
+        Box(Modifier.align(Alignment.End).size(FAB)) {
             if (fab > 0f) {
                 Box(
                     Modifier
@@ -486,21 +506,33 @@ private fun FloatingNav(
                             alpha = fab
                             scaleX = fab
                             scaleY = fab
-                        }.shadow(10.dp, CircleShape, ambientColor = cs.primary, spotColor = cs.primary)
+                        }.shadow(Spacing.xs, CircleShape)
                         .clip(CircleShape)
-                        .background(accentGradient())
+                        .background(cs.primary)
                         .clickable(enabled = tab == Tab.CHATS, onClick = onCompose),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(AppIcons.Edit, contentDescription = "Новый чат", tint = onAccentGradient(), modifier = Modifier.size(26.dp))
+                    Icon(AppIcons.Edit, contentDescription = "Новый чат", tint = cs.onPrimary, modifier = Modifier.size(24.dp))
                 }
+            }
+        }
+        Surface(
+            shape = CircleShape,
+            color = cs.surfaceContainer,
+            shadowElevation = Spacing.xs,
+            modifier = Modifier.align(Alignment.CenterHorizontally).height(NAV_BAR),
+        ) {
+            Row(Modifier.padding(Spacing.xs).selectableGroup()) {
+                NavItem(AppIcons.Chats, AppIcons.ChatsSelected, "Чаты", tab == Tab.CHATS, unreadChats) { onSelect(Tab.CHATS) }
+                NavItem(AppIcons.Contacts, AppIcons.ContactsSelected, "Контакты", tab == Tab.CONTACTS) { onSelect(Tab.CONTACTS) }
+                NavItem(AppIcons.Settings, AppIcons.SettingsSelected, "Настройки", tab == Tab.SETTINGS) { onSelect(Tab.SETTINGS) }
             }
         }
     }
 }
 
 @Composable
-private fun RowScope.NavItem(
+private fun NavItem(
     icon: Painter,
     selectedIcon: Painter,
     label: String,
@@ -513,11 +545,12 @@ private fun RowScope.NavItem(
     val fg by animateColorAsState(if (selected) cs.primary else cs.onSurfaceVariant, label = "navFg")
     Column(
         Modifier
-            .weight(1f)
+            .widthIn(min = 88.dp)
             .fillMaxHeight()
             .clip(CircleShape)
             .background(bg)
-            .selectable(selected = selected, onClick = onClick, role = Role.Tab),
+            .selectable(selected = selected, onClick = onClick, role = Role.Tab)
+            .padding(horizontal = Spacing.m),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
@@ -527,23 +560,18 @@ private fun RowScope.NavItem(
                 Box(
                     Modifier
                         .align(Alignment.TopEnd)
-                        .padding(start = 16.dp)
+                        .padding(start = Spacing.l)
                         .defaultMinSize(minWidth = 16.dp, minHeight = 16.dp)
                         .clip(CircleShape)
                         .background(cs.error)
-                        .padding(horizontal = 4.dp),
+                        .padding(horizontal = Spacing.xs),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        if (badge > 99) "99+" else "$badge",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = cs.onError,
-                    )
+                    Text(if (badge > 99) "99+" else "$badge", style = MaterialTheme.typography.labelSmall, color = cs.onError, maxLines = 1)
                 }
             }
         }
-        Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = fg, maxLines = 1)
+        Text(label, style = MaterialTheme.typography.labelMedium, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -704,7 +732,7 @@ private fun ChatsTab(
                     if (q.isBlank() && filter.key == ChatFilter.ALL.name) "Потяните вниз, чтобы обновить, или начните новый чат" else null,
                 )
             } else {
-                LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = navClearance()) {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = navClearance(fab = true)) {
                     if (showRatePrompt && q.isBlank()) {
                         item(key = "rate-prompt") {
                             RatePromptCard(
@@ -751,19 +779,10 @@ private fun ChatsTab(
                     }
                     if (extraResults.isNotEmpty() || searchingRemote) {
                         item(key = "global-header") {
-                            Row(
-                                Modifier.padding(start = 20.dp, top = 16.dp, bottom = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    "ГЛОБАЛЬНЫЙ ПОИСК",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                ListSectionHeader("Глобальный поиск")
                                 if (searchingRemote) {
-                                    Spacer(Modifier.width(8.dp))
-                                    CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                                    CircularProgressIndicator(Modifier.padding(top = Spacing.s).size(12.dp), strokeWidth = 1.5.dp)
                                 }
                             }
                         }
@@ -781,55 +800,49 @@ private fun ChatsTab(
                                             .fillMaxWidth()
                                             .clickable(
                                                 onClick = onShowMore,
-                                            ).padding(horizontal = 20.dp, vertical = 12.dp),
+                                            ).padding(horizontal = Spacing.l, vertical = Spacing.m),
                                 )
                             }
                         }
                     }
                     if (messageHits.isNotEmpty()) {
-                        item(key = "messages-header") {
-                            Text(
-                                "СООБЩЕНИЯ",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(start = 20.dp, top = 16.dp, bottom = 6.dp),
-                            )
-                        }
+                        item(key = "messages-header") { ListSectionHeader("Сообщения") }
                         items(messageHits, key = { "h${it.message.chatId}:${it.message.id}" }) { hit ->
                             val chat = chats.firstOrNull { it.id == hit.message.chatId } ?: hit.chat
                             Row(
-                                Modifier.fillMaxWidth().clickable { onOpenHit(hit) }.padding(horizontal = 16.dp, vertical = 8.dp),
+                                Modifier.fillMaxWidth().clickable { onOpenHit(hit) }.padding(horizontal = Spacing.l, vertical = Spacing.s),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 val title = chat?.title ?: "Чат"
                                 if (chat?.isSavedMessages == true) {
-                                    SavedMessagesAvatar(44.dp)
+                                    SavedMessagesAvatar(CHAT_AVATAR)
                                 } else {
-                                    Avatar(title, chat?.let { chatAvatar(it, myId, contacts, peers) }, 44.dp)
+                                    Avatar(title, chat?.let { chatAvatar(it, myId, contacts, peers) }, CHAT_AVATAR)
                                 }
-                                Spacer(Modifier.width(14.dp))
+                                Spacer(Modifier.width(Spacing.m))
                                 Column(Modifier.weight(1f)) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
                                             title,
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            fontWeight = FontWeight.Medium,
+                                            style = MaterialTheme.typography.titleMedium,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                             modifier = Modifier.weight(1f),
                                         )
+                                        Spacer(Modifier.width(Spacing.s))
                                         Text(
                                             formatListTime(hit.message.time),
-                                            style = MaterialTheme.typography.labelMedium,
+                                            style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
                                         )
                                     }
+                                    Spacer(Modifier.height(Spacing.xs))
                                     Text(
                                         hit.message.previewLabel().replace('\n', ' '),
-                                        style = MaterialTheme.typography.bodySmall,
+                                        style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 2,
+                                        maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 }
@@ -840,6 +853,18 @@ private fun ChatsTab(
             }
         }
     }
+}
+
+/** A section caption in a list: search sections, contact letters. */
+@Composable
+private fun ListSectionHeader(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary,
+        maxLines = 1,
+        modifier = Modifier.padding(start = Spacing.l, end = Spacing.s, top = Spacing.m, bottom = Spacing.xs),
+    )
 }
 
 /** Dialogs take their avatar from the contact (or a resolved non-contact peer); groups carry their own. */
@@ -874,7 +899,7 @@ private fun ChatRow(
     val cs = MaterialTheme.colorScheme
     val hasUnread = chat.unreadCount > 0
     Row(
-        modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 9.dp),
+        modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.s),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (chat.isSavedMessages) {
@@ -882,14 +907,14 @@ private fun ChatRow(
         } else {
             Avatar(chat.title, avatarUrl, CHAT_AVATAR, onClick = onAvatarClick, online = online)
         }
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(Spacing.m))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // The name gives way to its marks and to the time, never the other way round.
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                     if (chat.isChannel) {
                         Icon(AppIcons.Channel, contentDescription = "Канал", tint = cs.onSurfaceVariant, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(Spacing.xs))
                     }
                     Text(
                         chat.title,
@@ -899,77 +924,65 @@ private fun ChatRow(
                         modifier = Modifier.weight(1f, fill = false),
                     )
                     if (chat.official) {
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(Spacing.xs))
                         Icon(AppIcons.Verified, contentDescription = "Официальный", tint = cs.primary, modifier = Modifier.size(16.dp))
                     }
                     if (chat.muted) {
-                        Spacer(Modifier.width(4.dp))
-                        Icon(AppIcons.Muted, contentDescription = "Без звука", tint = cs.outline, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(Spacing.xs))
+                        Icon(AppIcons.Muted, contentDescription = "Без звука", tint = cs.onSurfaceVariant, modifier = Modifier.size(16.dp))
                     }
                 }
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(Spacing.s))
                 if (tick != null) {
                     Icon(
                         if (tick) AppIcons.Read else AppIcons.Delivered,
                         contentDescription = if (tick) "Прочитано" else "Доставлено",
-                        tint = if (tick) cs.primary else cs.onSurfaceVariant,
+                        tint = cs.primary,
                         modifier = Modifier.size(16.dp),
                     )
-                    Spacer(Modifier.width(3.dp))
+                    Spacer(Modifier.width(Spacing.xs))
                 }
                 if (chat.lastEventTime > 0) {
                     Text(
                         formatListTime(chat.lastEventTime),
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         color = if (hasUnread && !chat.muted) cs.primary else cs.onSurfaceVariant,
                         maxLines = 1,
                     )
                 }
             }
-            Spacer(Modifier.height(2.dp))
-            Row(verticalAlignment = Alignment.Top) {
-                Box(Modifier.weight(1f).heightIn(min = 40.dp)) {
+            Spacer(Modifier.height(Spacing.xs))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val preview =
                     when {
-                        typing != null ->
-                            Text(
-                                typing,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = cs.primary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                        typing != null -> AnnotatedString(typing)
                         draft != null ->
-                            Text(
-                                buildAnnotatedString {
-                                    withStyle(SpanStyle(color = cs.error)) { append("Черновик: ") }
-                                    // Newlines would make the row read oddly.
-                                    append(draft.replace('\n', ' ').trim())
-                                },
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = cs.onSurfaceVariant,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            buildAnnotatedString {
+                                withStyle(SpanStyle(color = cs.error)) { append("Черновик: ") }
+                                // Newlines would make the row read oddly.
+                                append(draft.replace('\n', ' ').trim())
+                            }
                         else ->
-                            Text(
-                                buildAnnotatedString {
-                                    // Who said it, in groups: "Имя: …" / "Вы: …".
-                                    if (prefix != null) withStyle(SpanStyle(color = cs.onSurface)) { append("$prefix: ") }
-                                    append(chat.lastMessageText?.replace('\n', ' ') ?: "")
-                                },
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = cs.onSurfaceVariant,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            buildAnnotatedString {
+                                // Who said it, in groups: "Имя: …" / "Вы: …".
+                                if (prefix != null) withStyle(SpanStyle(color = cs.onSurface)) { append("$prefix: ") }
+                                append(chat.lastMessageText?.replace('\n', ' ') ?: "")
+                            }
                     }
-                }
+                Text(
+                    preview,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (typing != null) cs.primary else cs.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
                 if (hasUnread) {
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(Spacing.s))
                     UnreadBadge(chat.unreadCount, muted = chat.muted)
                 } else if (isPinned) {
-                    Spacer(Modifier.width(8.dp))
-                    Icon(AppIcons.Pin, contentDescription = "Закреплён", tint = cs.outline, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(Spacing.s))
+                    Icon(AppIcons.Pin, contentDescription = "Закреплён", tint = cs.onSurfaceVariant, modifier = Modifier.size(16.dp))
                 }
             }
         }
@@ -979,12 +992,13 @@ private fun ChatRow(
 /** The bookmark tile that stands in for an avatar on the saved-messages chat. */
 @Composable
 internal fun SavedMessagesAvatar(size: androidx.compose.ui.unit.Dp) {
-    Box(Modifier.size(size).clip(CircleShape).background(accentGradient()), contentAlignment = Alignment.Center) {
-        Icon(AppIcons.Bookmark, contentDescription = null, tint = onAccentGradient(), modifier = Modifier.size(size * 0.48f))
+    val cs = MaterialTheme.colorScheme
+    Box(Modifier.size(size).clip(CircleShape).background(cs.primary), contentAlignment = Alignment.Center) {
+        Icon(AppIcons.Bookmark, contentDescription = null, tint = cs.onPrimary, modifier = Modifier.size(size * 0.48f))
     }
 }
 
-/** A plain avatar + name (+ subtitle) row: search hits, pickers. */
+/** A plain avatar + name (+ subtitle) row, with the chat rows' metrics: search hits, the black list. */
 @Composable
 private fun PersonRow(
     name: String,
@@ -993,21 +1007,19 @@ private fun PersonRow(
     modifier: Modifier = Modifier,
     trailing: @Composable (() -> Unit)? = null,
 ) {
-    Row(modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Avatar(name, avatarUrl, 44.dp)
-        Spacer(Modifier.width(14.dp))
+    Row(
+        modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.s),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Avatar(name, avatarUrl, CHAT_AVATAR)
+        Spacer(Modifier.width(Spacing.m))
         Column(Modifier.weight(1f)) {
-            Text(
-                name,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Text(name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             subtitle?.let {
+                Spacer(Modifier.height(Spacing.xs))
                 Text(
                     it,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1031,24 +1043,19 @@ private fun EmptyState(
         Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 40.dp)
+            .padding(horizontal = Spacing.xxl)
             .padding(bottom = NAV_SPACE),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Box(Modifier.size(88.dp).clip(CircleShape).background(cs.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(88.dp).clip(CircleShape).background(cs.surfaceContainer), contentAlignment = Alignment.Center) {
             Icon(icon, contentDescription = null, tint = cs.primary, modifier = Modifier.size(40.dp))
         }
-        Spacer(Modifier.height(16.dp))
-        Text(title, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(Spacing.l))
+        Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
         if (hint != null) {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                hint,
-                style = MaterialTheme.typography.bodyMedium,
-                color = cs.onSurfaceVariant,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            )
+            Spacer(Modifier.height(Spacing.xs))
+            Text(hint, style = MaterialTheme.typography.bodyMedium, color = cs.onSurfaceVariant, textAlign = TextAlign.Center)
         }
     }
 }
@@ -1070,9 +1077,9 @@ private fun ChatActionsSheet(
     onAddToFolder: (() -> Unit)? = null,
 ) {
     AppSheet(onDismiss) {
-        Row(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(horizontal = Spacing.xl).padding(bottom = Spacing.m), verticalAlignment = Alignment.CenterVertically) {
             if (chat.isSavedMessages) SavedMessagesAvatar(48.dp) else Avatar(chat.title, avatarUrl, 48.dp)
-            Spacer(Modifier.width(14.dp))
+            Spacer(Modifier.width(Spacing.m))
             Column {
                 Text(chat.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
@@ -1083,8 +1090,9 @@ private fun ChatActionsSheet(
                         chat.isChannel -> "Канал"
                         else -> "Группа"
                     },
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                 )
             }
         }
@@ -1109,7 +1117,7 @@ private fun ChatActionsSheet(
                 onClick = onOpenInfo,
             )
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(Spacing.m))
     }
 }
 
@@ -1156,7 +1164,7 @@ private fun chatChips(
     return listOfNotNull(ChatFilter.ALL, unread).map(local) + tabs
 }
 
-/** Folder chips: the active one is filled with the accent; a counter shows chats with unread (muted aside). */
+/** Folder chips in one shared pill: the active one on a tonal pill; a grey counter shows chats with unread (muted aside). */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChatFilterRow(
@@ -1167,62 +1175,72 @@ private fun ChatFilterRow(
     onLongPress: (ChatChip) -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
-    // The picked chip scrolls fully into view with the row's edge margin, never cut by the edge.
-    val edge = with(LocalDensity.current) { 16.dp.toPx() }
-    Row(
+    // The picked chip scrolls fully into view with the container's inner margin, never cut by the edge.
+    val edge = with(LocalDensity.current) { Spacing.xs.toPx() }
+    Box(
         Modifier
             .fillMaxWidth()
-            .fadingEndScroll(rememberScrollState())
-            .padding(horizontal = 16.dp)
-            .padding(bottom = 8.dp)
-            .selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(horizontal = Spacing.l)
+            .padding(bottom = Spacing.s)
+            .clip(CircleShape)
+            .background(cs.surfaceContainer),
     ) {
-        chips.forEach { f ->
-            val active = f.key == selected.key
-            // "Новые" is itself the unread view, so a counter there would only repeat the folder.
-            val unread =
-                if (f.key == ChatFilter.ALL.name ||
-                    f.key == ChatFilter.UNREAD.name
-                ) {
-                    0
-                } else {
-                    chats.count { f.matches(it) && it.unreadCount > 0 && !it.muted }
-                }
-            val bg by animateColorAsState(if (active) cs.primary else cs.surfaceContainerHigh, label = "chipBg")
-            val fg by animateColorAsState(if (active) cs.onPrimary else cs.onSurfaceVariant, label = "chipFg")
-            val bring = remember { BringIntoViewRequester() }
-            var chipWidth by remember { mutableIntStateOf(0) }
-            LaunchedEffect(active, chipWidth) { if (active && chipWidth > 0) bring.bringIntoView(Rect(-edge, 0f, chipWidth + edge, 1f)) }
-            Row(
-                Modifier
-                    .bringIntoViewRequester(bring)
-                    .onSizeChanged { chipWidth = it.width }
-                    .height(36.dp)
-                    .clip(CircleShape)
-                    .background(bg)
-                    .combinedClickable(role = Role.Tab, onLongClick = { onLongPress(f) }, onClick = { onSelect(f) })
-                    .semantics { this.selected = active }
-                    .padding(horizontal = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(f.label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = fg)
-                if (unread > 0) {
-                    Spacer(Modifier.width(6.dp))
-                    Box(
-                        Modifier
-                            .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
-                            .clip(CircleShape)
-                            .background(if (active) cs.onPrimary.copy(alpha = 0.24f) else cs.primary)
-                            .padding(horizontal = 5.dp),
-                        contentAlignment = Alignment.Center,
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .fadingEndScroll(rememberScrollState())
+                .padding(Spacing.xs)
+                .selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+        ) {
+            chips.forEach { f ->
+                val active = f.key == selected.key
+                // "Новые" is itself the unread view, so a counter there would only repeat the folder.
+                val unread =
+                    if (f.key == ChatFilter.ALL.name ||
+                        f.key == ChatFilter.UNREAD.name
                     ) {
-                        Text(
-                            if (unread > 99) "99+" else "$unread",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = cs.onPrimary,
-                        )
+                        0
+                    } else {
+                        chats.count { f.matches(it) && it.unreadCount > 0 && !it.muted }
+                    }
+                val bg by animateColorAsState(if (active) cs.primary.copy(alpha = 0.16f) else Color.Transparent, label = "chipBg")
+                val fg by animateColorAsState(if (active) cs.primary else cs.onSurfaceVariant, label = "chipFg")
+                val bring = remember { BringIntoViewRequester() }
+                var chipWidth by remember { mutableIntStateOf(0) }
+                LaunchedEffect(active, chipWidth) {
+                    if (active && chipWidth > 0) bring.bringIntoView(Rect(-edge, 0f, chipWidth + edge, 1f))
+                }
+                Row(
+                    Modifier
+                        .bringIntoViewRequester(bring)
+                        .onSizeChanged { chipWidth = it.width }
+                        .height(36.dp)
+                        .clip(CircleShape)
+                        .background(bg)
+                        .combinedClickable(role = Role.Tab, onLongClick = { onLongPress(f) }, onClick = { onSelect(f) })
+                        .semantics { this.selected = active }
+                        .padding(horizontal = Spacing.m),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(f.label, style = MaterialTheme.typography.labelLarge, color = fg, maxLines = 1)
+                    if (unread > 0) {
+                        Spacer(Modifier.width(Spacing.s))
+                        Box(
+                            Modifier
+                                .defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
+                                .clip(CircleShape)
+                                .background(cs.surfaceContainerHighest)
+                                .padding(horizontal = Spacing.xs),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                if (unread > 99) "99+" else "$unread",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = cs.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
                     }
                 }
             }
@@ -1255,7 +1273,7 @@ private fun ContactsTab(
                 query,
                 { query = it },
                 "Поиск контактов",
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp),
+                Modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.s),
             )
         }
         shown.forEachIndexed { index, c ->
@@ -1267,15 +1285,7 @@ private fun ContactsTab(
                     ?.firstOrNull { it.isLetterOrDigit() }
                     ?.uppercaseChar() ?: '#'
             if (index == 0 || letter != prev) {
-                item(key = "h$letter") {
-                    Text(
-                        letter.toString(),
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = cs.primary,
-                        modifier = Modifier.padding(start = 24.dp, top = 10.dp, bottom = 2.dp),
-                    )
-                }
+                item(key = "h$letter") { ListSectionHeader(letter.toString()) }
             }
             item(key = c.id) {
                 val isOnline = c.id in online
@@ -1287,17 +1297,18 @@ private fun ContactsTab(
                             ?: c.description?.takeIf { it.isNotBlank() }
                     }
                 Row(
-                    Modifier.fillMaxWidth().clickableRow { onOpenUser(c.id) }.padding(horizontal = 16.dp, vertical = 8.dp),
+                    Modifier.fillMaxWidth().clickableRow { onOpenUser(c.id) }.padding(horizontal = Spacing.l, vertical = Spacing.s),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Avatar(c.name, c.avatarUrl, 48.dp, online = isOnline)
-                    Spacer(Modifier.width(14.dp))
-                    Column {
+                    Avatar(c.name, c.avatarUrl, CHAT_AVATAR, online = isOnline)
+                    Spacer(Modifier.width(Spacing.m))
+                    Column(Modifier.weight(1f)) {
                         Text(c.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         status?.let {
+                            Spacer(Modifier.height(Spacing.xs))
                             Text(
                                 it,
-                                style = MaterialTheme.typography.bodySmall,
+                                style = MaterialTheme.typography.bodyMedium,
                                 color = if (isOnline) cs.primary else cs.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -1313,8 +1324,8 @@ private fun ContactsTab(
                     "Никого не нашлось",
                     style = MaterialTheme.typography.bodyMedium,
                     color = cs.onSurfaceVariant,
-                    modifier = Modifier.fillMaxWidth().padding(32.dp),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(Spacing.xxl),
+                    textAlign = TextAlign.Center,
                 )
             }
         }
@@ -1439,53 +1450,58 @@ private fun SettingsTab(
             imageCacheBytes <= 0 -> "Данные ${formatBytes(dataCacheBytes)}"
             // Split out, because the thumbnails are almost always the bulk of it
             // and a single total made the number look implausibly small.
-            else -> "Изображения ${formatBytes(imageCacheBytes)} · данные ${formatBytes(dataCacheBytes)}"
+            else -> "Фото ${formatBytes(imageCacheBytes)} · данные ${formatBytes(dataCacheBytes)}"
         }
+    val cs = MaterialTheme.colorScheme
     Column(
         Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp)
+            .statusBarsPadding()
+            .padding(horizontal = Spacing.l)
             .padding(navClearance()),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+        verticalArrangement = Arrangement.spacedBy(Spacing.m),
     ) {
-        // Profile hero: the account on an aurora card, with its shortcuts right under it.
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(28.dp))
-                    .aurora(1.4f)
-                    .clickable(onClick = onOpenProfile)
-                    .padding(20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Avatar(account?.firstName ?: "Я", account?.avatarUrl, 72.dp)
-                Spacer(Modifier.width(16.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        listOfNotNull(account?.firstName, account?.lastName).joinToString(" ").ifBlank { "Профиль" },
-                        style = MaterialTheme.typography.titleLarge,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        if (demoMode) "Демо-режим" else "Мой профиль",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Icon(AppIcons.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        // Profile hero: the account centered, its shortcuts as round buttons in the top corners.
+        Box(Modifier.fillMaxWidth().padding(vertical = Spacing.s)) {
+            if (!demoMode && qrScanSupported) {
+                CircleIconButton(AppIcons.QrScan, "Веб-вход", { scanWebLogin() }, Modifier.align(Alignment.TopStart))
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                QuickAction(AppIcons.Bookmark, "Избранное", Modifier.weight(1f), onOpenSaved)
-                QuickAction(AppIcons.Edit, "Изменить", Modifier.weight(1f), onEditProfile)
-                if (!demoMode && qrScanSupported) QuickAction(AppIcons.QrScan, "Веб-вход", Modifier.weight(1f)) { scanWebLogin() }
+            CircleIconButton(AppIcons.Edit, "Изменить профиль", onEditProfile, Modifier.align(Alignment.TopEnd))
+            Column(
+                // Clear of the corner buttons, so a long name never runs under them.
+                Modifier.fillMaxWidth().padding(horizontal = Spacing.xxl + Spacing.xl),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                val name = listOfNotNull(account?.firstName, account?.lastName).joinToString(" ").ifBlank { "Профиль" }
+                Avatar(name, account?.avatarUrl, 96.dp, onClick = onOpenProfile)
+                Spacer(Modifier.height(Spacing.m))
+                Text(
+                    name,
+                    style = MaterialTheme.typography.headlineSmall,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    if (demoMode) "Демо-режим" else "Мой профиль",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = cs.onSurfaceVariant,
+                    maxLines = 1,
+                )
             }
         }
 
+        GroupCard {
+            GroupRow(AppIcons.Person, tileColor(0f), "Мой профиль", "Как вас видят другие", chevron = true, onClick = onOpenProfile)
+            GroupRow(AppIcons.Bookmark, tileColor(-150f), "Избранное", "Заметки и пересланное", chevron = true, onClick = onOpenSaved)
+        }
+
         GroupCard("Оформление") {
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Column(
+                Modifier.padding(horizontal = Spacing.l, vertical = Spacing.s),
+                verticalArrangement = Arrangement.spacedBy(Spacing.l),
+            ) {
                 ThemePicker(theme, onSetTheme)
                 AccentPicker(accent, onSetAccent)
                 WallpaperPicker(wallpaper, onSetWallpaper)
@@ -1501,7 +1517,7 @@ private fun SettingsTab(
                     AppIcons.Lock,
                     tileColor(-60f),
                     "Пароль для входа",
-                    "Дополнительная защита профиля",
+                    "Дополнительная защита",
                     value =
                         when (twoFaEnabled) {
                             true -> "Вкл."
@@ -1527,7 +1543,7 @@ private fun SettingsTab(
                 AppIcons.Block,
                 tileColor(150f),
                 "Чёрный список",
-                "Кто не может вам писать, звонить и добавлять в чаты",
+                "Заблокированные пользователи",
                 chevron = true,
                 onClick = {
                     onLoadBlocked()
@@ -1559,7 +1575,7 @@ private fun SettingsTab(
                     AppIcons.Heart,
                     tileColor(-30f),
                     "Быстрая реакция",
-                    "Двойное нажатие на сообщение",
+                    "Двойной тап по сообщению",
                     value = quickReaction ?: "Выкл.",
                     onClick = { pickReaction = true },
                 )
@@ -1575,7 +1591,7 @@ private fun SettingsTab(
                         )
                         // Four to a line: a short menu fits under the row instead of flipping up over the rows above.
                         reactionChoices.chunked(4).forEach { line ->
-                            Row(Modifier.padding(horizontal = 8.dp)) {
+                            Row(Modifier.padding(horizontal = Spacing.s)) {
                                 line.forEach { emoji ->
                                     Text(
                                         emoji,
@@ -1601,19 +1617,19 @@ private fun SettingsTab(
         if (privacy != null) {
             GroupCard("Конфиденциальность") {
                 // Finding by phone takes no "nobody" on the server.
-                PrivacyChoiceRow(AppIcons.Search, 0f, "Кто может найти меня по номеру", privacy.searchByPhone, nobody = false) {
+                PrivacyChoiceRow(AppIcons.Search, 0f, "Поиск по номеру", privacy.searchByPhone, nobody = false) {
                     onUpdatePrivacy(privacy.copy(searchByPhone = it))
                 }
-                PrivacyChoiceRow(AppIcons.Call, 120f, "Кто может мне звонить", privacy.incomingCall) {
+                PrivacyChoiceRow(AppIcons.Call, 120f, "Звонки", privacy.incomingCall) {
                     onUpdatePrivacy(privacy.copy(incomingCall = it))
                 }
-                PrivacyChoiceRow(AppIcons.Contacts, 240f, "Кто может приглашать в чаты", privacy.chatsInvite) {
+                PrivacyChoiceRow(AppIcons.Contacts, 240f, "Приглашения в чаты", privacy.chatsInvite) {
                     onUpdatePrivacy(privacy.copy(chatsInvite = it))
                 }
                 GroupRow(
                     AppIcons.HideOnline,
                     tileColor(-90f),
-                    "Скрывать статус «в сети»",
+                    "Скрывать «в сети»",
                     checked = privacy.hideOnline,
                     onClick = { onUpdatePrivacy(privacy.copy(hideOnline = !privacy.hideOnline)) },
                 )
@@ -1621,7 +1637,7 @@ private fun SettingsTab(
                     AppIcons.Read,
                     tileColor(90f),
                     "Отметки о прочтении",
-                    "Собеседники видят, что вы прочитали сообщение",
+                    "Видны собеседникам",
                     checked = privacy.showReadMarks,
                     onClick = { onUpdatePrivacy(privacy.copy(showReadMarks = !privacy.showReadMarks)) },
                 )
@@ -1643,7 +1659,7 @@ private fun SettingsTab(
             GroupRow(AppIcons.Info, tileColor(60f), "О программе", chevron = true, onClick = onOpenAbout)
             GroupRow(
                 AppIcons.Logout,
-                MaterialTheme.colorScheme.error,
+                cs.error,
                 "Выйти из аккаунта",
                 danger = true,
                 onClick = { confirmLogout = true },
@@ -1683,62 +1699,69 @@ private fun SessionsSheet(
         )
     }
     AppSheet(onDismiss) {
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 20.dp)) {
-            Text("Устройства", style = MaterialTheme.typography.headlineSmall)
+        Column(Modifier.padding(horizontal = Spacing.l).padding(bottom = Spacing.xl)) {
+            Text("Устройства", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = Spacing.s))
             Text(
                 "Здесь выполнен вход в ваш аккаунт.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = cs.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                modifier = Modifier.padding(horizontal = Spacing.s).padding(top = Spacing.xs, bottom = Spacing.m),
             )
             when {
                 sessions == null ->
-                    Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxWidth().padding(Spacing.xl), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
                     }
                 sessions.isEmpty() ->
                     Text("Список устройств недоступен", style = MaterialTheme.typography.bodyMedium, color = cs.onSurfaceVariant)
                 else ->
-                    LazyColumn(Modifier.heightIn(max = 460.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LazyColumn(Modifier.heightIn(max = 460.dp), verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
                         items(sessions) { session ->
                             Row(
                                 Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(20.dp))
-                                    .background(cs.surfaceContainerHigh)
-                                    .padding(14.dp),
+                                    .clip(RoundedCornerShape(Radius.medium))
+                                    .background(if (isLightTheme()) cs.surfaceContainer else cs.surfaceContainerHigh)
+                                    .padding(Spacing.m),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Box(
                                     Modifier
-                                        .size(
-                                            40.dp,
-                                        ).clip(
-                                            RoundedCornerShape(12.dp),
-                                        ).background(if (session.current) cs.primary else cs.surfaceContainerHighest),
+                                        .size(40.dp)
+                                        .clip(RoundedCornerShape(Radius.small))
+                                        .background(if (session.current) cs.primary else cs.surfaceContainerHighest),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Icon(
                                         AppIcons.Devices,
                                         contentDescription = null,
                                         tint = if (session.current) cs.onPrimary else cs.onSurfaceVariant,
-                                        modifier = Modifier.size(22.dp),
+                                        modifier = Modifier.size(24.dp),
                                     )
                                 }
-                                Spacer(Modifier.width(12.dp))
+                                Spacer(Modifier.width(Spacing.m))
                                 Column(Modifier.weight(1f)) {
                                     Text(
                                         session.client.ifBlank { "Устройство" } + if (session.current) " · это устройство" else "",
                                         style = MaterialTheme.typography.titleSmall,
                                         color = if (session.current) cs.primary else cs.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                     )
-                                    if (session.info.isNotBlank()) Text(session.info, style = MaterialTheme.typography.bodySmall)
+                                    if (session.info.isNotBlank()) {
+                                        Text(
+                                            session.info,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
                                     val seen = session.time.takeIf { it > 0 }?.let { "${formatDate(it)} ${formatClock(it)}" }
                                     listOfNotNull(
                                         session.location.ifBlank { null },
                                         seen,
                                     ).joinToString(" · ").takeIf { it.isNotBlank() }?.let {
-                                        Text(it, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                                        Text(it, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1)
                                     }
                                 }
                             }
@@ -1753,9 +1776,10 @@ private fun SessionsSheet(
                     modifier =
                         Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
+                            .clip(RoundedCornerShape(Radius.medium))
                             .clickable { confirm = true }
-                            .padding(vertical = 14.dp, horizontal = 4.dp),
+                            // In line with the content of the cards above.
+                            .padding(vertical = Spacing.m, horizontal = Spacing.m),
                 )
             }
         }
@@ -1772,28 +1796,28 @@ private fun BlackListSheet(
 ) {
     val cs = MaterialTheme.colorScheme
     AppSheet(onDismiss) {
-        Column(Modifier.padding(bottom = 20.dp)) {
-            Text("Чёрный список", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(horizontal = 20.dp))
+        Column(Modifier.padding(bottom = Spacing.xl)) {
+            Text("Чёрный список", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = Spacing.xl))
             Text(
                 "Список тех, кто не может вам писать, звонить и добавлять в чаты",
                 style = MaterialTheme.typography.bodyMedium,
                 color = cs.onSurfaceVariant,
-                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 12.dp),
+                modifier = Modifier.padding(horizontal = Spacing.xl).padding(top = Spacing.xs, bottom = Spacing.m),
             )
             when {
                 users == null ->
-                    Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxWidth().padding(Spacing.xl), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
                     }
                 users.isEmpty() ->
-                    Column(Modifier.fillMaxWidth().padding(vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Column(Modifier.fillMaxWidth().padding(vertical = Spacing.xl), horizontalAlignment = Alignment.CenterHorizontally) {
                         Box(
                             Modifier.size(72.dp).clip(CircleShape).background(cs.surfaceContainerHigh),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Icon(AppIcons.Block, contentDescription = null, tint = cs.primary, modifier = Modifier.size(34.dp))
+                            Icon(AppIcons.Block, contentDescription = null, tint = cs.primary, modifier = Modifier.size(32.dp))
                         }
-                        Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(Spacing.m))
                         Text("Список пуст", style = MaterialTheme.typography.titleMedium)
                     }
                 else ->
@@ -1853,7 +1877,7 @@ private fun ThemePicker(
     current: ThemeMode,
     onSelect: (ThemeMode) -> Unit,
 ) {
-    Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
         ThemeCard("Авто", AppIcons.AutoMode, ThemeMode.SYSTEM, current, onSelect)
         ThemeCard("Тёмная", AppIcons.DarkMode, ThemeMode.DARK, current, onSelect)
         ThemeCard("Светлая", AppIcons.LightMode, ThemeMode.LIGHT, current, onSelect)
@@ -1877,16 +1901,16 @@ private fun RowScope.ThemeCard(
     Column(
         Modifier
             .weight(1f)
-            .clip(RoundedCornerShape(18.dp))
-            .border(if (selected) 2.dp else 1.dp, border, RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(Radius.medium))
+            .border(if (selected) 2.dp else 1.dp, border, RoundedCornerShape(Radius.medium))
             .selectable(selected = selected, onClick = { onSelect(mode) }, role = Role.RadioButton)
-            .padding(8.dp),
+            .padding(Spacing.s),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         val backdrop =
             when (mode) {
-                ThemeMode.DARK -> Brush.linearGradient(listOf(PreviewDark, PreviewDark))
-                ThemeMode.LIGHT -> Brush.linearGradient(listOf(PreviewLight, PreviewLight))
+                ThemeMode.DARK -> SolidColor(PreviewDark)
+                ThemeMode.LIGHT -> SolidColor(PreviewLight)
                 // Split down the middle: it follows the system either way.
                 ThemeMode.SYSTEM ->
                     Brush.horizontalGradient(
@@ -1899,41 +1923,41 @@ private fun RowScope.ThemeCard(
         Column(
             Modifier
                 .fillMaxWidth()
-                .height(58.dp)
-                .clip(RoundedCornerShape(12.dp))
+                .height(56.dp)
+                .clip(RoundedCornerShape(Radius.small))
                 .background(backdrop)
-                .padding(8.dp),
+                .border(1.dp, cs.outlineVariant, RoundedCornerShape(Radius.small))
+                .padding(Spacing.s),
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
             Box(
                 Modifier
-                    .width(34.dp)
-                    .height(13.dp)
-                    .clip(RoundedCornerShape(7.dp))
+                    .width(32.dp)
+                    .height(12.dp)
+                    .clip(CircleShape)
                     .background(Color.Gray.copy(alpha = 0.55f)),
             )
             Box(
                 Modifier
                     .align(Alignment.End)
-                    .width(42.dp)
-                    .height(13.dp)
-                    .clip(RoundedCornerShape(7.dp))
-                    .background(accentGradient()),
+                    .width(40.dp)
+                    .height(12.dp)
+                    .clip(CircleShape)
+                    .background(cs.primary),
             )
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(Spacing.s))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, contentDescription = null, tint = if (selected) cs.primary else cs.onSurfaceVariant, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(Spacing.xs))
             Text(
                 label,
                 style = MaterialTheme.typography.labelLarge,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                 color = if (selected) cs.primary else cs.onSurface,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        Spacer(Modifier.height(2.dp))
     }
 }
 
@@ -1946,34 +1970,27 @@ private fun AccentPicker(
     val cs = MaterialTheme.colorScheme
     val dark = !isLightTheme()
     val dynamic = dynamicColorScheme(dark)
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Цвет акцента", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-            Text(current.label, style = MaterialTheme.typography.bodyMedium, color = cs.primary)
+            Text("Цвет акцента", style = MaterialTheme.typography.bodyLarge, maxLines = 1, modifier = Modifier.weight(1f))
+            Text(current.label, style = MaterialTheme.typography.bodyLarge, color = cs.primary, maxLines = 1)
         }
         // Equal slots across the width: every swatch fits (and is tappable) on a 360dp screen.
         Row(
             Modifier.fillMaxWidth().selectableGroup(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
         ) {
             Accent.entries.filter { it != Accent.SYSTEM || dynamic != null }.forEach { a ->
-                val tones = if (dark) a.dark else a.light
-                val partner = if (dark) a.partner.dark else a.partner.light
-                val swatch =
-                    if (a == Accent.SYSTEM) {
-                        Brush.linearGradient(listOf(dynamic!!.primary, dynamic.tertiary))
-                    } else {
-                        Brush.linearGradient(listOf(tones.primary, partner.primary))
-                    }
+                val swatch = if (a == Accent.SYSTEM) dynamic!!.primary else (if (dark) a.dark else a.light).primary
                 val selected = a == current
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     Box(
                         Modifier
-                            .widthIn(max = 46.dp)
+                            .widthIn(max = 48.dp)
                             .fillMaxWidth()
                             .aspectRatio(1f)
                             .then(if (selected) Modifier.border(2.dp, cs.primary, CircleShape) else Modifier)
-                            .padding(4.dp)
+                            .padding(Spacing.xs)
                             .clip(CircleShape)
                             .background(swatch)
                             .selectable(selected = selected, onClick = { onSelect(a) }, role = Role.RadioButton)
@@ -2003,39 +2020,47 @@ private fun WallpaperPicker(
     onSelect: (Int) -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Фон чата", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-            Text(WALLPAPERS.getOrElse(current) { WALLPAPERS[0] }, style = MaterialTheme.typography.bodyMedium, color = cs.primary)
+            Text("Фон чата", style = MaterialTheme.typography.bodyLarge, maxLines = 1, modifier = Modifier.weight(1f))
+            Text(
+                WALLPAPERS.getOrElse(current) { WALLPAPERS[0] },
+                style = MaterialTheme.typography.bodyLarge,
+                color = cs.primary,
+                maxLines = 1,
+            )
         }
-        Row(Modifier.fadingEndScroll(rememberScrollState()).selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fadingEndScroll(rememberScrollState()).selectableGroup(), horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
             WALLPAPERS.forEachIndexed { i, name ->
                 val selected = i == current
                 Column(
                     Modifier
                         .size(width = 64.dp, height = 96.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .border(if (selected) 2.dp else 1.dp, if (selected) cs.primary else cs.outlineVariant, RoundedCornerShape(14.dp))
-                        .chatWallpaper(i)
+                        .clip(RoundedCornerShape(Radius.small))
+                        .border(
+                            if (selected) 2.dp else 1.dp,
+                            if (selected) cs.primary else cs.outlineVariant,
+                            RoundedCornerShape(Radius.small),
+                        ).chatWallpaper(i)
                         .selectable(selected = selected, onClick = { onSelect(i) }, role = Role.RadioButton)
                         .semantics { contentDescription = name }
-                        .padding(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.Bottom),
+                        .padding(Spacing.s),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.xs, Alignment.Bottom),
                 ) {
                     Box(
                         Modifier
-                            .width(34.dp)
+                            .width(32.dp)
                             .height(12.dp)
-                            .clip(RoundedCornerShape(6.dp))
+                            .clip(CircleShape)
                             .background(incomingBubbleColor()),
                     )
                     Box(
                         Modifier
                             .align(Alignment.End)
-                            .width(38.dp)
+                            .width(40.dp)
                             .height(12.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(accentGradient()),
+                            .clip(CircleShape)
+                            .background(cs.primary),
                     )
                 }
             }
@@ -2056,9 +2081,20 @@ private fun ScaleSlider(
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(10.dp))
-            Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-            Text("${(draft * 100).roundToInt()}%", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(Spacing.m))
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                "${(draft * 100).roundToInt()}%",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+            )
         }
         Slider(
             value = draft,
@@ -2088,16 +2124,19 @@ private fun UnreadBadge(
 ) {
     val cs = MaterialTheme.colorScheme
     // Muted chats get a grey badge so they don't compete with the ones that ring.
-    val base = Modifier.defaultMinSize(minWidth = 22.dp, minHeight = 22.dp).clip(CircleShape)
     Box(
-        (if (muted) base.background(cs.surfaceContainerHighest) else base.background(accentGradient())).padding(horizontal = 6.dp),
+        Modifier
+            .defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
+            .clip(CircleShape)
+            .background(if (muted) cs.surfaceContainerHighest else cs.primary)
+            .padding(horizontal = Spacing.xs),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             if (count > 999) "999+" else "$count",
-            color = if (muted) cs.onSurfaceVariant else onAccentGradient(),
+            color = if (muted) cs.onSurfaceVariant else cs.onPrimary,
             style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
+            maxLines = 1,
         )
     }
 }
@@ -2116,22 +2155,22 @@ private fun RatePromptCard(
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(24.dp))
+            .padding(horizontal = Spacing.l, vertical = Spacing.s)
+            .clip(RoundedCornerShape(Radius.medium))
             .background(MaterialTheme.colorScheme.surfaceContainer)
-            .padding(start = 18.dp, end = 10.dp, top = 16.dp, bottom = 6.dp),
+            .padding(start = Spacing.l, end = Spacing.s, top = Spacing.l, bottom = Spacing.xs),
     ) {
-        Text("Оцените Авенариус", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(4.dp))
+        Text("Оцените Авенариус", style = MaterialTheme.typography.titleMedium, maxLines = 1)
+        Spacer(Modifier.height(Spacing.xs))
         Text(
             "Оценка в Google Play помогает другим людям найти приложение. Это займёт пару секунд.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            TextButton(onClick = onNever) { Text("Не показывать") }
-            TextButton(onClick = onLater) { Text("Позже") }
-            TextButton(onClick = onRate) { Text("Оценить") }
+            TextButton(onClick = onNever) { Text("Не показывать", maxLines = 1) }
+            TextButton(onClick = onLater) { Text("Позже", maxLines = 1) }
+            TextButton(onClick = onRate) { Text("Оценить", maxLines = 1) }
         }
     }
 }
@@ -2149,26 +2188,27 @@ private fun Segmented(
             .fillMaxWidth()
             .clip(CircleShape)
             .background(cs.surfaceContainerHighest)
-            .padding(4.dp)
+            .padding(Spacing.xs)
             .selectableGroup(),
     ) {
         options.forEachIndexed { i, label ->
             val active = i == selected
-            val bg by animateColorAsState(if (active) cs.primary else Color.Transparent, label = "segBg")
+            val bg by animateColorAsState(if (active) cs.primary.copy(alpha = 0.2f) else Color.Transparent, label = "segBg")
             Box(
                 Modifier
                     .weight(1f)
                     .clip(CircleShape)
                     .background(bg)
                     .selectable(selected = active, onClick = { onSelect(i) }, role = Role.Tab)
-                    .padding(vertical = 10.dp),
+                    .height(40.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     label,
                     style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (active) cs.onPrimary else cs.onSurfaceVariant,
+                    color = if (active) cs.primary else cs.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -2218,23 +2258,32 @@ private fun NewChatSheet(
     var channelAbout by remember { mutableStateOf("") }
 
     AppSheet(onDismiss) {
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(
+            Modifier.padding(horizontal = Spacing.l).padding(bottom = Spacing.l),
+            verticalArrangement = Arrangement.spacedBy(Spacing.m),
+        ) {
             Text(
                 when (tab) {
                     0 -> "Новый чат"
                     1 -> "Новая группа"
                     else -> "Каким будет новый канал?"
                 },
-                style = MaterialTheme.typography.headlineSmall,
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = Spacing.s),
             )
             Segmented(listOf("Чат", "Группа", "Канал"), tab) { tab = it }
             if (tab == 0) {
                 NewChatTab(query, searching, searchResults, looksLikePhone, { query = it }, onPickResult)
                 if (looksLikePhone) {
-                    Button(onClick = { onPhone(query) }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Открыть по номеру") }
+                    Button(
+                        onClick = { onPhone(query) },
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                    ) { Text("Открыть по номеру", maxLines = 1) }
                 }
             } else if (tab == 2) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.m)) {
                     PhotoPicker(avatar, null, channelName, 64.dp, pickAvatar)
                     Text(
                         "Добавьте фото, чтобы канал узнавали с первого взгляда",
@@ -2262,7 +2311,7 @@ private fun NewChatSheet(
                     onClick = { onCreateChannel(channelName, channelAbout, avatar) },
                     enabled = channelName.isNotBlank(),
                     modifier = Modifier.fillMaxWidth().height(52.dp),
-                ) { Text("Создать канал") }
+                ) { Text("Создать канал", maxLines = 1) }
             } else {
                 NewGroupTab(
                     groupName = groupName,
@@ -2280,7 +2329,7 @@ private fun NewChatSheet(
                     onClick = { onCreateGroup(groupName, selected.toList(), selectedPhones.toList(), avatar) },
                     enabled = groupName.isNotBlank() && (selected.isNotEmpty() || selectedPhones.isNotEmpty()),
                     modifier = Modifier.fillMaxWidth().height(52.dp),
-                ) { Text("Создать группу") }
+                ) { Text("Создать группу", maxLines = 1) }
             }
         }
     }
@@ -2300,7 +2349,7 @@ private fun NewChatTab(
         Spacer(Modifier.height(8.dp))
         if (!looksLikePhone) {
             if (searching) {
-                Box(Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxWidth().padding(Spacing.s), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                 }
             }
@@ -2315,7 +2364,7 @@ private fun NewChatTab(
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 12.dp),
+                    modifier = Modifier.padding(horizontal = Spacing.xs, vertical = Spacing.m),
                 )
             }
             LazyColumn(Modifier.heightIn(max = 340.dp)) {
@@ -2323,21 +2372,22 @@ private fun NewChatTab(
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .clip(
-                                RoundedCornerShape(16.dp),
-                            ).clickableRow { onPickResult(result) }
-                            .padding(vertical = 8.dp, horizontal = 4.dp),
+                            .clip(RoundedCornerShape(Radius.medium))
+                            .clickableRow { onPickResult(result) }
+                            .padding(vertical = Spacing.s, horizontal = Spacing.xs),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Avatar(result.title, result.avatarUrl, 44.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(result.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.width(Spacing.m))
+                        Column(Modifier.weight(1f)) {
+                            Text(result.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             result.subtitle?.let {
                                 Text(
                                     it,
-                                    style = MaterialTheme.typography.bodySmall,
+                                    style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
@@ -2369,11 +2419,11 @@ private fun NewGroupTab(
     val q = filter.trim()
     val shownServer = contacts.filter { q.isBlank() || it.name.contains(q, ignoreCase = true) }
     val shownBook = book.filter { q.isBlank() || it.name.contains(q, ignoreCase = true) }
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.m)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
-                    .size(52.dp)
+                    .size(48.dp)
                     .clip(CircleShape)
                     .background(cs.surfaceContainerHighest)
                     .clickable(onClick = onPickAvatar),
@@ -2390,7 +2440,7 @@ private fun NewGroupTab(
                     Icon(AppIcons.Camera, contentDescription = "Добавить фото", tint = cs.primary, modifier = Modifier.size(24.dp))
                 }
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(Spacing.m))
             PillTextField(groupName, onName, "Название группы", Modifier.weight(1f), leading = null, capitalize = true)
         }
         PillTextField(filter, { filter = it }, "Участники: ${selectedIds.size + selectedPhones.size} · поиск", Modifier.fillMaxWidth())
@@ -2418,20 +2468,20 @@ internal fun PickPersonRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(
-                RoundedCornerShape(16.dp),
-            ).toggleable(value = checked, onValueChange = onToggle)
-            .padding(vertical = 7.dp, horizontal = 4.dp),
+            .clip(RoundedCornerShape(Radius.medium))
+            .toggleable(value = checked, onValueChange = onToggle)
+            .padding(vertical = Spacing.s, horizontal = Spacing.xs),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(name, avatarUrl, 42.dp)
-        Spacer(Modifier.width(12.dp))
+        Avatar(name, avatarUrl, 44.dp)
+        Spacer(Modifier.width(Spacing.m))
         Column(Modifier.weight(1f)) {
             Text(name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
             subtitle?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                Text(it, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1)
             }
         }
+        Spacer(Modifier.width(Spacing.m))
         // A round tick, like the selection marks in messengers' pickers.
         Box(
             Modifier

@@ -43,6 +43,8 @@ import com.avenarius.app.ui.components.AppSheet
 import com.avenarius.app.ui.components.PillTextField
 import com.avenarius.app.ui.components.SheetAction
 import com.avenarius.app.ui.components.clickableRow
+import com.avenarius.app.ui.theme.Radius
+import com.avenarius.app.ui.theme.Spacing
 
 /** Longest folder name offered: the server took 15 characters and refused 21. */
 private const val FOLDER_TITLE_MAX = 20
@@ -80,10 +82,16 @@ internal fun FolderActionsSheet(
     var confirm by remember { mutableStateOf(false) }
     if (confirm) DeleteFolderDialog(folder, onDelete) { confirm = false }
     AppSheet(onDismiss) {
-        Text(folder.title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 24.dp, bottom = 8.dp))
+        Text(
+            folder.title,
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(start = Spacing.xl, end = Spacing.xl, bottom = Spacing.s),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
         SheetAction(AppIcons.Edit, "Настроить папку", onClick = onEdit)
         SheetAction(AppIcons.Delete, "Удалить папку", danger = true) { confirm = true }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(Spacing.m))
     }
 }
 
@@ -97,9 +105,15 @@ internal fun FolderPickSheet(
     onDismiss: () -> Unit,
 ) {
     AppSheet(onDismiss) {
-        Text("Добавить в папку", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 24.dp, bottom = 8.dp))
+        Text(
+            "Добавить в папку",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(start = Spacing.xl, end = Spacing.xl, bottom = Spacing.s),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
         folders.forEach { f -> FolderTickRow(f.title, chat.id in f.include) { onToggle(f) } }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(Spacing.m))
     }
 }
 
@@ -114,12 +128,20 @@ private fun FolderTickRow(
         Modifier
             .fillMaxWidth()
             .toggleable(value = checked, onValueChange = { onToggle() })
-            .padding(horizontal = 24.dp, vertical = 13.dp),
+            .heightIn(min = 56.dp)
+            .padding(horizontal = Spacing.xl, vertical = Spacing.s),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(AppIcons.Folder, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(24.dp))
-        Spacer(Modifier.width(18.dp))
-        Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(Spacing.l))
+        Text(
+            title,
+            style = MaterialTheme.typography.bodyLarge,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(Spacing.m))
         Box(
             Modifier
                 .size(24.dp)
@@ -144,29 +166,32 @@ internal fun FoldersSheet(
 ) {
     val cs = MaterialTheme.colorScheme
     AppSheet(onDismiss) {
-        Column(Modifier.padding(bottom = 16.dp)) {
-            Text("Папки", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(horizontal = 20.dp))
+        Column(Modifier.padding(bottom = Spacing.l)) {
+            Text("Папки", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = Spacing.xl))
             Text(
                 "Вкладки над списком чатов. Они общие для всех ваших устройств.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = cs.onSurfaceVariant,
-                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 8.dp),
+                modifier = Modifier.padding(start = Spacing.xl, end = Spacing.xl, top = Spacing.xs, bottom = Spacing.s),
             )
             val movable = folders.filterNot { it.isAll }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = Spacing.xl, vertical = Spacing.s),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(AppIcons.Chats, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(24.dp))
-                Spacer(Modifier.width(18.dp))
+                Spacer(Modifier.width(Spacing.l))
                 Text("Все", style = MaterialTheme.typography.bodyLarge)
             }
             LazyColumn(Modifier.heightIn(max = 420.dp)) {
                 items(movable, key = { it.id }) { f ->
                     val i = movable.indexOf(f)
                     Row(
-                        Modifier.fillMaxWidth().clickableRow { onOpen(f) }.padding(start = 24.dp, end = 8.dp),
+                        Modifier.fillMaxWidth().clickableRow { onOpen(f) }.padding(start = Spacing.xl, end = Spacing.s),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(AppIcons.Folder, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(24.dp))
-                        Spacer(Modifier.width(18.dp))
+                        Spacer(Modifier.width(Spacing.l))
                         Text(
                             f.title,
                             style = MaterialTheme.typography.bodyLarge,
@@ -209,8 +234,15 @@ internal fun FolderEditorSheet(
     if (confirmDelete && onDelete != null) DeleteFolderDialog(folder, onDelete) { confirmDelete = false }
     val shown = chats.filter { filter.isBlank() || it.title.contains(filter.trim(), ignoreCase = true) }
     AppSheet(onDismiss) {
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(if (onDelete == null) "Новая папка" else "Папка", style = MaterialTheme.typography.headlineSmall)
+        Column(
+            Modifier.padding(horizontal = Spacing.l).padding(bottom = Spacing.l),
+            verticalArrangement = Arrangement.spacedBy(Spacing.m),
+        ) {
+            Text(
+                if (onDelete == null) "Новая папка" else "Папка",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(horizontal = Spacing.s),
+            )
             PillTextField(
                 title,
                 { title = it.take(FOLDER_TITLE_MAX) },
@@ -227,7 +259,7 @@ internal fun FolderEditorSheet(
                 )
             }
             PillTextField(filter, { filter = it }, "Чаты: ${picked.size} · поиск", Modifier.fillMaxWidth())
-            LazyColumn(Modifier.heightIn(max = 300.dp).clip(RoundedCornerShape(16.dp))) {
+            LazyColumn(Modifier.heightIn(max = 300.dp).clip(RoundedCornerShape(Radius.medium))) {
                 items(shown, key = { it.id }) { c ->
                     PickPersonRow(c.title, avatarOf(c), null, c.id in picked) { on -> picked = if (on) picked + c.id else picked - c.id }
                 }

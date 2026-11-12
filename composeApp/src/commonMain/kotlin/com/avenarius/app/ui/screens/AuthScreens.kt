@@ -33,6 +33,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.ui.AppIcons
@@ -44,25 +45,24 @@ import com.avenarius.app.ui.components.SmallSpinner
 import com.avenarius.app.ui.components.openUriSafely
 import com.avenarius.app.ui.nowMillis
 import com.avenarius.app.ui.plural
-import com.avenarius.app.ui.theme.accentGradient
-import com.avenarius.app.ui.theme.aurora
-import com.avenarius.app.ui.theme.onAccentGradient
+import com.avenarius.app.ui.theme.Radius
+import com.avenarius.app.ui.theme.Spacing
 import kotlinx.coroutines.delay
 
 @Composable
 private fun CenteredForm(content: @Composable ColumnScopeAlias.() -> Unit) {
     // The form stays centred while it fits, and scrolls (rather than being clipped)
     // on short screens or once the soft keyboard has eaten half of the window.
-    Box(Modifier.fillMaxSize().aurora().imePadding(), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).imePadding(), contentAlignment = Alignment.Center) {
         Column(
             modifier =
                 Modifier
                     .verticalScroll(rememberScrollState())
-                    .padding(24.dp)
+                    .padding(Spacing.xl)
                     .widthIn(max = 360.dp)
                     .fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(Spacing.m),
             content = content,
         )
     }
@@ -90,18 +90,23 @@ internal fun LoginScreen(
     var phone by remember { mutableStateOf("+7") }
     CenteredForm {
         Box(
-            Modifier.size(84.dp).clip(RoundedCornerShape(28.dp)).background(accentGradient()),
+            Modifier.size(80.dp).clip(RoundedCornerShape(Radius.medium)).background(MaterialTheme.colorScheme.primary),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(AppIcons.ChatsSelected, contentDescription = null, tint = onAccentGradient(), modifier = Modifier.size(42.dp))
+            Icon(
+                AppIcons.ChatsSelected,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size(40.dp),
+            )
         }
-        Text("Авенариус", style = MaterialTheme.typography.headlineLarge)
+        Text("Авенариус", style = MaterialTheme.typography.headlineLarge, maxLines = 1)
         // What this app is, for the many who never open "About": said plainly, with
         // nothing it can't back up (messages do still go through Max's servers).
         Text(
             "Неофициальный клиент Max с открытым исходным кодом. Без рекламы и трекеров — " +
                 "только то, что нужно для переписки и звонков. Сообщения по-прежнему идут через серверы Max.",
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodyMedium.copy(lineBreak = LineBreak.Paragraph),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )

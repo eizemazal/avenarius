@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -31,26 +32,29 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -78,7 +82,8 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.avenarius.app.model.TextSpan
 import com.avenarius.app.ui.AppIcons
-import com.avenarius.app.ui.theme.rotateHue
+import com.avenarius.app.ui.theme.Radius
+import com.avenarius.app.ui.theme.Spacing
 import kotlinx.coroutines.flow.dropWhile
 import kotlinx.coroutines.flow.first
 
@@ -252,8 +257,7 @@ internal fun Avatar(
     online: Boolean = false,
 ) {
     Box(Modifier.size(size)) {
-        val (light, dark) = avatarGradient(name)
-        var mod = Modifier.size(size).clip(CircleShape).background(Brush.verticalGradient(listOf(light, dark)))
+        var mod = Modifier.size(size).clip(CircleShape).background(avatarColor(name))
         if (onClick != null) mod = mod.clickable(onClick = onClick)
         if (!url.isNullOrBlank()) {
             AsyncImage(model = url, contentDescription = name, contentScale = ContentScale.Crop, modifier = mod)
@@ -261,7 +265,7 @@ internal fun Avatar(
             Box(mod, contentAlignment = Alignment.Center) {
                 Text(
                     initials(name),
-                    color = MaterialTheme.colorScheme.onPrimary,
+                    color = Color.White,
                     // Sized from the circle, not the user's font scale, so two letters always fit.
                     fontSize = with(LocalDensity.current) { (size * 0.38f).toSp() },
                     fontWeight = FontWeight.SemiBold,
@@ -274,7 +278,6 @@ internal fun Avatar(
 }
 
 /** Accent presence dot, with a ring in the surface colour so it reads against the avatar. */
-
 @Composable
 internal fun OnlineDot(
     avatarSize: Dp,
@@ -289,21 +292,24 @@ internal fun OnlineDot(
     }
 }
 
-private const val AVATAR_HUES = 8
+/** Flat avatar fills: saturated but muted enough for white initials, independent of the accent. */
+private val AvatarColors =
+    listOf(
+        Color(0xFFD9655B), // red
+        Color(0xFFE08E45), // orange
+        Color(0xFF5FAE57), // green
+        Color(0xFF4A90D9), // blue
+        Color(0xFF8E6FD8), // violet
+        Color(0xFF3BA8B5), // cyan
+        Color(0xFFD9628F), // pink
+    )
 
-/** A stable per-person turn of the accent's hue, so avatars differ yet follow the theme. */
-private fun hueTurn(key: String): Float = (key.trim().hashCode() and 0x7fffffff) % AVATAR_HUES * (360f / AVATAR_HUES)
+/** A stable per-person pick from [AvatarColors]. */
+internal fun avatarColor(key: String): Color = AvatarColors[(key.trim().hashCode() and 0x7fffffff) % AvatarColors.size]
 
+/** The sender's name color in group chats: the same hue as their avatar. */
 @Composable
-private fun avatarGradient(key: String): Pair<Color, Color> {
-    val cs = MaterialTheme.colorScheme
-    val turn = hueTurn(key)
-    return lerp(cs.primary, cs.onPrimary, 0.12f).rotateHue(turn) to cs.primary.rotateHue(turn)
-}
-
-/** The sender's avatar hue, for their name in group chats (primary is readable on surfaces). */
-@Composable
-internal fun senderNameColor(key: String): Color = MaterialTheme.colorScheme.primary.rotateHue(hueTurn(key))
+internal fun senderNameColor(key: String): Color = avatarColor(key)
 
 /** Up to two initials from the first letters of the first words: "Анна Петрова" -> "АП". */
 internal fun initials(name: String): String =
@@ -374,12 +380,12 @@ internal fun PillTextField(
             .height(48.dp)
             .clip(CircleShape)
             .background(cs.surfaceContainerHigh)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = Spacing.l),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (leading != null) {
             Icon(leading, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(Spacing.m))
         }
         BasicTextField(
             value = value,
@@ -416,30 +422,69 @@ internal fun PillTextField(
     }
 }
 
-/** Tile color for a row glyph: the accent with its hue turned, so rows differ yet follow the theme. */
-@Composable
-internal fun tileColor(turn: Float): Color = MaterialTheme.colorScheme.primary.rotateHue(turn)
+/**
+ * Tile color for a row glyph: a saturated hue [turn] degrees from sky blue, fixed whatever the
+ * accent, so settings icons read as a colorful set.
+ */
+internal fun tileColor(turn: Float): Color = Color.hsv(((207f + turn) % 360f + 360f) % 360f, 0.7f, 0.85f)
 
-/** A rounded group of rows with an optional caption above it (settings, profile pages). */
+private val GROUP_TILE = 32.dp
+
+/** Where row text starts in a [GroupCard]: gutter, icon tile, gap. Dividers start here too. */
+internal val GroupKeyline = Spacing.l + GROUP_TILE + Spacing.l
+private val DividerWidth = 1.dp
+
+/** True inside a [GroupCard]: its rows then draw dividers between each other. */
+private val LocalInGroupCard = staticCompositionLocalOf { false }
+
+/**
+ * A rounded card of rows with an optional [title] inside it at the top, in the accent color
+ * (settings, profile pages). Rows using [groupRowDivider] (every [GroupRow] does) get a thin
+ * divider between consecutive rows: each row draws a line on its top edge and the card hides
+ * the one above its first row.
+ */
 @Composable
 internal fun GroupCard(
     title: String? = null,
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Column(modifier) {
-        if (title != null) {
-            Text(
-                title.uppercase(),
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 16.dp, bottom = 8.dp),
-            )
+    val container = MaterialTheme.colorScheme.surfaceContainer
+    Surface(modifier, shape = RoundedCornerShape(Radius.medium), color = container) {
+        Column(Modifier.fillMaxWidth().padding(vertical = Spacing.xs)) {
+            if (title != null) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = Spacing.l, end = Spacing.l, top = Spacing.s, bottom = Spacing.xs),
+                )
+            }
+            CompositionLocalProvider(LocalInGroupCard provides true) {
+                Column(
+                    Modifier.fillMaxWidth().drawWithContent {
+                        drawContent()
+                        // The first row has nothing above it to divide from.
+                        drawRect(container, size = Size(size.width, DividerWidth.toPx()))
+                    },
+                    content = content,
+                )
+            }
         }
-        Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
-            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), content = content)
-        }
+    }
+}
+
+/**
+ * The divider on top of a row inside a [GroupCard], starting at [start] (the text keyline);
+ * nothing outside a card. For custom rows that should be divided like [GroupRow]s.
+ */
+@Composable
+internal fun Modifier.groupRowDivider(start: Dp = GroupKeyline): Modifier {
+    if (!LocalInGroupCard.current) return this
+    val color = MaterialTheme.colorScheme.outlineVariant
+    return drawBehind {
+        drawRect(color, topLeft = Offset(start.toPx(), 0f), size = Size(size.width - start.toPx(), DividerWidth.toPx()))
     }
 }
 
@@ -460,28 +505,36 @@ internal fun GroupRow(
 ) {
     val cs = MaterialTheme.colorScheme
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp),
+        Modifier
+            .fillMaxWidth()
+            .groupRowDivider()
+            .clickable(onClick = onClick)
+            .heightIn(min = 56.dp)
+            .padding(horizontal = Spacing.l, vertical = Spacing.s),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(38.dp).clip(RoundedCornerShape(12.dp)).background(tile), contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription = null, tint = if (danger) cs.onError else cs.onPrimary, modifier = Modifier.size(20.dp))
+        Box(
+            Modifier.size(GROUP_TILE).clip(RoundedCornerShape(Radius.small)).background(if (danger) cs.error else tile),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = null, tint = if (danger) cs.onError else Color.White, modifier = Modifier.size(20.dp))
         }
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(Spacing.l))
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyLarge, color = if (danger) cs.error else cs.onSurface)
-            if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = cs.onSurfaceVariant)
         }
         if (value != null) {
-            Spacer(Modifier.width(8.dp))
-            Text(value, style = MaterialTheme.typography.bodyMedium, color = cs.primary, maxLines = 1)
+            Spacer(Modifier.width(Spacing.s))
+            Text(value, style = MaterialTheme.typography.bodyLarge, color = cs.primary, maxLines = 1)
         }
         if (checked != null) {
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(Spacing.m))
             Switch(checked = checked, onCheckedChange = null)
         }
         if (chevron) {
-            Spacer(Modifier.width(4.dp))
-            Icon(AppIcons.ChevronRight, contentDescription = null, tint = cs.outline, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(Spacing.xs))
+            Icon(AppIcons.ChevronRight, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(20.dp))
         }
     }
 }
@@ -497,12 +550,12 @@ internal fun QuickAction(
     val cs = MaterialTheme.colorScheme
     Column(
         modifier
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(Radius.medium))
             .background(cs.surfaceContainer)
             .clickable(onClick = onClick)
-            .padding(vertical = 12.dp, horizontal = 4.dp),
+            .padding(vertical = Spacing.m, horizontal = Spacing.xs),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(Spacing.xs),
     ) {
         Icon(icon, contentDescription = null, tint = cs.primary, modifier = Modifier.size(24.dp))
         Text(
@@ -527,9 +580,13 @@ internal fun SheetAction(
     val cs = MaterialTheme.colorScheme
     val color = if (danger) cs.error else cs.onSurface
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 15.dp),
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .heightIn(min = 56.dp)
+            .padding(horizontal = Spacing.xl, vertical = Spacing.s),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(18.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.l),
     ) {
         Icon(icon, contentDescription = null, tint = if (danger) cs.error else cs.onSurfaceVariant, modifier = Modifier.size(24.dp))
         Text(label, style = MaterialTheme.typography.bodyLarge, color = color)

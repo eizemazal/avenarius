@@ -22,6 +22,7 @@ import com.avenarius.app.ui.AppViewModel
 import com.avenarius.app.ui.Screen
 import com.avenarius.app.ui.readSharedMedia
 import com.avenarius.app.ui.theme.isDark
+import com.avenarius.app.ui.theme.lightStatusBarIcons
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
@@ -64,14 +65,15 @@ class MainActivity : ComponentActivity() {
             // System-bar icons follow the app's theme, not the OS one: otherwise a light app
             // theme on a dark phone gets white, invisible status-bar icons.
             val dark = state.theme.isDark()
-            LaunchedEffect(dark) {
-                val bars =
-                    if (dark) {
+            val lightIcons = dark || lightStatusBarIcons.value
+            LaunchedEffect(dark, lightIcons) {
+                fun style(darkBar: Boolean) =
+                    if (darkBar) {
                         SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
                     } else {
                         SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
                     }
-                enableEdgeToEdge(bars, bars)
+                enableEdgeToEdge(style(lightIcons), style(dark))
             }
 
             // Mirror UI state the background service needs (to suppress notifications

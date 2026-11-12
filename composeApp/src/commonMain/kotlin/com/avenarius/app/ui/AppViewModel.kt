@@ -343,7 +343,7 @@ data class AppState(
     val uiScale: Float = 1f,
     val fontScale: Float = 1f,
     /** The chat background preset (an index into WALLPAPERS). */
-    val wallpaper: Int = 0,
+    val wallpaper: Int = 1,
     /** A message awaiting a chat pick to forward it (Screen.SHARE_PICK). */
     val forwarding: List<Message> = emptyList(),
     /** "Отправка по вводу": Enter sends instead of breaking the line. */

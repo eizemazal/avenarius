@@ -104,8 +104,8 @@ class Prefs(
 
     /** The chat background preset (see WALLPAPERS); per device, like the theme. */
     var chatWallpaper: Int
-        get() = storage.getString(KEY_WALLPAPER)?.toIntOrNull() ?: 0
-        set(value) = storage.putString(KEY_WALLPAPER, value.takeIf { it != 0 }?.toString())
+        get() = storage.getString(KEY_WALLPAPER)?.toIntOrNull() ?: 1
+        set(value) = storage.putString(KEY_WALLPAPER, value.takeIf { it != 1 }?.toString())
 
     /** The emoji a double tap on a message reacts with; null = double tap does nothing. */
     var quickReaction: String?

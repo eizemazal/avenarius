@@ -6,12 +6,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
@@ -41,8 +44,11 @@ import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.components.AppSheet
 import com.avenarius.app.ui.components.Avatar
+import com.avenarius.app.ui.components.GroupCard
 import com.avenarius.app.ui.components.SheetAction
+import com.avenarius.app.ui.components.groupRowDivider
 import com.avenarius.app.ui.rememberSingleImagePickLauncher
+import com.avenarius.app.ui.theme.Spacing
 
 /** The official «Описание» limit for a channel; groups get the same. */
 internal const val CHAT_DESCRIPTION_MAX = 400
@@ -122,12 +128,16 @@ internal fun EditChatSheet(
     }
     AppSheet(onDismiss) {
         Column(
-            Modifier.imePadding().verticalScroll(rememberScrollState()).padding(bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            Modifier.imePadding().verticalScroll(rememberScrollState()).padding(bottom = Spacing.l),
+            verticalArrangement = Arrangement.spacedBy(Spacing.m),
         ) {
-            Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(if (chat.isChannel) "Канал" else "Группа", style = MaterialTheme.typography.headlineSmall)
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Column(Modifier.padding(horizontal = Spacing.l), verticalArrangement = Arrangement.spacedBy(Spacing.m)) {
+                Text(
+                    if (chat.isChannel) "Канал" else "Группа",
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(horizontal = Spacing.s),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.m)) {
                     PhotoPicker(avatar, chat.avatarUrl, chat.title, 72.dp, pickAvatar)
                     OutlinedTextField(
                         value = title,
@@ -147,16 +157,21 @@ internal fun EditChatSheet(
                 )
             }
             if (!chat.isChannel) {
-                GROUP_OPTIONS.forEach { (key, label) ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .toggleable(value = options[key] == true, onValueChange = { on -> options = options + (key to on) })
-                            .padding(horizontal = 24.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                        Switch(checked = options[key] == true, onCheckedChange = null)
+                GroupCard(modifier = Modifier.padding(horizontal = Spacing.l)) {
+                    GROUP_OPTIONS.forEach { (key, label) ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .groupRowDivider(Spacing.l)
+                                .toggleable(value = options[key] == true, onValueChange = { on -> options = options + (key to on) })
+                                .heightIn(min = 56.dp)
+                                .padding(horizontal = Spacing.l, vertical = Spacing.s),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                            Spacer(Modifier.width(Spacing.m))
+                            Switch(checked = options[key] == true, onCheckedChange = null)
+                        }
                     }
                 }
             }
@@ -167,7 +182,7 @@ internal fun EditChatSheet(
             Button(
                 onClick = { onSave(opened, title, description, avatar, if (chat.isChannel) emptyMap() else options) },
                 enabled = title.isNotBlank(),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).height(52.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.l).height(52.dp),
             ) { Text("Сохранить") }
         }
     }

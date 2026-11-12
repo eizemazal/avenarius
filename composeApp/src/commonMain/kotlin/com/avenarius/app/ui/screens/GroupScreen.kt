@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -28,10 +27,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.Chat
@@ -46,6 +43,7 @@ import com.avenarius.app.ui.components.clickableRow
 import com.avenarius.app.ui.plural
 import com.avenarius.app.ui.rememberDeviceContacts
 import com.avenarius.app.ui.shareText
+import com.avenarius.app.ui.theme.Spacing
 
 /** A group's or channel's info page: the shared [InfoPage] with the members as a first tab. */
 @Composable
@@ -146,7 +144,7 @@ internal fun GroupScreen(
                 if (state.groupMembersLoading && state.groupMemberList.isEmpty()) {
                     item(
                         key = "members-loading",
-                    ) { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CenteredSpinner() } }
+                    ) { Box(Modifier.fillMaxWidth().padding(Spacing.xl), contentAlignment = Alignment.Center) { CenteredSpinner() } }
                 }
                 items(state.groupMemberList, key = { "u${it.id}" }) { member ->
                     // Managers can act on others (not the owner, not themselves).
@@ -200,31 +198,25 @@ private fun MemberRow(
             Modifier
                 .fillMaxWidth()
                 .clickableRow { if (manageable) menuOpen = true else onOpenProfile() }
-                .padding(horizontal = 20.dp, vertical = 8.dp),
+                .padding(horizontal = Spacing.l, vertical = Spacing.s),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Avatar(member.name, member.avatarUrl, 46.dp, online = online)
-            Spacer(Modifier.width(14.dp))
+            Avatar(member.name, member.avatarUrl, 44.dp, online = online)
+            Spacer(Modifier.width(Spacing.m))
             Text(
                 member.name,
                 style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
             if (role != null) {
+                Spacer(Modifier.width(Spacing.s))
                 Text(
                     role,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.labelMedium,
                     color = cs.primary,
-                    modifier =
-                        Modifier
-                            .clip(
-                                CircleShape,
-                            ).background(cs.primary.copy(alpha = 0.14f))
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    maxLines = 1,
                 )
             }
         }
@@ -282,9 +274,9 @@ private fun AddMembersDialog(
         text = {
             Column {
                 PillTextField(filter, { filter = it }, "Поиск по имени", Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(Spacing.s))
                 if (shownServer.isEmpty() && shownBook.isEmpty()) {
-                    Text("Ничего не найдено", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(8.dp))
+                    Text("Ничего не найдено", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(Spacing.s))
                 } else {
                     LazyColumn(Modifier.weight(1f, fill = false).heightIn(max = 320.dp)) {
                         items(shownServer, key = { "u${it.id}" }) { c ->
