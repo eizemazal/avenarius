@@ -1,6 +1,5 @@
 package com.avenarius.app.ui.screens
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,13 +16,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.CallKind
 import com.avenarius.app.model.CallState
 import com.avenarius.app.ui.AppIcons
+import com.avenarius.app.ui.components.Avatar
+import com.avenarius.app.ui.theme.Spacing
 
 /** Full-screen prompt for an inbound call: caller identity + accept / decline. */
 @Composable
@@ -32,31 +32,21 @@ internal fun IncomingCallOverlay(
     onAccept: () -> Unit,
     onDecline: () -> Unit,
 ) {
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceContainerLowest) {
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(Modifier.fillMaxSize()) {
             Column(
                 Modifier.fillMaxWidth().padding(top = 120.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(Spacing.l),
             ) {
-                Box(
-                    Modifier
-                        .size(128.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        (call.peerName ?: "?").take(1).uppercase(),
-                        color = MaterialTheme.colorScheme.onSurface,
-                        style = MaterialTheme.typography.displaySmall,
-                    )
-                }
+                Avatar(call.peerName ?: "?", call.peerAvatarUrl, 128.dp)
                 Text(
                     call.peerName ?: "Неизвестный",
                     color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.headlineSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = Spacing.xl),
                 )
                 Text(
                     if (call.kind == CallKind.VIDEO) "Входящий видеозвонок" else "Входящий звонок",
@@ -96,7 +86,7 @@ private fun LabeledCircleButton(
     tint: Color,
     onClick: () -> Unit,
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
         Surface(onClick = onClick, shape = CircleShape, color = bg, modifier = Modifier.size(68.dp)) {
             Box(contentAlignment = Alignment.Center) {
                 Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(30.dp))

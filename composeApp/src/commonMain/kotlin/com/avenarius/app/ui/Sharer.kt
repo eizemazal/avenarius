@@ -10,3 +10,6 @@ expect fun shareMediaToOtherApps(
     fileName: String,
     mime: String,
 )
+
+/** Hands plain [text] to the OS share sheet (an invite link, a profile link). */
+expect fun shareText(text: String)

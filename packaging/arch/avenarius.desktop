@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Avenarius
+Name[ru]=Авенариус
+GenericName=Messenger
+GenericName[ru]=Мессенджер
+Comment=Unofficial open-source client for the MAX messenger
+Comment[ru]=Неофициальный открытый клиент для MAX
+Exec=avenarius
+Icon=avenarius
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+StartupWMClass=com-avenarius-app-MainKt

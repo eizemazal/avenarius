@@ -58,15 +58,29 @@ class Prefs(
         get() = storage.getString(KEY_THEME) ?: "system"
         set(value) = storage.putString(KEY_THEME, value)
 
-    /** Locally pinned chat ids (comma-separated); belong to the account, so [clear] drops them. */
-    var pinnedChats: Set<Long>
+    /**
+     * Chats pinned on this device → when (epoch ms; 0 for pins saved before times were kept). The server
+     * accepts a pin but may not keep it, so these hold the pins whatever it reports; [clear] drops them.
+     * Stored as `id:time` pairs, comma-separated; older entries are a bare id.
+     */
+    var pinnedAt: Map<Long, Long>
         get() =
             storage
                 .getString(KEY_PINNED)
                 ?.split(',')
-                ?.mapNotNull { it.toLongOrNull() }
-                ?.toSet() ?: emptySet()
-        set(value) = storage.putString(KEY_PINNED, value.joinToString(",").ifEmpty { null })
+                ?.mapNotNull { entry ->
+                    val parts = entry.split(':')
+                    parts[0].toLongOrNull()?.let { it to (parts.getOrNull(1)?.toLongOrNull() ?: 0L) }
+                }?.toMap() ?: emptyMap()
+        set(value) = storage.putString(KEY_PINNED, value.entries.joinToString(",") { "${it.key}:${it.value}" }.ifEmpty { null })
+
+    /** The chats in [pinnedAt]; setting it keeps the known pin times. */
+    var pinnedChats: Set<Long>
+        get() = pinnedAt.keys
+        set(value) {
+            val at = pinnedAt
+            pinnedAt = value.associateWith { at[it] ?: 0L }
+        }
 
     /** Accent color name (see Accent); like the theme, survives logout. */
     var accent: String?
@@ -82,6 +96,21 @@ class Prefs(
     var fontScale: Float
         get() = scaleOf(KEY_FONT_SCALE, FONT_SCALE_RANGE)
         set(value) = storage.putString(KEY_FONT_SCALE, value.toString())
+
+    /** "Отправка по вводу": Enter sends the message instead of breaking the line. */
+    var sendOnEnter: Boolean
+        get() = storage.getString(KEY_SEND_ON_ENTER) == "1"
+        set(value) = storage.putString(KEY_SEND_ON_ENTER, if (value) "1" else null)
+
+    /** The chat background preset (see WALLPAPERS); per device, like the theme. */
+    var chatWallpaper: Int
+        get() = storage.getString(KEY_WALLPAPER)?.toIntOrNull() ?: 1
+        set(value) = storage.putString(KEY_WALLPAPER, value.takeIf { it != 1 }?.toString())
+
+    /** The emoji a double tap on a message reacts with; null = double tap does nothing. */
+    var quickReaction: String?
+        get() = storage.getString(KEY_QUICK_REACTION)
+        set(value) = storage.putString(KEY_QUICK_REACTION, value)
 
     private fun scaleOf(
         key: String,
@@ -116,6 +145,9 @@ class Prefs(
         private const val KEY_PINNED = "pinned_chats"
         private const val KEY_UI_SCALE = "ui_scale"
         private const val KEY_FONT_SCALE = "font_scale"
+        private const val KEY_SEND_ON_ENTER = "send_on_enter"
+        private const val KEY_QUICK_REACTION = "quick_reaction"
+        private const val KEY_WALLPAPER = "chat_wallpaper"
         private const val KEY_TOKEN = "login_token"
         private const val KEY_USER_ID = "user_id"
         private const val KEY_DEVICE_ID = "device_id"

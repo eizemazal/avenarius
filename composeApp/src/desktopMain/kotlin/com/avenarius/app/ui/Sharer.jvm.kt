@@ -6,3 +6,13 @@ actual fun shareMediaToOtherApps(
     fileName: String,
     mime: String,
 ) = Unit
+
+// No share sheet on desktop: the text goes to the clipboard instead.
+actual fun shareText(text: String) {
+    runCatching {
+        java.awt.Toolkit
+            .getDefaultToolkit()
+            .systemClipboard
+            .setContents(java.awt.datatransfer.StringSelection(text), null)
+    }
+}

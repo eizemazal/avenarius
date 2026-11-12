@@ -1,10 +1,14 @@
 package com.avenarius.app.net
 
 import com.avenarius.app.model.Account
+import com.avenarius.app.model.BotButton
 import com.avenarius.app.model.CallKind
 import com.avenarius.app.model.CallSetup
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.ChatFolder
+import com.avenarius.app.model.ContactCard
 import com.avenarius.app.model.FileAttach
+import com.avenarius.app.model.GeoPoint
 import com.avenarius.app.model.IncomingCall
 import com.avenarius.app.model.LinkPreview
 import com.avenarius.app.model.MediaAttach
@@ -13,10 +17,16 @@ import com.avenarius.app.model.MediaType
 import com.avenarius.app.model.Message
 import com.avenarius.app.model.MessageStatus
 import com.avenarius.app.model.OutAttach
+import com.avenarius.app.model.Poll
+import com.avenarius.app.model.PollAnswer
 import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.ReplyInfo
 import com.avenarius.app.model.SearchResult
 import com.avenarius.app.model.ServiceEvent
+import com.avenarius.app.model.Sticker
+import com.avenarius.app.model.StickerSet
+import com.avenarius.app.model.StickerShelf
+import com.avenarius.app.model.TextSpan
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.model.VoiceAttach
 import com.avenarius.app.model.previewLabel
@@ -42,6 +52,7 @@ import io.ktor.http.content.OutgoingContent
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.readRemaining
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -49,11 +60,14 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.io.readByteArray
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
@@ -82,7 +96,10 @@ data class ReadMark(
     val mark: Long,
 )
 
-/** Account privacy (CONFIG `settings.user`); the "who" fields are [ALL] or [CONTACTS]. */
+/**
+ * Account privacy (CONFIG `settings.user`); the "who" fields are [ALL], [CONTACTS] or
+ * [NOBODY] (the server takes only the first two for [searchByPhone]).
+ */
 data class Privacy(
     val searchByPhone: String = ALL,
     val incomingCall: String = ALL,
@@ -94,6 +111,9 @@ data class Privacy(
     companion object {
         const val ALL = "ALL"
         const val CONTACTS = "CONTACTS"
+
+        /** What the official client writes for "nobody"; the server may answer `NOBODY` too. */
+        const val NOBODY = "_NONE_"
     }
 }
 
@@ -205,6 +225,83 @@ data class SyncResult(
     val presence: Map<Long, Presence> = emptyMap(),
     /** Privacy settings from the login reply's `config.user`; null if absent. */
     val privacy: Privacy? = null,
+    /** The server's reaction picker (`config.server.reactions-menu`); empty if absent. */
+    val reactionsMenu: List<String> = emptyList(),
+    /** How many chats may be pinned, when the server's config says. */
+    val pinLimit: Int? = null,
+    /** Polls may be sent in 1:1 dialogs too (`config.server.polls-in-p2p-chats`). */
+    val pollsInDialogs: Boolean = false,
+)
+
+/** A message found by search, with its chat when the server sent one along. */
+data class MessageHit(
+    val message: Message,
+    val chat: Chat?,
+)
+
+/** A page of public search results; [marker] asks for the next one (null: no more). */
+data class SearchPage(
+    val results: List<SearchResult>,
+    val marker: Long? = null,
+)
+
+/**
+ * Chat folders as the server sent them (FOLDERS_GET, a FOLDERS_* reply or the NOTIF_FOLDERS push):
+ * [folders] may be only the changed ones; [order], when present, is the full order.
+ */
+data class FoldersUpdate(
+    val folders: List<ChatFolder>,
+    val order: List<String>? = null,
+)
+
+/** These folders with [update]'s upserted, then put in (and cut down to) its order when it has one. */
+fun List<ChatFolder>.applying(update: FoldersUpdate): List<ChatFolder> {
+    val byId = associateBy { it.id } + update.folders.associateBy { it.id }
+    return update.order?.mapNotNull { byId[it] } ?: byId.values.toList()
+}
+
+/**
+ * The server's full folder order after [update]: its order when it sends one (system folders it lists by id
+ * alone included), else this one with any new folder at the end.
+ */
+fun List<String>.applyingOrder(update: FoldersUpdate): List<String> =
+    update.order ?: (this + update.folders.map { it.id }.filterNot { it in this })
+
+/** This order with [a] and [b] trading places; every other id, system ones included, stays where it was. */
+fun List<String>.swapping(
+    a: String,
+    b: String,
+): List<String> =
+    (this + listOf(a, b).filterNot { it in this }).map {
+        when (it) {
+            a -> b
+            b -> a
+            else -> it
+        }
+    }
+
+/** A page of the black list: the users we could read, and how many entries the server sent ([received]). */
+data class BlockedPage(
+    val users: List<UserInfo>,
+    val received: Int,
+) {
+    companion object {
+        /** Entries per page, as the official client asks. */
+        const val SIZE = 40
+    }
+}
+
+/** One signed-in device from Settings → Устройства (SESSIONS_INFO). */
+data class SessionInfo(
+    /** Client / platform label, e.g. "MAX Android". */
+    val client: String,
+    /** Device and OS line. */
+    val info: String,
+    /** Where it signed in from (city, country, maybe the IP). */
+    val location: String,
+    /** Last activity, epoch ms (0 if unknown). */
+    val time: Long,
+    val current: Boolean,
 )
 
 /**
@@ -229,6 +326,12 @@ interface MaxApi {
 
     /** Tells the server we are typing in [chatId] (MSG_TYPING, opcode 65); best-effort. */
     suspend fun sendTyping(chatId: Long) = Unit
+
+    /** The devices signed in to this account; empty where the mode has none (demo). */
+    suspend fun getSessions(): List<SessionInfo> = emptyList()
+
+    /** Signs out every other device; returns the new login token the server issues for this one. */
+    suspend fun closeOtherSessions(): String? = null
 
     // --- Login password (2FA) management, mirroring the official client's Settings →
     // Безопасность → Пароль для входа. Every step is bound to a server-side "track"
@@ -354,6 +457,94 @@ interface MaxApi {
     /** Saves privacy settings; returns what the server now holds. */
     suspend fun updatePrivacy(privacy: Privacy): Privacy = privacy
 
+    /**
+     * Pins [messageId] in [chatId] (null unpins) and returns the chat as the server now
+     * has it, when it says. The default does nothing.
+     */
+    suspend fun pinMessage(
+        chatId: Long,
+        messageId: String?,
+        notify: Boolean = false,
+    ): Chat? = null
+
+    /**
+     * Messages of [chatId] carrying attaches of [types] (PHOTO, VIDEO, FILE, SHARE, AUDIO),
+     * up to [count] older than message [anchor], newest included when [withAnchor]. Backs
+     * the info pages' Медиа / Файлы / Ссылки / Голосовые tabs. The default has none.
+     */
+    suspend fun fetchChatMedia(
+        chatId: Long,
+        types: List<String>,
+        anchor: String,
+        count: Int,
+        withAnchor: Boolean,
+    ): List<Message> = emptyList()
+
+    /** Blocks [userId] (they can't write, call or add us to chats) or unblocks them. The default does nothing. */
+    suspend fun setBlocked(
+        userId: Long,
+        blocked: Boolean,
+    ) = Unit
+
+    /** Empties [chatId]'s history for us up to [lastEventTime] (the chat itself stays). The default does nothing. */
+    suspend fun clearHistory(
+        chatId: Long,
+        lastEventTime: Long,
+    ) = Unit
+
+    /**
+     * Marks [chatId] unread (the chat list's «Отметить непрочитанным»). [mark] is a time in
+     * ms; what the server wants there was never measured. The default does nothing.
+     */
+    suspend fun markUnread(
+        chatId: Long,
+        mark: Long,
+    ) = Unit
+
+    /** Presses a bot's CALLBACK [button]; the bot answers with a message or a toast of its own. The default does nothing. */
+    suspend fun pressBotButton(button: BotButton) = Unit
+
+    /** Who reacted to [messageId] in [chatId], as (userId, emoji) pairs; empty where the mode has none. */
+    suspend fun getReactionUsers(
+        chatId: Long,
+        messageId: String,
+    ): List<Pair<Long, String>> = emptyList()
+
+    /** Votes in [poll] of message [messageId] for [answerIds] (empty retracts); returns the poll as the server now counts it. */
+    suspend fun votePoll(
+        chatId: Long,
+        messageId: String,
+        poll: Poll,
+        answerIds: List<Int>,
+    ): Poll? = null
+
+    /** A page of the black list from offset [from]: who we blocked, and how many entries the server sent. */
+    suspend fun getBlockedPage(from: Int): BlockedPage = BlockedPage(emptyList(), 0)
+
+    /** The user's sticker sets and recent stickers; empty where the mode has none. */
+    suspend fun getStickerShelf(): StickerShelf = StickerShelf(emptyList(), emptyList())
+
+    /** Stickers by id (their still images). */
+    suspend fun getStickers(ids: List<Long>): List<Sticker> = emptyList()
+
+    /** Folder changes pushed by the server (NOTIF_FOLDERS). Defaults to silent for fakes. */
+    val folderUpdates: SharedFlow<FoldersUpdate> get() = MutableSharedFlow()
+
+    /** The account's chat folders in their order; null where the mode has none. */
+    suspend fun getFolders(): FoldersUpdate? = null
+
+    /** Creates [folder] (under an id the server hasn't seen) or replaces it: the whole folder is sent. */
+    suspend fun saveFolder(folder: ChatFolder) = Unit
+
+    /** Puts the folders in [order]: every id the server listed (system ones too), «Все» first. */
+    suspend fun reorderFolders(order: List<String>) = Unit
+
+    /** Deletes folder [id]; its chats stay. */
+    suspend fun deleteFolder(id: String) = Unit
+
+    /** Pins chats (favIndex = when, epoch ms) or unpins them (0), all in one CONFIG write. The default does nothing. */
+    suspend fun setFavIndex(indexes: Map<Long, Long>) = Unit
+
     /** Mutes or unmutes notifications for [chatId] (server `dontDisturbUntil`). */
     suspend fun setChatMuted(
         chatId: Long,
@@ -382,12 +573,14 @@ interface MaxApi {
         count: Int = 50,
     ): List<Message>
 
+    /** Sends [text] (formatted by [spans]) with [attaches] to [chatId], as a reply to [replyToId] when set. */
     suspend fun sendMessage(
         chatId: Long,
         text: String,
         cid: Long,
         replyToId: String? = null,
         attaches: List<OutAttach> = emptyList(),
+        spans: List<TextSpan> = emptyList(),
     ): Message?
 
     /**
@@ -411,11 +604,12 @@ interface MaxApi {
         cid: Long,
     ): Message?
 
-    /** Edits our own message [messageId] in [chatId], replacing its text. */
+    /** Edits our own message [messageId] in [chatId], replacing its text and formatting [spans] (null leaves `elements` out). */
     suspend fun editMessage(
         chatId: Long,
         messageId: String,
         text: String,
+        spans: List<TextSpan>? = emptyList(),
     )
 
     /** Deletes [messageIds] in [chatId]. [forAll] = delete for everyone (only our own). */
@@ -515,6 +709,37 @@ interface MaxApi {
     suspend fun leaveGroup(chatId: Long)
 
     /**
+     * Changes [chatId]'s name, description, photo and/or option flags (only what is non-null is
+     * sent); returns the chat as the server now has it, when it says. The default does nothing.
+     */
+    suspend fun editChat(
+        chatId: Long,
+        title: String? = null,
+        description: String? = null,
+        photoToken: String? = null,
+        options: Map<String, Boolean> = emptyMap(),
+    ): Chat? = null
+
+    /** Our own name for contact [userId]; returns the contact as the server now has it, when it says. */
+    suspend fun renameContact(
+        userId: Long,
+        firstName: String,
+        lastName: String?,
+    ): UserInfo? = null
+
+    /** Takes [userId] off our contacts (the dialog stays). */
+    suspend fun removeContact(userId: Long) = Unit
+
+    /** Replaces [chatId]'s private invite link with a new one (the old stops working); returns the chat. */
+    suspend fun revokeChatLink(chatId: Long): Chat? = null
+
+    /** Creates a channel named [title] (optionally with a [photoToken]); returns its id when the server says. */
+    suspend fun createChannel(
+        title: String,
+        photoToken: String?,
+    ): Long? = null
+
+    /**
      * Joins the chat or channel behind an invite [link] and returns it, or null if
      * the server accepted the request without describing the chat.
      */
@@ -576,7 +801,20 @@ interface MaxApi {
 
     suspend fun fetchUser(userId: Long): UserInfo?
 
-    suspend fun searchChats(query: String): List<SearchResult>
+    /** Several users in one go (CONTACT_INFO takes a list); the default asks one by one. */
+    suspend fun fetchUsers(ids: List<Long>): List<UserInfo> = ids.mapNotNull { fetchUser(it) }
+
+    /** Public chats/channels named like [query]; [marker] (from the previous page) for the next page. */
+    suspend fun searchChats(
+        query: String,
+        marker: Long? = null,
+    ): SearchPage
+
+    /** Messages matching [query] in [chatId] (MSG_SEARCH), or across all chats when it is null (CHAT_SEARCH). */
+    suspend fun searchMessages(
+        chatId: Long?,
+        query: String,
+    ): List<MessageHit> = emptyList()
 
     suspend fun fetchContactName(userId: Long): String?
 
@@ -730,12 +968,17 @@ class MaxClient : MaxApi {
 
         private const val MAX_BUFFERED_UPLOAD_BYTES = 64 * 1024 * 1024
 
+        /** Sticker ids asked of ASSETS_GET_BY_IDS at once. */
+        private const val STICKERS_PER_REQUEST = 100
+
         // Upload budgets: total per request, and the allowed gap between packets.
         private const val UPLOAD_REQUEST_TIMEOUT_MS = 10 * 60 * 1000L
         private const val UPLOAD_SOCKET_TIMEOUT_MS = 2 * 60 * 1000L
 
         // Opcodes (verified against PyMax protocol enums and rumax).
         private const val OP_HANDSHAKE = 6
+        private const val OP_SESSIONS_INFO = 96 // SESSIONS_INFO: the account's signed-in devices
+        private const val OP_SESSIONS_CLOSE = 97 // SESSIONS_CLOSE: end every other session; answers a new token
         private const val OP_LOG = 5 // LOG: batched analytics events (ru.ok.tamtam.api.d.LOG)
         private const val OP_PROFILE = 16 // PROFILE: update own profile (name/bio/avatar)
         private const val OP_START_AUTH = 17
@@ -746,6 +989,7 @@ class MaxClient : MaxApi {
         private const val OP_CONTACT_INFO = 32
         private const val OP_CONTACT_UPDATE = 34
         private const val OP_CONTACT_PRESENCE = 35
+        private const val OP_CONTACT_LIST = 36 // CONTACT_LIST: contacts by status (the black list)
         private const val OP_CONTACT_BY_PHONE = 46
         private const val OP_FETCH_HISTORY = 49
         private const val OP_PUBLIC_SEARCH = 60
@@ -756,6 +1000,7 @@ class MaxClient : MaxApi {
         private const val OP_FILE_UPLOAD = 87 // FILE_UPLOAD: request a file upload URL
         private const val OP_FILE_DOWNLOAD = 88 // FILE_DOWNLOAD: get a file's download URL
         private const val OP_MARK_READ = 50
+        private const val OP_MSG_SEND_CALLBACK = 118 // MSG_SEND_CALLBACK: a bot's callback button pressed
         private const val OP_SEND_MESSAGE = 64
         private const val OP_CHECK_PASSWORD = 115
 
@@ -778,6 +1023,14 @@ class MaxClient : MaxApi {
         private const val CAP_REMOVE_2FA = 5
 
         private const val OP_AUTH_QR_APPROVE = 290 // AUTH_QR_APPROVE: confirm a web/desktop login QR
+        private const val OP_SEND_VOTE = 304 // SEND_VOTE: vote in a poll
+        private const val OP_ASSETS_UPDATE = 27 // ASSETS_UPDATE: the user's sticker sections and recents
+        private const val OP_ASSETS_GET_BY_IDS = 28 // ASSETS_GET_BY_IDS: sticker sets / stickers by id
+        private const val OP_FOLDERS_GET = 272 // FOLDERS_GET: the account's chat folders
+        private const val OP_FOLDERS_UPDATE = 274 // FOLDERS_UPDATE: create or replace a folder (sent whole)
+        private const val OP_FOLDERS_REORDER = 275 // FOLDERS_REORDER: every folder id in the new order
+        private const val OP_FOLDERS_DELETE = 276 // FOLDERS_DELETE
+        const val OP_NOTIF_FOLDERS = 277 // NOTIF_FOLDERS push: {foldersOrder, folderSync, folder}
         const val OP_NEW_MESSAGE = 128
         const val OP_MARK_UPDATE = 130 // server push: read/delivery marks changed
         const val OP_NOTIF_TYPING = 129 // server push: someone is typing in a chat
@@ -792,11 +1045,17 @@ class MaxClient : MaxApi {
         // recovered by decompiling MAX.apk).
         private const val OP_REACTION = 178 // MSG_REACTION: add/set a reaction
         private const val OP_CANCEL_REACTION = 179 // MSG_CANCEL_REACTION: remove our reaction
+        private const val OP_DETAILED_REACTIONS = 181 // MSG_GET_DETAILED_REACTIONS: who reacted with what
         private const val OP_DELETE_CHAT = 52 // CHAT_DELETE
         private const val OP_CHAT_JOIN = 57 // CHAT_JOIN: join a chat/channel by its invite link
         private const val OP_LEAVE_CHAT = 58 // CHAT_LEAVE
         private const val OP_CHAT_MEMBERS = 59 // CHAT_MEMBERS: paginated member list
         private const val OP_CHAT_INFO = 48 // CHAT_INFO: one chat's full object (incl. read marks)
+        private const val OP_CHAT_CLEAR = 54 // CHAT_CLEAR: empty a chat's history, keep the chat
+        private const val OP_CHAT_UPDATE = 55 // CHAT_UPDATE: chat settings, incl. the pinned message
+        private const val OP_CHAT_MEDIA = 51 // CHAT_MEDIA: a chat's messages with given attach types
+        private const val OP_CHAT_SEARCH = 68 // CHAT_SEARCH: messages across all chats
+        private const val OP_MSG_SEARCH = 73 // MSG_SEARCH: messages in one chat
         private const val OP_CHAT_MEMBERS_UPDATE = 77 // CHAT_MEMBERS_UPDATE: add/remove members
         private const val OP_MSG_DELETE = 66 // MSG_DELETE
         private const val OP_MSG_EDIT = 67 // MSG_EDIT
@@ -810,6 +1069,10 @@ class MaxClient : MaxApi {
 
     private val transport = MobileTransport()
     private val scope = CoroutineScope(SupervisorJob() + CoroutineExceptionHandler { _, _ -> })
+
+    // Each chat's `config.chats.<id>` as last known (the sync reply, then our own writes); see writeChatSettings.
+    private val knownChatSettings = HashMap<Long, JsonObject>()
+    private val chatSettingsLock = Mutex()
 
     // Plain HTTP client for media upload/download (separate from the raw-socket
     // protocol transport). Uses the platform Ktor engine (OkHttp on Android).
@@ -863,6 +1126,10 @@ class MaxClient : MaxApi {
     /** Stream of message deletions by the other party (server push, opcode 142). */
     private val _deletions = MutableSharedFlow<MessageDeletion>(extraBufferCapacity = 64)
     override val deletions: SharedFlow<MessageDeletion> = _deletions
+
+    /** Folder changes (server push, opcode 277). */
+    private val _folderUpdates = MutableSharedFlow<FoldersUpdate>(extraBufferCapacity = 16)
+    override val folderUpdates: SharedFlow<FoldersUpdate> = _folderUpdates
 
     /** Stream of inbound calls ringing (server push, opcode 137). */
     private val _incomingCalls = MutableSharedFlow<IncomingCall>(extraBufferCapacity = 8)
@@ -952,6 +1219,7 @@ class MaxClient : MaxApi {
                 if (chatId != null && ids.isNotEmpty()) _deletions.emit(MessageDeletion(chatId, ids))
             }
             OP_NOTIF_CALL_START -> parseIncomingCall(payload)?.let { _incomingCalls.emit(it) }
+            OP_NOTIF_FOLDERS -> _folderUpdates.emit(parseFolders(payload))
         }
     }
 
@@ -1000,7 +1268,7 @@ class MaxClient : MaxApi {
     }
 
     /** Parses one chat object (from sync's `chats` array or a NOTIF_CHAT push). */
-    private fun parseChat(
+    internal fun parseChat(
         c: JsonObject,
         names: Map<Long, String>,
     ): Chat? {
@@ -1010,9 +1278,9 @@ class MaxClient : MaxApi {
         // Parsed rather than read straight off `text`, so a photo/file/voice message
         // gets a label instead of leaving the row blank (or, worse, showing whatever
         // text came before it).
+        val lastMessage = (c["lastMessage"] as? JsonObject)?.let { parseMessage(it, id) }
         val lastText =
-            (c["lastMessage"] as? JsonObject)
-                ?.let { parseMessage(it, id) }
+            lastMessage
                 ?.previewLabel()
                 ?.ifBlank { null }
                 ?.let { localize(it) }
@@ -1042,14 +1310,18 @@ class MaxClient : MaxApi {
                 else -> "Чат $id"
             }
         val isChannel = type == "CHANNEL"
-        val ownerId = c["ownerId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L
+        // The server names it `owner` (seen live); `ownerId` is kept for older replies.
+        val ownerId = (c["owner"] ?: c["ownerId"])?.jsonPrimitive?.longOrNullSafe() ?: 0L
         // adminParticipants = {adminUserId: adminInfo}; we only need the ids.
+        // Admins come as an `admins` id array (seen live) or, in older replies, as the
+        // keys of an `adminParticipants` map.
         val adminIds =
-            c["adminParticipants"]
-                ?.jsonObject
-                ?.keys
-                ?.mapNotNull { it.toLongOrNull() }
-                ?.toSet() ?: emptySet()
+            (c["admins"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.longOrNullSafe() }?.toSet()
+                ?: c["adminParticipants"]
+                    ?.jsonObject
+                    ?.keys
+                    ?.mapNotNull { it.toLongOrNull() }
+                    ?.toSet() ?: emptySet()
         val memberIds =
             c["participants"]
                 ?.jsonObject
@@ -1063,15 +1335,16 @@ class MaxClient : MaxApi {
         val options =
             when (val o = c["options"]) {
                 is JsonArray -> o.mapNotNull { it.jsonPrimitive.contentOrNullSafe() }.toSet()
-                is JsonObject -> o.keys
+                // Every known flag is listed with a boolean; only the true ones are set.
+                is JsonObject -> o.filterValues { (it as? JsonPrimitive)?.content == "true" }.keys
                 else -> emptySet()
             }
         val amAdmin = myId == ownerId || myId in adminIds
         // In a CHANNEL only the owner/admins post; regular groups (CHAT) allow any
-        // member; dialogs are always writable.
+        // member; dialogs are writable except a read-only service chat («Безопасность»).
         val canWrite =
             when {
-                isDialog -> true
+                isDialog -> "SERVICE_CHAT" !in options
                 isChannel -> amAdmin
                 else -> true
             }
@@ -1105,6 +1378,14 @@ class MaxClient : MaxApi {
             // Mute state isn't on the chat object; it comes from the sync's config.chats
             // map and is applied in sync(). Defaults to false here.
             muted = false,
+            description = c["description"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null },
+            official = options.contains("OFFICIAL"),
+            isServiceChat = options.contains("SERVICE_CHAT") || c["hasBots"]?.jsonPrimitive?.asBoolean() == true,
+            allCanPin = options.contains("ALL_CAN_PIN_MESSAGE"),
+            options = options,
+            pinnedMessage = (c["pinnedMessage"] as? JsonObject)?.let { parseMessage(it, id) },
+            lastSenderId = lastMessage?.senderId ?: 0L,
+            lastMessageTime = lastMessage?.time ?: 0L,
         )
     }
 
@@ -1216,6 +1497,37 @@ class MaxClient : MaxApi {
         }
     }
 
+    override suspend fun getSessions(): List<SessionInfo> {
+        val payload = transport.request(OP_SESSIONS_INFO, buildJsonObject { })
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось получить список устройств")) }
+        return (payload["sessions"] as? JsonArray).orEmptyList().mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            SessionInfo(
+                client = o["client"]?.jsonPrimitive?.contentOrNullSafe() ?: "",
+                info = o["info"]?.jsonPrimitive?.contentOrNullSafe() ?: "",
+                location = o["location"]?.jsonPrimitive?.contentOrNullSafe() ?: "",
+                time = o["time"]?.jsonPrimitive?.longOrNullSafe() ?: 0L,
+                current = o["current"]?.jsonPrimitive?.contentOrNullSafe() == "true",
+            )
+        }
+    }
+
+    override suspend fun closeOtherSessions(): String? {
+        // SESSIONS_CLOSE (op 97) {} -> {token}: our session goes on under that new token.
+        if (!transport.isConnected) error("Нет соединения с сервером")
+        // Once sent, the server may have acted and revoked our token: a lost reply is "no token", not a failure.
+        val payload =
+            try {
+                transport.request(OP_SESSIONS_CLOSE, buildJsonObject { })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                return null
+            }
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось завершить сеансы")) }
+        return (payload["token"] as? JsonPrimitive)?.contentOrNullSafe()?.ifBlank { null }
+    }
+
     override suspend fun sendTyping(chatId: Long) {
         // Fire-and-forget like the official client; a reply, if any, is just ignored.
         runCatching { transport.notify(OP_MSG_TYPING, buildJsonObject { put("chatId", chatId) }) }
@@ -1242,23 +1554,97 @@ class MaxClient : MaxApi {
         return (payload["user"] as? JsonObject)?.toPrivacy() ?: privacy
     }
 
+    override suspend fun fetchChatMedia(
+        chatId: Long,
+        types: List<String>,
+        anchor: String,
+        count: Int,
+        withAnchor: Boolean,
+    ): List<Message> {
+        // CHAT_MEDIA (op 51): {chatId, messageId, attachTypes, forward, backward}, paged from a
+        // message like history (official dc2 o=7; web.max.ru per max-cli). The official reply
+        // parser (kf2) reads {messages: [message…], total, pos, forward, backward}.
+        val mid = anchor.toLongOrNull() ?: return emptyList()
+        val payload =
+            transport.request(
+                OP_CHAT_MEDIA,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("messageId", mid)
+                    putJsonArray("attachTypes") { types.forEach { add(it) } }
+                    // One step forward takes the anchor itself in, should backward leave it out.
+                    put("forward", if (withAnchor) 1 else 0)
+                    put("backward", count)
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось загрузить вложения")) }
+        return (payload["messages"] as? JsonArray)
+            .orEmptyList()
+            .mapNotNull { el -> (el as? JsonObject)?.let { parseMessage(it, chatId) } }
+    }
+
+    override suspend fun pinMessage(
+        chatId: Long,
+        messageId: String?,
+        notify: Boolean,
+    ): Chat? {
+        // CHAT_UPDATE (op 55): {chatId, pinMessageId, notifyPin}; 0 unpins, and the official
+        // client sends notifyPin only when true. Answers {chat} with its pinnedMessage.
+        val payload =
+            transport.request(
+                OP_CHAT_UPDATE,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("pinMessageId", messageId?.toLongOrNull() ?: 0L)
+                    if (messageId != null && notify) put("notifyPin", true)
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage(if (messageId != null) "Не удалось закрепить" else "Не удалось открепить")) }
+        return (payload["chat"] as? JsonObject)?.let { parseChat(it, emptyMap()) }
+    }
+
+    override suspend fun setFavIndex(indexes: Map<Long, Long>) =
+        // favIndex = when the chat was pinned (epoch ms), as the official client's addToFavorites; 0 unpins
+        // (removeFromFavorites).
+        writeChatSettings(
+            "favIndex",
+            indexes,
+            if (indexes.values.all { it == 0L }) "Не удалось открепить чат" else "Не удалось закрепить чат",
+        )
+
     override suspend fun setChatMuted(
         chatId: Long,
         muted: Boolean,
-    ) {
-        // dontDisturbUntil: -1 = muted forever, 0 = notifications on.
-        transport.request(
-            OP_CHAT_SETTINGS,
-            buildJsonObject {
-                putJsonObject("settings") {
-                    putJsonObject("chats") {
-                        putJsonObject(chatId.toString()) {
-                            put("dontDisturbUntil", if (muted) -1 else 0)
-                        }
-                    }
-                }
-            },
+    ) = // dontDisturbUntil: -1 = muted forever, 0 = notifications on.
+        writeChatSettings(
+            "dontDisturbUntil",
+            mapOf(chatId to if (muted) -1L else 0L),
+            if (muted) "Не удалось отключить уведомления" else "Не удалось включить уведомления",
         )
+
+    /**
+     * CONFIG (op 22) `settings.chats`: sets [key] for each chat in [values]. Every chat goes as a whole entry
+     * built from what we know of it ([chatSettingsEntry]), the way the official client writes, so a mute
+     * never drops a pin and a pin never drops a mute. One write at a time, each built on the last one kept.
+     */
+    private suspend fun writeChatSettings(
+        key: String,
+        values: Map<Long, Long>,
+        failure: String,
+    ) = chatSettingsLock.withLock {
+        val entries = values.mapValues { (id, value) -> chatSettingsEntry(knownChatSettings[id], key, value) }
+        val payload =
+            transport.request(
+                OP_CHAT_SETTINGS,
+                buildJsonObject {
+                    putJsonObject("settings") { put("chats", JsonObject(entries.mapKeys { it.key.toString() })) }
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage(failure)) }
+        val echoed = payload["chats"] as? JsonObject
+        entries.forEach { (id, sent) ->
+            knownChatSettings[id] = JsonObject(sent + ((echoed?.get(id.toString()) as? JsonObject).orEmpty()))
+        }
     }
 
     /**
@@ -1670,6 +2056,252 @@ class MaxClient : MaxApi {
         return FoundUser(id, contact.displayName() ?: phone)
     }
 
+    override suspend fun pressBotButton(button: BotButton) {
+        // MSG_SEND_CALLBACK (op 118) {callbackId, type, payload, timestamp}: no chat or message id.
+        val callbackId = button.callbackId ?: return
+        val payload =
+            transport.request(
+                OP_MSG_SEND_CALLBACK,
+                buildJsonObject {
+                    put("callbackId", callbackId)
+                    put("type", "CALLBACK")
+                    button.payload?.let { put("payload", it) }
+                    put("timestamp", nowMillis())
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Бот не ответил на кнопку")) }
+    }
+
+    override suspend fun votePoll(
+        chatId: Long,
+        messageId: String,
+        poll: Poll,
+        answerIds: List<Int>,
+    ): Poll? {
+        // SEND_VOTE (op 304) {chatId, messageId, pollId, answersIds}; ids as plain small ints
+        // (64-bit ones are refused), an empty list retracts. Answers {state}.
+        val mid = messageId.toLongOrNull() ?: return null
+        val payload =
+            transport.request(
+                OP_SEND_VOTE,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("messageId", mid)
+                    put("pollId", poll.pollId)
+                    putJsonArray("answersIds") { answerIds.forEach { add(it) } }
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось проголосовать")) }
+        return (payload["state"] as? JsonObject)?.let { poll.withState(it) }
+    }
+
+    override suspend fun getReactionUsers(
+        chatId: Long,
+        messageId: String,
+    ): List<Pair<Long, String>> {
+        // MSG_GET_DETAILED_REACTIONS (op 181) {chatId, messageId, count} -> {reactions: [{userId, reaction}], …}.
+        val mid = messageId.toLongOrNull() ?: return emptyList()
+        val payload =
+            transport.request(
+                OP_DETAILED_REACTIONS,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("messageId", mid)
+                    put("count", 100)
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось загрузить реакции")) }
+        return (payload["reactions"] as? JsonArray).orEmptyList().mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val user = o["userId"]?.jsonPrimitive?.longOrNullSafe() ?: return@mapNotNull null
+            emojiOf(o["reaction"])?.let { user to it }
+        }
+    }
+
+    override suspend fun markUnread(
+        chatId: Long,
+        mark: Long,
+    ) {
+        // CHAT_MARK (op 50) {type: SET_AS_UNREAD, chatId, mark}, no messageId: the frame the web
+        // client was captured sending (vkmax). `mark` there was a recent ms time; ours is the
+        // chat's last message time (unverified guess: the server may want its read mark).
+        val payload =
+            transport.request(
+                OP_MARK_READ,
+                buildJsonObject {
+                    put("type", "SET_AS_UNREAD")
+                    put("chatId", chatId)
+                    put("mark", mark)
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось отметить непрочитанным")) }
+    }
+
+    override suspend fun clearHistory(
+        chatId: Long,
+        lastEventTime: Long,
+    ) {
+        // CHAT_CLEAR (op 54) {chatId, lastEventTime, forAll}; answers {}. Only for us: what
+        // forAll does to the others was never measured, so it is not offered.
+        val payload =
+            transport.request(
+                OP_CHAT_CLEAR,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    put("lastEventTime", lastEventTime)
+                    put("forAll", false)
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось стереть переписку")) }
+    }
+
+    override suspend fun setBlocked(
+        userId: Long,
+        blocked: Boolean,
+    ) {
+        // CONTACT_UPDATE (op 34) {contactId, action: BLOCK | UNBLOCK}; answers {}. Works for non-contacts too.
+        val payload =
+            transport.request(
+                OP_CONTACT_UPDATE,
+                buildJsonObject {
+                    put("contactId", userId)
+                    put("action", if (blocked) "BLOCK" else "UNBLOCK")
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage(if (blocked) "Не удалось заблокировать" else "Не удалось разблокировать")) }
+    }
+
+    override suspend fun getStickerShelf(): StickerShelf {
+        // ASSETS_UPDATE (op 27) {type: STICKER, sync: 0} -> {sync, sections: [{id, type, title, stickerSets, stickers}], …},
+        // then the sets themselves by id (op 28): two requests, once a session.
+        val payload =
+            transport.request(
+                OP_ASSETS_UPDATE,
+                buildJsonObject {
+                    put("type", "STICKER")
+                    put("sync", 0)
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось загрузить стикеры")) }
+        val (setIds, recent) = parseStickerSections(payload)
+        if (setIds.isEmpty()) return StickerShelf(emptyList(), recent)
+        val sets =
+            transport.request(
+                OP_ASSETS_GET_BY_IDS,
+                buildJsonObject {
+                    put("type", "STICKER_SET")
+                    putJsonArray("ids") { setIds.forEach { add(it) } }
+                },
+            )
+        sets.errorCode()?.let { error(sets.serverMessage("Не удалось загрузить стикеры")) }
+        val byId = parseStickerSets(sets).associateBy { it.id }
+        return StickerShelf(setIds.mapNotNull { byId[it] }, recent)
+    }
+
+    override suspend fun getStickers(ids: List<Long>): List<Sticker> =
+        // ASSETS_GET_BY_IDS (op 28) {type: STICKER, ids} -> {stickers: [{id, url, lottieUrl, width, height, …}]}.
+        ids.chunked(STICKERS_PER_REQUEST).flatMap { chunk ->
+            val payload =
+                transport.request(
+                    OP_ASSETS_GET_BY_IDS,
+                    buildJsonObject {
+                        put("type", "STICKER")
+                        putJsonArray("ids") { chunk.forEach { add(it) } }
+                    },
+                )
+            payload.errorCode()?.let { error(payload.serverMessage("Не удалось загрузить стикеры")) }
+            parseStickers(payload)
+        }
+
+    override suspend fun getFolders(): FoldersUpdate {
+        // FOLDERS_GET (op 272) {folderSync: 0} = everything -> {foldersOrder, folders, folderSync, allFilterExcludeFolders}.
+        val payload = transport.request(OP_FOLDERS_GET, buildJsonObject { put("folderSync", 0) })
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось загрузить папки")) }
+        return parseFolders(payload)
+    }
+
+    override suspend fun saveFolder(folder: ChatFolder) {
+        // FOLDERS_UPDATE (op 274) with the whole folder, in the official client's key order: a field
+        // left out is emptied. Answers {folder, folderSync, foldersOrder}; NOTIF_FOLDERS follows.
+        val payload =
+            transport.request(
+                OP_FOLDERS_UPDATE,
+                buildJsonObject {
+                    put("id", folder.id)
+                    put("title", folder.title)
+                    putJsonArray("include") { folder.include.forEach { add(it) } }
+                    putJsonArray("favorites") { folder.favorites.forEach { add(it) } }
+                    put("filters", folder.filters)
+                    put("options", folder.options)
+                },
+            )
+        if (payload.errorCode() == "folder.validation.title.too-long") error("Слишком длинное название папки")
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось сохранить папку")) }
+    }
+
+    override suspend fun reorderFolders(order: List<String>) {
+        // FOLDERS_REORDER (op 275) {foldersOrder}: every id; `all.chat.folder` must stay first.
+        val payload = transport.request(OP_FOLDERS_REORDER, buildJsonObject { putJsonArray("foldersOrder") { order.forEach { add(it) } } })
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось изменить порядок папок")) }
+    }
+
+    override suspend fun deleteFolder(id: String) {
+        // FOLDERS_DELETE (op 276) {folderIds}: the folder goes, its chats stay.
+        val payload = transport.request(OP_FOLDERS_DELETE, buildJsonObject { putJsonArray("folderIds") { add(id) } })
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось удалить папку")) }
+    }
+
+    override suspend fun getBlockedPage(from: Int): BlockedPage {
+        // CONTACT_LIST (op 36) {status: "BLOCKED", from (only when > 0), count: 40} -> {contacts}.
+        // `status` is required: without it the server drops the connection.
+        val payload =
+            transport.request(
+                OP_CONTACT_LIST,
+                buildJsonObject {
+                    put("status", "BLOCKED")
+                    if (from > 0) put("from", from)
+                    put("count", BlockedPage.SIZE)
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось загрузить чёрный список")) }
+        val raw = (payload["contacts"] as? JsonArray).orEmptyList()
+        return BlockedPage(raw.mapNotNull { (it as? JsonObject)?.let(::parseUser)?.copy(blocked = true) }, raw.size)
+    }
+
+    override suspend fun renameContact(
+        userId: Long,
+        firstName: String,
+        lastName: String?,
+    ): UserInfo? {
+        // CONTACT_UPDATE (op 34) {contactId, action: UPDATE, firstName, lastName}. `lastName` always goes,
+        // null when empty: without it the server answers with the old name and changes nothing (max-cli).
+        val payload =
+            transport.request(
+                OP_CONTACT_UPDATE,
+                buildJsonObject {
+                    put("contactId", userId)
+                    put("action", "UPDATE")
+                    put("firstName", firstName)
+                    put("lastName", lastName)
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось изменить контакт")) }
+        return (payload["contact"] as? JsonObject)?.let(::parseUser)
+    }
+
+    override suspend fun removeContact(userId: Long) {
+        // CONTACT_UPDATE (op 34) {contactId, action: REMOVE}.
+        val payload =
+            transport.request(
+                OP_CONTACT_UPDATE,
+                buildJsonObject {
+                    put("contactId", userId)
+                    put("action", "REMOVE")
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось удалить контакт")) }
+    }
+
     /** Adds [userId] to the contact list under [firstName]. */
     override suspend fun addContact(
         userId: Long,
@@ -1831,15 +2463,15 @@ class MaxClient : MaxApi {
 
         // Per-chat notification settings live under config.chats.<id>.dontDisturbUntil
         // (0 = notifications on; -1 or a future epoch-ms = muted).
-        val mutedChatIds =
-            (payload["config"] as? JsonObject)
-                ?.get("chats")
-                ?.jsonObject
-                ?.entries
-                ?.mapNotNull { (id, v) ->
-                    val dnd = (v as? JsonObject)?.get("dontDisturbUntil")?.jsonPrimitive?.longOrNullSafe() ?: 0L
-                    if (dnd != 0L) id.toLongOrNull() else null
-                }?.toSet() ?: emptySet()
+        // …and favIndex = when the chat was pinned (epoch ms; 0 or absent = not pinned).
+        val chatSettings = ((payload["config"] as? JsonObject)?.get("chats") as? JsonObject).orEmpty()
+        knownChatSettings.clear()
+        chatSettings.forEach { (id, entry) -> id.toLongOrNull()?.let { k -> (entry as? JsonObject)?.let { knownChatSettings[k] = it } } }
+
+        fun chatSetting(
+            id: Long,
+            key: String,
+        ) = ((chatSettings[id.toString()] as? JsonObject)?.get(key) as? JsonPrimitive)?.longOrNullSafe() ?: 0L
 
         // As of app 26.31.0 the login reply no longer carries our own profile or the
         // contact list inline — only chats. So we derive our own id from the chats and
@@ -1864,8 +2496,9 @@ class MaxClient : MaxApi {
         val account =
             Account(
                 userId = myId,
-                firstName = me?.name ?: "Я",
-                lastName = null,
+                // Kept apart (not the joined display name), so the profile editor shows each in its field.
+                firstName = me?.firstName ?: me?.name ?: "Я",
+                lastName = me?.lastName,
                 avatarUrl = me?.avatarUrl,
                 twoFaEnabled = me?.twoFaEnabled,
             )
@@ -1875,7 +2508,7 @@ class MaxClient : MaxApi {
         val chats =
             rawChats
                 .mapNotNull { parseChat(it, names) }
-                .map { if (it.id in mutedChatIds) it.copy(muted = true) else it }
+                .map { it.copy(muted = chatSetting(it.id, "dontDisturbUntil") != 0L, favIndex = chatSetting(it.id, "favIndex")) }
                 .sortedByDescending { it.lastEventTime }
 
         // presence = {userId: {seen: <unixSec>, status: <int>}} — a user is online
@@ -1895,8 +2528,34 @@ class MaxClient : MaxApi {
         scope.launch { runCatching { reportHostReachability() } }
 
         val privacy = ((payload["config"] as? JsonObject)?.get("user") as? JsonObject)?.toPrivacy()
-        return SyncResult(account, chats, names, contactsList, online, refreshedToken, presence, privacy)
+        val reactionsMenu =
+            (((payload["config"] as? JsonObject)?.get("server") as? JsonObject)?.get("reactions-menu") as? JsonArray)
+                .orEmptyList()
+                .mapNotNull { (it as? JsonPrimitive)?.contentOrNullSafe()?.ifBlank { null } }
+        val server = (payload["config"] as? JsonObject)?.get("server") as? JsonObject
+        // How many chats may be pinned: the older official client reads `max-favorite-chats`, the newer `favorite.chats.limit`.
+        val pinLimit =
+            listOf("max-favorite-chats", "favorite.chats.limit")
+                .firstNotNullOfOrNull { (server?.get(it) as? JsonPrimitive)?.intOrNullSafe() }
+                ?.takeIf { it > 0 }
+        val pollsInDialogs =
+            (server?.get("polls-in-p2p-chats") as? JsonPrimitive)?.let { it.asBoolean() ?: ((it.intOrNullSafe() ?: 0) != 0) } ?: false
+        return SyncResult(
+            account,
+            chats,
+            names,
+            contactsList,
+            online,
+            refreshedToken,
+            presence,
+            privacy,
+            reactionsMenu,
+            pinLimit,
+            pollsInDialogs,
+        )
     }
+
+    override suspend fun fetchUsers(ids: List<Long>): List<UserInfo> = fetchContactsByIds(ids)
 
     /** Full profile of a single user (for the user page). */
     override suspend fun fetchUser(userId: Long): UserInfo? {
@@ -1915,27 +2574,70 @@ class MaxClient : MaxApi {
     }
 
     /** Public search by name — returns openable chats/channels (each result wraps a `chat`). */
-    override suspend fun searchChats(query: String): List<SearchResult> {
+    override suspend fun searchChats(
+        query: String,
+        marker: Long?,
+    ): SearchPage {
         val payload =
             transport.request(
                 OP_PUBLIC_SEARCH,
                 buildJsonObject {
                     put("query", query)
                     put("count", 20)
+                    // The newer official client pages with the reply's marker, sent only when non-zero.
+                    if (marker != null && marker != 0L) put("marker", marker)
                     put("type", "ALL")
                 },
             )
-        return payload["result"]
-            ?.jsonArray
-            .orEmptyList()
-            .mapNotNull { el ->
-                val chat = el.jsonObject["chat"]?.jsonObject ?: return@mapNotNull null
-                val id = chat["id"]?.jsonPrimitive?.longOrNullSafe() ?: return@mapNotNull null
-                val type = chat["type"]?.jsonPrimitive?.contentOrNullSafe()
-                val title = chat["title"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null } ?: "Чат $id"
-                SearchResult(chatId = id, title = title, avatarUrl = chat.avatarUrl(), isDialog = type == "DIALOG")
-            }.distinctBy { it.chatId }
+        val results =
+            payload["result"]
+                ?.jsonArray
+                .orEmptyList()
+                .mapNotNull { el ->
+                    val chat = el.jsonObject["chat"]?.jsonObject ?: return@mapNotNull null
+                    val id = chat["id"]?.jsonPrimitive?.longOrNullSafe() ?: return@mapNotNull null
+                    val type = chat["type"]?.jsonPrimitive?.contentOrNullSafe()
+                    val title = chat["title"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null } ?: "Чат $id"
+                    SearchResult(chatId = id, title = title, avatarUrl = chat.avatarUrl(), isDialog = type == "DIALOG")
+                }.distinctBy { it.chatId }
+        return SearchPage(results, payload["marker"]?.jsonPrimitive?.longOrNullSafe()?.takeIf { it != 0L })
     }
+
+    override suspend fun searchMessages(
+        chatId: Long?,
+        query: String,
+    ): List<MessageHit> {
+        // MSG_SEARCH (73) {chatId, query, count: 100} in one chat; CHAT_SEARCH (68) {query, count: 30}
+        // across all of them (one hit per chat). Both answer {result: [{chatId, message, chat?}], total, marker?}.
+        val payload =
+            transport.request(
+                if (chatId != null) OP_MSG_SEARCH else OP_CHAT_SEARCH,
+                buildJsonObject {
+                    if (chatId != null) put("chatId", chatId)
+                    put("query", query)
+                    put("count", if (chatId != null) 100 else 30)
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось найти сообщения")) }
+        return parseMessageHits(payload, chatId)
+    }
+
+    /** The message hits of a MSG_SEARCH / CHAT_SEARCH reply; results without a message (chats, channels) are skipped. */
+    internal fun parseMessageHits(
+        payload: JsonObject,
+        chatId: Long?,
+    ): List<MessageHit> =
+        (payload["result"] as? JsonArray).orEmptyList().mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val chat = o["chat"] as? JsonObject
+            val cid =
+                (o["chatId"] as? JsonPrimitive)?.longOrNullSafe()
+                    ?: (chat?.get("id") as? JsonPrimitive)?.longOrNullSafe()
+                    ?: chatId
+                    ?: return@mapNotNull null
+            val message = (o["message"] as? JsonObject)?.let { parseMessage(it, cid) } ?: return@mapNotNull null
+            MessageHit(message, chat?.let { parseChat(it, emptyMap()) })
+        }
 
     // ---------------------------------------------------------------------
     // Messages
@@ -1972,6 +2674,7 @@ class MaxClient : MaxApi {
         cid: Long,
         replyToId: String?,
         attaches: List<OutAttach>,
+        spans: List<TextSpan>,
     ): Message? {
         val payload =
             transport.request(
@@ -1981,7 +2684,8 @@ class MaxClient : MaxApi {
                     putJsonObject("message") {
                         put("text", text)
                         put("cid", cid)
-                        put("elements", buildJsonArrayEmpty())
+                        // Formatting runs, UTF-16 offsets (as Kotlin's): {type, from, length}.
+                        put("elements", spans.toElements())
                         putJsonArray("attaches") {
                             attaches.forEach { a ->
                                 when (a) {
@@ -2012,6 +2716,20 @@ class MaxClient : MaxApi {
                                             put("token", a.token)
                                             put("videoType", VIDEO_TYPE_VIDEO_NOTE)
                                             if (a.durationSeconds > 0) put("duration", a.durationSeconds * 1000L)
+                                        }
+                                    // A new poll: no pollId (that is only for edits), answers as their text alone.
+                                    is OutAttach.Poll ->
+                                        addJsonObject {
+                                            put("_type", "POLL")
+                                            put("title", a.title)
+                                            putJsonArray("answers") { a.answers.forEach { t -> addJsonObject { put("text", t) } } }
+                                            put("settings", a.settings)
+                                        }
+                                    // Only the id: the official serializer writes nothing else.
+                                    is OutAttach.Sticker ->
+                                        addJsonObject {
+                                            put("_type", "STICKER")
+                                            put("stickerId", a.stickerId)
                                         }
                                     is OutAttach.Voice ->
                                         addJsonObject {
@@ -2100,8 +2818,12 @@ class MaxClient : MaxApi {
         chatId: Long,
         messageId: String,
         text: String,
+        spans: List<TextSpan>?,
     ) {
-        // MSG_EDIT (op 67): {chatId, messageId (numeric), text} (official app: aic).
+        // MSG_EDIT (op 67): {chatId, messageId (numeric), text, elements} (official app: aic).
+        // Without `elements` the edit drops the message's formatting. `attachments` stays
+        // out: only attachment-free messages are editable here, and what omitting it does
+        // was never measured.
         val mid = messageId.toLongOrNull() ?: return
         val payload =
             transport.request(
@@ -2110,6 +2832,7 @@ class MaxClient : MaxApi {
                     put("chatId", chatId)
                     put("messageId", mid)
                     put("text", text)
+                    spans?.let { put("elements", it.toElements()) }
                 },
             )
         if ((payload["message"] as? JsonObject) == null && payload["error"] != null) {
@@ -2125,15 +2848,17 @@ class MaxClient : MaxApi {
         // MSG_DELETE (op 66): {chatId, messageIds:[numeric], forMe, itemType} (official app: rhc).
         val ids = messageIds.mapNotNull { it.toLongOrNull() }
         if (ids.isEmpty()) return
-        transport.request(
-            OP_MSG_DELETE,
-            buildJsonObject {
-                put("chatId", chatId)
-                putJsonArray("messageIds") { ids.forEach { add(it) } }
-                put("forMe", !forAll)
-                put("itemType", "REGULAR")
-            },
-        )
+        val payload =
+            transport.request(
+                OP_MSG_DELETE,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    putJsonArray("messageIds") { ids.forEach { add(it) } }
+                    put("forMe", !forAll)
+                    put("itemType", "REGULAR")
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось удалить сообщения")) }
     }
 
     override suspend fun uploadPhoto(
@@ -2395,25 +3120,39 @@ class MaxClient : MaxApi {
         val mid = messageId.toLongOrNull() ?: return
         // Add via MSG_REACTION (178) with {reactionType:"EMOJI", id}; remove via the
         // dedicated MSG_CANCEL_REACTION (179), which just takes {chatId, messageId}.
-        if (emoji != null) {
-            transport.request(
-                OP_REACTION,
-                buildJsonObject {
-                    put("chatId", chatId)
-                    put("messageId", mid)
-                    putJsonObject("reaction") {
-                        put("reactionType", "EMOJI")
-                        put("id", emoji)
-                    }
-                },
-            )
-        } else {
-            transport.request(
-                OP_CANCEL_REACTION,
-                buildJsonObject {
-                    put("chatId", chatId)
-                    put("messageId", mid)
-                },
+        val payload =
+            if (emoji != null) {
+                transport.request(
+                    OP_REACTION,
+                    buildJsonObject {
+                        put("chatId", chatId)
+                        put("messageId", mid)
+                        putJsonObject("reaction") {
+                            put("reactionType", "EMOJI")
+                            put("id", emoji)
+                        }
+                    },
+                )
+            } else {
+                transport.request(
+                    OP_CANCEL_REACTION,
+                    buildJsonObject {
+                        put("chatId", chatId)
+                        put("messageId", mid)
+                    },
+                )
+            }
+        payload.errorCode()?.let {
+            error(
+                payload.serverMessage(
+                    if (emoji !=
+                        null
+                    ) {
+                        "Не удалось поставить реакцию"
+                    } else {
+                        "Не удалось убрать реакцию"
+                    },
+                ),
             )
         }
     }
@@ -2452,7 +3191,8 @@ class MaxClient : MaxApi {
 
     override suspend fun leaveGroup(chatId: Long) {
         // CHAT_LEAVE payload is just {chatId}.
-        transport.request(OP_LEAVE_CHAT, buildJsonObject { put("chatId", chatId) })
+        val payload = transport.request(OP_LEAVE_CHAT, buildJsonObject { put("chatId", chatId) })
+        payload.errorCode()?.let { error(payload.serverMessage("Не удалось выйти из чата")) }
     }
 
     /**
@@ -2546,6 +3286,57 @@ class MaxClient : MaxApi {
         title: String,
         memberIds: List<Long>,
         photoToken: String?,
+    ): Long? = createChat("CHAT", title, memberIds, photoToken, "Не удалось создать группу")
+
+    // The same CONTROL "new" with chatType CHANNEL makes a (private) channel (max-cli, measured).
+    override suspend fun createChannel(
+        title: String,
+        photoToken: String?,
+    ): Long? = createChat("CHANNEL", title, emptyList(), photoToken, "Не удалось создать канал")
+
+    override suspend fun editChat(
+        chatId: Long,
+        title: String?,
+        description: String?,
+        photoToken: String?,
+        options: Map<String, Boolean>,
+    ): Chat? =
+        // CHAT_UPDATE (op 55), keys in the official client's order; the name is `theme`. Options carry
+        // only the flags that change. Answers {chat}.
+        chatUpdate(chatId, "Не удалось изменить чат") {
+            description?.let { put("description", it) }
+            if (options.isNotEmpty()) putJsonObject("options") { options.forEach { (k, v) -> put(k, v) } }
+            title?.let { put("theme", it) }
+            photoToken?.let { put("photoToken", it) }
+        }
+
+    override suspend fun revokeChatLink(chatId: Long): Chat? =
+        // CHAT_UPDATE (op 55) {chatId, revokePrivateLink: true} -> {chat} with the new `link`.
+        chatUpdate(chatId, "Не удалось сбросить ссылку") { put("revokePrivateLink", true) }
+
+    private suspend fun chatUpdate(
+        chatId: Long,
+        failure: String,
+        fields: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit,
+    ): Chat? {
+        val payload =
+            transport.request(
+                OP_CHAT_UPDATE,
+                buildJsonObject {
+                    put("chatId", chatId)
+                    fields()
+                },
+            )
+        payload.errorCode()?.let { error(payload.serverMessage(failure)) }
+        return (payload["chat"] as? JsonObject)?.let { parseChat(it, emptyMap()) }
+    }
+
+    private suspend fun createChat(
+        chatType: String,
+        title: String,
+        memberIds: List<Long>,
+        photoToken: String?,
+        failure: String,
     ): Long? {
         // A new group is a MSG_SEND (op 64) with chatId=0 and a CONTROL attach whose
         // event is "new" (official app: vw4). The server creates the chat and echoes
@@ -2564,7 +3355,7 @@ class MaxClient : MaxApi {
                             addJsonObject {
                                 put("_type", "CONTROL")
                                 put("event", "new")
-                                put("chatType", "CHAT")
+                                put("chatType", chatType)
                                 put("title", title)
                                 putJsonArray("userIds") { memberIds.forEach { add(it) } }
                                 if (photoToken != null) put("photoToken", photoToken)
@@ -2577,7 +3368,7 @@ class MaxClient : MaxApi {
             )
         val msgObj = payload["message"] as? JsonObject
         if (msgObj == null && (payload["error"] != null || payload["message"] != null)) {
-            error(payload.serverMessage("Не удалось создать группу"))
+            error(payload.serverMessage(failure))
         }
         // The new chatId may arrive on the echoed message or a `chat` object.
         return payload["chat"]
@@ -2592,7 +3383,7 @@ class MaxClient : MaxApi {
     // Helpers
     // ---------------------------------------------------------------------
 
-    private fun parseMessage(
+    internal fun parseMessage(
         obj: JsonObject,
         chatId: Long,
     ): Message? {
@@ -2607,6 +3398,55 @@ class MaxClient : MaxApi {
 
         val baseText = localize(content["text"]?.jsonPrimitive?.contentOrNullSafe() ?: "")
         val attaches = content["attaches"]?.jsonArray.orEmptyList()
+        // Formatting runs (`elements`): {type, from (absent = 0), length, attributes:{url}}.
+        // Offsets index the server's text, so they are dropped if we replaced it.
+        val spans =
+            if (baseText != content["text"]?.jsonPrimitive?.contentOrNullSafe()) {
+                emptyList()
+            } else {
+                (content["elements"] as? JsonArray).orEmptyList().mapNotNull { el ->
+                    val e = el as? JsonObject ?: return@mapNotNull null
+                    val type = e["type"]?.jsonPrimitive?.contentOrNullSafe() ?: return@mapNotNull null
+                    val length = e["length"]?.jsonPrimitive?.intOrNullSafe() ?: return@mapNotNull null
+                    TextSpan(
+                        type = type,
+                        from = e["from"]?.jsonPrimitive?.intOrNullSafe() ?: 0,
+                        length = length,
+                        url = (e["attributes"] as? JsonObject)?.get("url")?.jsonPrimitive?.contentOrNullSafe(),
+                    )
+                }
+            }
+        // A bot's buttons: {callbackId, keyboard: {buttons: rows of {text, type, url?, payload?…}}}.
+        val keyboard =
+            attaches.firstNotNullOfOrNull { el ->
+                (el as? JsonObject)?.takeIf { it["_type"]?.jsonPrimitive?.contentOrNullSafe() == "INLINE_KEYBOARD" }
+            }
+        val callbackId = keyboard?.get("callbackId")?.jsonPrimitive?.contentOrNullSafe()
+        val buttons =
+            ((keyboard?.get("keyboard") as? JsonObject)?.get("buttons") as? JsonArray)
+                .orEmptyList()
+                .mapNotNull { row ->
+                    (row as? JsonArray)
+                        ?.mapNotNull { btn ->
+                            val o = btn as? JsonObject ?: return@mapNotNull null
+                            val label = o["text"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null } ?: return@mapNotNull null
+                            BotButton(
+                                text = label,
+                                url = o["url"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null },
+                                type = o["type"]?.jsonPrimitive?.contentOrNullSafe(),
+                                payload = o["payload"]?.jsonPrimitive?.contentOrNullSafe(),
+                                callbackId = callbackId,
+                            )
+                        }?.ifEmpty { null }
+                }
+        // `url` is the sticker's still image for every kind; a LOTTIE one also has a
+        // `lottieUrl` (Lottie JSON) we can't play, so the still stands in for it.
+        val stickerUrl =
+            attaches.firstNotNullOfOrNull { el ->
+                (el as? JsonObject)
+                    ?.takeIf { it["_type"]?.jsonPrimitive?.contentOrNullSafe() == "STICKER" }
+                    ?.let { (it["url"] ?: it["baseUrl"])?.jsonPrimitive?.contentOrNullSafe() }
+            }
         // A SHARE attach is a link preview: {url, title, description, image:{url}}.
         val linkPreview =
             attaches.firstNotNullOfOrNull { el ->
@@ -2633,6 +3473,51 @@ class MaxClient : MaxApi {
                 }
             }
 
+        val poll =
+            attaches.firstNotNullOfOrNull { el ->
+                (el as? JsonObject)?.takeIf { it["_type"]?.jsonPrimitive?.contentOrNullSafe() == "POLL" }?.let(::parsePoll)
+            }
+
+        fun JsonObject.typed(type: String) = takeIf { it["_type"]?.jsonPrimitive?.contentOrNullSafe() == type }
+        val location =
+            attaches.firstNotNullOfOrNull { el ->
+                val a = (el as? JsonObject)?.typed("LOCATION") ?: return@firstNotNullOfOrNull null
+                val lat = a["latitude"]?.jsonPrimitive?.contentOrNullSafe()?.toDoubleOrNull() ?: return@firstNotNullOfOrNull null
+                val lon = a["longitude"]?.jsonPrimitive?.contentOrNullSafe()?.toDoubleOrNull() ?: return@firstNotNullOfOrNull null
+                GeoPoint(lat, lon)
+            }
+        val contact =
+            attaches.firstNotNullOfOrNull { el ->
+                val a = (el as? JsonObject)?.typed("CONTACT") ?: return@firstNotNullOfOrNull null
+                val vcf = a["vcfBody"]?.jsonPrimitive?.contentOrNullSafe()
+                val name =
+                    a["name"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null }
+                        ?: listOfNotNull(a["firstName"], a["lastName"])
+                            .mapNotNull { it.jsonPrimitive.contentOrNullSafe() }
+                            .joinToString(" ")
+                            .ifBlank { null }
+                        ?: vcf?.let {
+                            Regex("""(?m)^FN[^:]*:(.+)$""")
+                                .find(it)
+                                ?.groupValues
+                                ?.get(1)
+                                ?.trim()
+                        }
+                        ?: "Контакт"
+                ContactCard(
+                    userId = a["contactId"]?.jsonPrimitive?.longOrNullSafe() ?: 0L,
+                    name = name,
+                    phone =
+                        a["phone"]?.jsonPrimitive?.contentOrNullSafe()?.ifBlank { null }
+                            ?: vcf?.let {
+                                Regex("""(?m)^TEL[^:]*:(.+)$""")
+                                    .find(it)
+                                    ?.groupValues
+                                    ?.get(1)
+                                    ?.trim()
+                            },
+                )
+            }
         // Images/videos we render inline (PHOTO baseUrl, VIDEO thumbnail).
         val media =
             attaches.mapNotNull { el ->
@@ -2795,6 +3680,7 @@ class MaxClient : MaxApi {
                 ?.let { it as? JsonObject }
                 ?.let { q ->
                     ReplyInfo(
+                        messageId = q["id"]?.jsonPrimitive?.contentOrNullSafe(),
                         senderId = q["sender"]?.jsonPrimitive?.longOrNullSafe() ?: 0L,
                         text = localize(q["text"]?.jsonPrimitive?.contentOrNullSafe() ?: "").ifBlank { "Вложение" },
                     )
@@ -2803,7 +3689,17 @@ class MaxClient : MaxApi {
         // service chip.
         val effectiveService = service ?: callService
         // Skip empty service messages with no text, no media and no id.
-        if (text.isEmpty() && media.isEmpty() && files.isEmpty() && linkPreview == null && effectiveService == null && id == null) {
+        if (text.isEmpty() &&
+            media.isEmpty() &&
+            files.isEmpty() &&
+            linkPreview == null &&
+            effectiveService == null &&
+            stickerUrl == null &&
+            poll == null &&
+            location == null &&
+            contact == null &&
+            id == null
+        ) {
             return null
         }
         return Message(
@@ -2822,6 +3718,14 @@ class MaxClient : MaxApi {
             linkPreview = linkPreview,
             service = effectiveService,
             voice = voice,
+            edited = content["status"]?.jsonPrimitive?.contentOrNullSafe() == "EDITED",
+            spans = spans,
+            buttons = buttons,
+            stickerUrl = stickerUrl,
+            views = (obj["stats"] as? JsonObject)?.get("views")?.jsonPrimitive?.intOrNullSafe() ?: 0,
+            poll = poll,
+            location = location,
+            contact = contact,
         )
     }
 
@@ -2831,12 +3735,6 @@ class MaxClient : MaxApi {
      */
     private fun parseReactions(info: JsonObject?): List<Reaction> {
         if (info == null) return emptyList()
-
-        fun emojiOf(node: kotlinx.serialization.json.JsonElement?): String? =
-            when (node) {
-                is JsonObject -> node["id"]?.jsonPrimitive?.contentOrNullSafe() ?: node["reaction"]?.jsonPrimitive?.contentOrNullSafe()
-                else -> node?.jsonPrimitive?.contentOrNullSafe()
-            }
         val mine = emojiOf(info["yourReaction"])
         return info["counters"]
             ?.jsonArray
@@ -2910,6 +3808,153 @@ class MaxClient : MaxApi {
         runCatching { transport.notify(OP_LOG, payload) }
     }
 }
+
+/** Formatting runs in the wire shape: `{type, from, length, attributes: {url}?}` (UTF-16 offsets, as Kotlin's). */
+internal fun List<TextSpan>.toElements(): JsonArray =
+    buildJsonArray {
+        forEach { span ->
+            addJsonObject {
+                put("type", span.type)
+                put("from", span.from)
+                put("length", span.length)
+                span.url?.let { url -> putJsonObject("attributes") { put("url", url) } }
+            }
+        }
+    }
+
+/** A POLL attach: {pollId, title, settings, answers: [{answerId, text}], state}. */
+internal fun parsePoll(a: JsonObject): Poll? {
+    val pollId = a["pollId"]?.jsonPrimitive?.longOrNullSafe() ?: return null
+    val answers =
+        (a["answers"] as? JsonArray).orEmptyList().mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            PollAnswer(
+                o["answerId"]?.jsonPrimitive?.intOrNullSafe() ?: return@mapNotNull null,
+                o["text"]?.jsonPrimitive?.contentOrNullSafe() ?: "",
+            )
+        }
+    return Poll(
+        pollId = pollId,
+        title = a["title"]?.jsonPrimitive?.contentOrNullSafe() ?: "",
+        settings = a["settings"]?.jsonPrimitive?.intOrNullSafe() ?: 0,
+        answers = answers,
+    ).withState(a["state"] as? JsonObject)
+}
+
+/**
+ * [state] = {total, result: [{answerId, voteCount, options}]} applied to this poll; bit 1 of
+ * `options` marks the answer we voted for. A missing state leaves the poll as it is.
+ */
+internal fun Poll.withState(state: JsonObject?): Poll {
+    if (state == null) return this
+    val results =
+        (state["result"] as? JsonArray)
+            .orEmptyList()
+            .mapNotNull { el ->
+                val o = el as? JsonObject ?: return@mapNotNull null
+                (o["answerId"]?.jsonPrimitive?.intOrNullSafe() ?: return@mapNotNull null) to o
+            }.toMap()
+    return copy(
+        total = state["total"]?.jsonPrimitive?.intOrNullSafe() ?: total,
+        answers =
+            answers.map { a ->
+                val r = results[a.id]
+                a.copy(
+                    votes = r?.get("voteCount")?.jsonPrimitive?.intOrNullSafe() ?: 0,
+                    mine = ((r?.get("options")?.jsonPrimitive?.intOrNullSafe() ?: 0) and 1) != 0,
+                )
+            },
+    )
+}
+
+private fun idsIn(el: JsonElement?): List<Long> =
+    (el as? JsonArray).orEmptyList().mapNotNull { e ->
+        (e as? JsonPrimitive)?.longOrNullSafe()
+            ?: (e as? JsonObject)?.let { o -> (o["id"] ?: o["stickerId"]) as? JsonPrimitive }?.longOrNullSafe()
+    }
+
+/**
+ * An ASSETS_UPDATE (STICKER) reply: every sticker-set id in section order, and the recent
+ * stickers' ids (a RECENTS section, or `recentsList`).
+ */
+internal fun parseStickerSections(p: JsonObject): Pair<List<Long>, List<Long>> {
+    val sections = (p["sections"] as? JsonArray).orEmptyList().mapNotNull { it as? JsonObject }
+    val sets = sections.flatMap { idsIn(it["stickerSets"]) }.distinct()
+    val recents = sections.filter { (it["type"] as? JsonPrimitive)?.contentOrNullSafe() == "RECENTS" }.flatMap { idsIn(it["stickers"]) }
+    return sets to (recents + idsIn(p["recentsList"])).distinct()
+}
+
+/** ASSETS_GET_BY_IDS (STICKER_SET): `{stickerSets: [{id, name, iconUrl, stickers: [ids]}]}`. */
+internal fun parseStickerSets(p: JsonObject): List<StickerSet> =
+    (p["stickerSets"] as? JsonArray).orEmptyList().mapNotNull { el ->
+        val o = el as? JsonObject ?: return@mapNotNull null
+        StickerSet(
+            id = (o["id"] as? JsonPrimitive)?.longOrNullSafe() ?: return@mapNotNull null,
+            name = (o["name"] as? JsonPrimitive)?.contentOrNullSafe() ?: "",
+            iconUrl = (o["iconUrl"] as? JsonPrimitive)?.contentOrNullSafe()?.ifBlank { null },
+            stickerIds = idsIn(o["stickers"]),
+        )
+    }
+
+/** ASSETS_GET_BY_IDS (STICKER): stickers with a still image; `url` is that image for every kind. */
+internal fun parseStickers(p: JsonObject): List<Sticker> =
+    (p["stickers"] as? JsonArray).orEmptyList().mapNotNull { el ->
+        val o = el as? JsonObject ?: return@mapNotNull null
+        Sticker(
+            id = (o["id"] as? JsonPrimitive)?.longOrNullSafe() ?: return@mapNotNull null,
+            url = (o["url"] as? JsonPrimitive)?.contentOrNullSafe()?.ifBlank { null } ?: return@mapNotNull null,
+        )
+    }
+
+// The keys of a per-chat CONFIG entry (OFF-25 dc2 o=15 writes them; ss2 reads them back).
+private val CHAT_SETTING_KEYS = setOf("dontDisturbUntil", "favIndex", "sound", "vibr", "led")
+
+/**
+ * One chat's entry for a CONFIG (op 22) `settings.chats` write, as the official builder makes it: always
+ * `dontDisturbUntil`, `sound`, `vibr` and `led` (false when unknown), and `favIndex` when it has one. Starts
+ * from [stored], the chat's `config.chats.<id>` as last known, and sets [key] to [value].
+ */
+internal fun chatSettingsEntry(
+    stored: JsonObject?,
+    key: String,
+    value: Long,
+): JsonObject {
+    val kept = stored.orEmpty().filter { (k, v) -> k in CHAT_SETTING_KEYS && v is JsonPrimitive && v !is JsonNull }
+    val defaults =
+        mapOf(
+            "dontDisturbUntil" to JsonPrimitive(0),
+            "sound" to JsonPrimitive(false),
+            "vibr" to JsonPrimitive(false),
+            "led" to JsonPrimitive(false),
+        )
+    return JsonObject(defaults + kept + (key to JsonPrimitive(value)))
+}
+
+/** Folders from a FOLDERS_GET reply (`folders`) or a push/update reply (`folder`), with `foldersOrder` when sent. */
+internal fun parseFolders(p: JsonObject): FoldersUpdate {
+    fun ids(el: JsonElement?) = (el as? JsonArray).orEmptyList().mapNotNull { (it as? JsonPrimitive)?.longOrNullSafe() }
+    val folders =
+        ((p["folders"] as? JsonArray).orEmptyList() + listOfNotNull(p["folder"])).mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            ChatFolder(
+                id = (o["id"] as? JsonPrimitive)?.contentOrNullSafe()?.ifBlank { null } ?: return@mapNotNull null,
+                title = (o["title"] as? JsonPrimitive)?.contentOrNullSafe() ?: "",
+                include = ids(o["include"]),
+                favorites = ids(o["favorites"]),
+                filters = o["filters"] as? JsonArray ?: JsonArray(emptyList()),
+                options = o["options"] as? JsonArray ?: JsonArray(emptyList()),
+            )
+        }
+    val order = (p["foldersOrder"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNullSafe() }
+    return FoldersUpdate(folders, order)
+}
+
+/** A reaction's emoji: a bare string, or an object with an `id` (or `reaction`). */
+private fun emojiOf(node: JsonElement?): String? =
+    when (node) {
+        is JsonObject -> node["id"]?.jsonPrimitive?.contentOrNullSafe() ?: node["reaction"]?.jsonPrimitive?.contentOrNullSafe()
+        else -> (node as? JsonPrimitive)?.contentOrNullSafe()
+    }
 
 /** Extracts tokenAttrs.LOGIN.token if present. */
 private fun JsonObject.loginToken(): String? =
@@ -2994,25 +4039,20 @@ private fun kotlinx.serialization.json.JsonPrimitive.intOrNullSafe(): Int? = con
 
 private fun kotlinx.serialization.json.JsonArray?.orEmptyList(): List<kotlinx.serialization.json.JsonElement> = this ?: emptyList()
 
-private fun JsonObject?.firstName(): String? =
-    this
-        ?.get("names")
-        ?.jsonArray
-        ?.firstOrNull()
-        ?.jsonObject
-        ?.get("firstName")
-        ?.jsonPrimitive
-        ?.contentOrNullSafe()
+/** The `names` entry to show: our own name for them (`CUSTOM`) when we gave one, else the first. */
+private fun JsonObject?.nameEntry(): JsonObject? {
+    val entries = (this?.get("names") as? JsonArray).orEmptyList().filterIsInstance<JsonObject>()
+    return entries.firstOrNull { (it["type"] as? JsonPrimitive)?.contentOrNullSafe() == "CUSTOM" } ?: entries.firstOrNull()
+}
 
-private fun JsonObject?.lastName(): String? =
-    this
-        ?.get("names")
-        ?.jsonArray
-        ?.firstOrNull()
-        ?.jsonObject
-        ?.get("lastName")
-        ?.jsonPrimitive
-        ?.contentOrNullSafe()
+// Trimmed: a stray space the server kept would show, split the name differently and change the avatar's colour.
+private fun JsonObject?.nameField(key: String): String? =
+    (nameEntry()?.get(key) as? JsonPrimitive)?.contentOrNullSafe()?.trim()?.ifEmpty { null }
+
+// An entry may carry only `name` (max-cli reads just that): it then stands in for the first name.
+private fun JsonObject?.firstName(): String? = nameField("firstName") ?: nameField("name")
+
+private fun JsonObject?.lastName(): String? = if (nameField("firstName") != null) nameField("lastName") else null
 
 private fun JsonObject.displayName(): String? {
     val first = firstName()
@@ -3020,14 +4060,21 @@ private fun JsonObject.displayName(): String? {
     return listOfNotNull(first, last).joinToString(" ").ifBlank { null }
 }
 
-internal fun JsonObject.toPrivacy() =
-    Privacy(
-        searchByPhone = this["SEARCH_BY_PHONE"]?.jsonPrimitive?.contentOrNullSafe() ?: Privacy.ALL,
-        incomingCall = this["INCOMING_CALL"]?.jsonPrimitive?.contentOrNullSafe() ?: Privacy.ALL,
-        chatsInvite = this["CHATS_INVITE"]?.jsonPrimitive?.contentOrNullSafe() ?: Privacy.ALL,
+internal fun JsonObject.toPrivacy(): Privacy {
+    fun who(key: String) =
+        when (val v = this[key]?.jsonPrimitive?.contentOrNullSafe()) {
+            null -> Privacy.ALL
+            "NOBODY" -> Privacy.NOBODY
+            else -> v
+        }
+    return Privacy(
+        searchByPhone = who("SEARCH_BY_PHONE"),
+        incomingCall = who("INCOMING_CALL"),
+        chatsInvite = who("CHATS_INVITE"),
         hideOnline = this["HIDDEN"]?.jsonPrimitive?.asBoolean() ?: false,
         showReadMarks = this["SHOW_READ_MARK"]?.jsonPrimitive?.asBoolean() ?: true,
     )
+}
 
 /** Parses a presence map `{userId: {seen, status?}}`. */
 private fun presenceIn(presence: JsonElement?): Map<Long, Presence> =
@@ -3058,18 +4105,21 @@ private fun JsonObject.avatarUrl(): String? =
         ?.contentOrNullSafe()
 
 /** Parses a server user/contact object into [UserInfo]. */
-private fun parseUser(o: JsonObject): UserInfo? {
+internal fun parseUser(o: JsonObject): UserInfo? {
     val id = o["id"]?.jsonPrimitive?.longOrNullSafe() ?: return null
     return UserInfo(
         id = id,
         name = o.displayName() ?: "Пользователь $id",
         avatarUrl = o.avatarUrl(),
+        firstName = o.firstName(),
+        lastName = o.lastName()?.ifBlank { null },
         description = o["description"]?.jsonPrimitive?.contentOrNullSafe(),
         phone = o["phone"]?.jsonPrimitive?.contentOrNullSafe(),
         gender = o["gender"]?.jsonPrimitive?.contentOrNullSafe(),
         link = o["link"]?.jsonPrimitive?.contentOrNullSafe(),
         country = o["country"]?.jsonPrimitive?.contentOrNullSafe(),
         registrationTime = o["registrationTime"]?.jsonPrimitive?.longOrNullSafe(),
+        blocked = o["status"]?.jsonPrimitive?.contentOrNullSafe() == "BLOCKED",
         // NOTE: a contact's `options` is a different enum from the profile's second-factor
         // options (which only the login-time `profile` object carries), so the password
         // state is not derivable here — it comes from AUTH_2FA_DETAILS instead.

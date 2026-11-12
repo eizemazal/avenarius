@@ -1,0 +1,47 @@
+# Local package for Arch-based systems (Arch, CachyOS): builds the desktop app from THIS
+# checkout and installs it with a launcher, a menu entry and an icon.
+#
+#   cd packaging/arch && makepkg -si      # build + install
+#   sudo pacman -R avenarius              # remove
+#
+# Nothing is downloaded as "source": the working tree two levels up is what gets built,
+# uncommitted changes included. Gradle fetches its dependencies on the first build.
+
+_repo="$(realpath "${startdir:-$PWD}/../..")"
+_app="$_repo/composeApp/build/compose/binaries/main/app/Avenarius"
+
+pkgname=avenarius
+# The About-box version plus the commit, so a rebuilt checkout upgrades the installed package.
+pkgver="$(grep -oP 'APP_VERSION = "\K[^"]+' "$_repo/composeApp/src/commonMain/kotlin/com/avenarius/app/ui/screens/AboutScreen.kt").r$(git -C "$_repo" rev-list --count HEAD).g$(git -C "$_repo" rev-parse --short HEAD)"
+pkgrel=1
+pkgdesc="Unofficial open-source client for the MAX messenger (desktop build)"
+arch=('x86_64')
+url="https://github.com/eizemazal/avenarius"
+license=('GPL-3.0-only')
+# The app ships its own trimmed JVM; these are the system libraries that JVM and Skia load.
+depends=('glibc' 'libx11' 'libxext' 'libxrender' 'libxtst' 'libxi' 'libglvnd' 'alsa-lib' 'fontconfig' 'freetype2' 'hicolor-icon-theme')
+makedepends=('java-environment>=17' 'git')
+# The bundled runtime is already stripped; stripping it again only costs time.
+options=('!strip' '!debug')
+
+build() {
+  cd "$_repo"
+  ./gradlew --no-daemon :composeApp:createDistributable
+}
+
+package() {
+  install -d "$pkgdir/opt/avenarius"
+  cp -r "$_app/." "$pkgdir/opt/avenarius/"
+
+  # A wrapper, not a symlink: the launcher finds its runtime relative to its own real path.
+  install -Dm755 /dev/stdin "$pkgdir/usr/bin/avenarius" <<'SH'
+#!/bin/sh
+exec /opt/avenarius/bin/Avenarius "$@"
+SH
+
+  install -Dm644 "$startdir/avenarius.desktop" "$pkgdir/usr/share/applications/avenarius.desktop"
+  install -Dm644 "$_repo/composeApp/src/androidMain/res/mipmap-xxxhdpi/ic_launcher.png" \
+    "$pkgdir/usr/share/icons/hicolor/192x192/apps/avenarius.png"
+  install -Dm644 "$_repo/LICENSE" "$pkgdir/usr/share/licenses/avenarius/LICENSE"
+  install -Dm644 "$_repo/docs/Onest-OFL.txt" "$pkgdir/usr/share/licenses/avenarius/Onest-OFL.txt"
+}

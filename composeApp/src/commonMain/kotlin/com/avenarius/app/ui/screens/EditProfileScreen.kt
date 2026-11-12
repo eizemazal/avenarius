@@ -14,15 +14,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,17 +31,18 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.avenarius.app.model.PickedMedia
-import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.rememberSingleImagePickLauncher
+import com.avenarius.app.ui.theme.Spacing
 
 /** Edit-profile screen: change avatar, first/last name and bio. */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun EditProfileScreen(
     initialFirstName: String,
     initialLastName: String,
     initialDescription: String,
+    /** Our profile has loaded; until then the bio is unknown and saving stays off. */
+    profileLoaded: Boolean = true,
     currentAvatarUrl: String?,
     busy: Boolean,
     onBack: () -> Unit,
@@ -52,17 +50,18 @@ internal fun EditProfileScreen(
 ) {
     var firstName by remember { mutableStateOf(initialFirstName) }
     var lastName by remember { mutableStateOf(initialLastName) }
+    // From Settings our bio arrives a moment after the screen opens: it is filled in then,
+    // unless the user has typed there already.
     var description by remember { mutableStateOf(initialDescription) }
+    var descriptionTouched by remember { mutableStateOf(false) }
+    LaunchedEffect(profileLoaded, initialDescription) {
+        if (profileLoaded && !descriptionTouched) description = initialDescription
+    }
     var avatar by remember { mutableStateOf<PickedMedia?>(null) }
     val pickAvatar = rememberSingleImagePickLauncher { avatar = it }
 
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Редактирование") },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.Back, contentDescription = "Назад") } },
-            )
-        },
+        topBar = { SubPageBar("Редактирование", onBack) },
     ) { padding ->
         Column(
             Modifier
@@ -70,9 +69,9 @@ internal fun EditProfileScreen(
                 .padding(padding)
                 .imePadding()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(Spacing.l),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(Spacing.m),
         ) {
             Box(Modifier.size(96.dp).clip(CircleShape).clickable { pickAvatar() }, contentAlignment = Alignment.Center) {
                 val picked = avatar
@@ -105,17 +104,20 @@ internal fun EditProfileScreen(
             )
             OutlinedTextField(
                 value = description,
-                onValueChange = { description = it },
+                onValueChange = {
+                    description = it
+                    descriptionTouched = true
+                },
                 label = { Text("О себе") },
                 modifier = Modifier.fillMaxWidth(),
                 maxLines = 4,
             )
             Button(
                 onClick = { onSave(firstName, lastName, description, avatar) },
-                enabled = firstName.isNotBlank() && !busy,
+                enabled = firstName.isNotBlank() && !busy && profileLoaded,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Text("Сохранить")
+                if (busy || !profileLoaded) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Text("Сохранить")
             }
         }
     }

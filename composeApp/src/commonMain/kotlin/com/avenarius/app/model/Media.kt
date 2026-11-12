@@ -85,4 +85,16 @@ sealed interface OutAttach {
         val token: String,
         val durationSeconds: Int,
     ) : OutAttach
+
+    /** A new poll: [settings] is the server's bit set (1 anonymous, 2 multiple answers, 4 revote). */
+    data class Poll(
+        val title: String,
+        val answers: List<String>,
+        val settings: Int,
+    ) : OutAttach
+
+    /** A sticker, by its id: nothing to upload. */
+    data class Sticker(
+        val stickerId: Long,
+    ) : OutAttach
 }

@@ -20,6 +20,14 @@ class PrivacyParseTest {
     }
 
     @Test
+    fun nobodyIsReadInBothSpellings() {
+        val p = parse("""{"INCOMING_CALL":"NOBODY","CHATS_INVITE":"_NONE_"}""")
+
+        assertEquals(Privacy.NOBODY, p.incomingCall)
+        assertEquals(Privacy.NOBODY, p.chatsInvite)
+    }
+
+    @Test
     fun missingKeysFallBackToOpenDefaults() {
         assertEquals(Privacy(), JsonObject(emptyMap()).toPrivacy())
         assertEquals(true, parse("""{"HIDDEN":1}""").hideOnline)

@@ -1,23 +1,24 @@
 package com.avenarius.app.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,15 +26,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.model.isSavedMessages
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.components.Avatar
+import com.avenarius.app.ui.components.CircleIconButton
+import com.avenarius.app.ui.components.PillTextField
 import com.avenarius.app.ui.components.clickableRow
+import com.avenarius.app.ui.plural
+import com.avenarius.app.ui.theme.Spacing
 
 /** "Send to…" chat picker shown when media is shared into the app from elsewhere. */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun SharePickScreen(
     chats: List<Chat>,
@@ -52,7 +58,7 @@ internal fun SharePickScreen(
             text = {
                 Text(
                     if (count > 1) {
-                        "Отправить $count вложений в «${target.title}»?"
+                        "Отправить $count ${plural(count, "вложение", "вложения", "вложений")} в «${target.title}»?"
                     } else {
                         "Отправить в «${target.title}»?"
                     },
@@ -69,18 +75,30 @@ internal fun SharePickScreen(
             },
         )
     }
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(if (count > 1) "Отправить ($count) в…" else "Отправить в…") },
-                navigationIcon = {
-                    IconButton(onClick = onCancel) { Icon(AppIcons.Close, contentDescription = "Отмена") }
-                },
+    var query by remember { mutableStateOf("") }
+    val shown = remember(chats, query) { chats.filter { it.title.contains(query.trim(), ignoreCase = true) } }
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = Spacing.m, vertical = Spacing.s), verticalAlignment = Alignment.CenterVertically) {
+            CircleIconButton(AppIcons.Close, "Отмена", onCancel, size = 48.dp, container = MaterialTheme.colorScheme.surfaceContainer)
+            Spacer(Modifier.width(Spacing.m))
+            Text(
+                if (count > 1) "Отправить ($count) в…" else "Отправить в…",
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-        },
-    ) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-            items(chats, key = { it.id }) { chat ->
+        }
+        PillTextField(query, { query = it }, "Поиск", Modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.xs))
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding =
+                PaddingValues(
+                    top = Spacing.xs,
+                    bottom =
+                        Spacing.l + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
+                ),
+        ) {
+            items(shown, key = { it.id }) { chat ->
                 val otherId = if (chat.isDialog) chat.id xor myId else null
                 val avatarUrl =
                     if (chat.isDialog) {
@@ -92,18 +110,19 @@ internal fun SharePickScreen(
                     Modifier
                         .fillMaxWidth()
                         .clickableRow { confirmTarget = chat }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = Spacing.l, vertical = Spacing.s),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Avatar(chat.title, avatarUrl, 44.dp)
-                    Spacer(Modifier.width(12.dp))
+                    if (chat.isSavedMessages) SavedMessagesAvatar(48.dp) else Avatar(chat.title, avatarUrl, 48.dp)
+                    Spacer(Modifier.width(Spacing.m))
                     Column(Modifier.weight(1f)) {
-                        Text(chat.title, maxLines = 1, style = MaterialTheme.typography.bodyLarge)
+                        Text(chat.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
                         chat.lastMessageText?.let {
                             Text(
-                                it,
+                                it.replace('\n', ' '),
                                 maxLines = 1,
-                                style = MaterialTheme.typography.bodySmall,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
