@@ -20,8 +20,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -32,12 +33,14 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -51,6 +54,8 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
@@ -446,7 +451,8 @@ internal fun ChatScreen(
     }
 
     // Index of the first unread message (the divider sits just before it).
-    val firstUnread = if (unreadAtOpen in 1..messages.size) messages.size - unreadAtOpen else -1
+    // More unread than loaded: the oldest loaded one (reaching the top then pages back the rest).
+    val firstUnread = if (unreadAtOpen > 0 && messages.isNotEmpty()) (messages.size - unreadAtOpen).coerceAtLeast(0) else -1
 
     // Saved (with the list state), so coming back from the info page keeps the place instead of re-running the open jump.
     var positioned by rememberSaveable(chat?.id) { mutableStateOf(false) }
@@ -461,7 +467,7 @@ internal fun ChatScreen(
         when {
             !positioned -> {
                 // Jump INSTANTLY to the first unread (or the very end) on open.
-                if (firstUnread > 0) listState.scrollToItem(firstUnread) else listState.scrollToEnd(messages.lastIndex)
+                if (firstUnread >= 0) listState.scrollToItem(firstUnread) else listState.scrollToEnd(messages.lastIndex)
                 positioned = true
             }
             olderPrepended(messages.first().listKey(), restoreAnchor?.first) -> {
@@ -487,6 +493,22 @@ internal fun ChatScreen(
         }
         prevSize = messages.size
         prevLastKey = messages.last().listKey()
+    }
+
+    // The keyboard shrinks the list from below: if we were at the end, stay pinned to it while it slides up.
+    val ime = WindowInsets.ime
+    val density = LocalDensity.current
+    LaunchedEffect(listState, ime) {
+        var prev = 0
+        snapshotFlow { ime.getBottom(density) }.collect { bottom ->
+            val lastVisible =
+                listState.layoutInfo.visibleItemsInfo
+                    .lastOrNull()
+                    ?.index ?: 0
+            val total = listState.layoutInfo.totalItemsCount
+            if (bottom > prev && total > 0 && lastVisible >= total - 2) listState.scrollToEnd(total - 1)
+            prev = bottom
+        }
     }
 
     // Trigger loading older messages when the user reaches the very top.
@@ -1100,7 +1122,7 @@ internal fun ChatScreen(
                         // floating chip above still tracks the day while scrolling.
                         val prevAny = messages.getOrNull(index - 1)
                         if (prevAny == null || !sameDay(prevAny.time, msg.time)) ServiceMessageChip(formatDay(msg.time))
-                        if (index == firstUnread && firstUnread > 0) NewMessagesDivider()
+                        if (index == firstUnread) NewMessagesDivider()
                         // Group service events ("X joined", "X added Y") render as a centered chip.
                         val service = msg.service
                         if (service != null) {
@@ -3250,6 +3272,7 @@ internal fun MediaViewerOverlay(
     onDownload: () -> Unit,
     onForward: () -> Unit,
     onShare: () -> Unit,
+    onGalleryPage: (Int) -> Unit,
     onClose: () -> Unit,
 ) {
     PlatformBackHandler(enabled = true, onBack = onClose)
@@ -3260,7 +3283,18 @@ internal fun MediaViewerOverlay(
     ) {
         when (viewer) {
             is MediaViewer.Loading -> CircularProgressIndicator(color = MaterialTheme.colorScheme.onScrim)
-            is MediaViewer.Image -> ZoomableImage(viewer.url)
+            is MediaViewer.Image ->
+                if (viewer.gallery.size > 1) {
+                    val gallery = viewer.gallery
+                    val pager =
+                        rememberPagerState(initialPage = gallery.indexOf(viewer.copy(gallery = emptyList())).coerceAtLeast(0)) {
+                            gallery.size
+                        }
+                    LaunchedEffect(pager) { snapshotFlow { pager.settledPage }.collect(onGalleryPage) }
+                    HorizontalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1) { ZoomableImage(gallery[it].url) }
+                } else {
+                    ZoomableImage(viewer.url)
+                }
             is MediaViewer.Video -> VideoPlayer(viewer.url, Modifier.fillMaxWidth().heightIn(max = 480.dp))
         }
         Row(Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 8.dp, end = 4.dp)) {
@@ -3304,10 +3338,16 @@ internal fun MediaViewerOverlay(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class) // transformable(canPan)
 @Composable
 private fun ZoomableImage(url: String) {
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    val transform =
+        rememberTransformableState { zoom, pan, _ ->
+            scale = (scale * zoom).coerceIn(1f, 5f)
+            offset = if (scale == 1f) Offset.Zero else offset + pan
+        }
     AsyncImage(
         model = url,
         contentDescription = null,
@@ -3316,12 +3356,8 @@ private fun ZoomableImage(url: String) {
             Modifier
                 .fillMaxSize()
                 .graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y)
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        scale = (scale * zoom).coerceIn(1f, 5f)
-                        offset += pan
-                    }
-                },
+                // One-finger drags pan only a zoomed photo; otherwise they're left to the pager's swipe.
+                .transformable(transform, canPan = { scale > 1f }),
     )
 }
 

@@ -358,6 +358,7 @@ fun App(viewModel: AppViewModel) {
                         onDownload = viewModel::downloadCurrentMedia,
                         onForward = viewModel::forwardCurrentMedia,
                         onShare = viewModel::shareCurrentMedia,
+                        onGalleryPage = viewModel::showGalleryPhoto,
                         onClose = viewModel::closeMedia,
                     )
                 }

@@ -252,6 +252,8 @@ sealed interface MediaViewer {
     data class Image(
         override val url: String,
         override val source: Message? = null,
+        /** The photos the viewer swipes through (this one included); empty for a lone image. */
+        val gallery: List<Image> = emptyList(),
     ) : MediaViewer
 
     data class Video(
@@ -1057,8 +1059,13 @@ class AppViewModel(
         viewModelScope.launch {
             client.readMarks.collect { rm ->
                 val myId = _state.value.account?.userId ?: return@collect
+                // Our own mark: we read this chat on another device (e.g. the official app).
+                if (rm.userId == myId) {
+                    // shortcut: a partial read elsewhere also clears the whole badge; count the messages after the mark if that matters.
+                    _state.update { s -> s.copy(chats = s.chats.map { if (it.id == rm.chatId) it.copy(unreadCount = 0) else it }) }
+                    return@collect
+                }
                 // Only the OTHER party reading our messages flips them to ✓✓.
-                if (rm.userId == myId) return@collect
                 _state.update { s ->
                     // Persist the new read mark on the chat so re-opening it (same
                     // session) still shows ✓✓ — not just the currently open messages.
@@ -1782,7 +1789,8 @@ class AppViewModel(
             it.copy(
                 screen = Screen.CHAT,
                 currentChat = chat,
-                messages = cached,
+                // With unread messages the cache can't place the first unread (it lacks the new ones): wait for the server page.
+                messages = if (chat.unreadCount > 0) emptyList() else cached,
                 draft = drafts[chat.id] ?: "",
                 openUnreadCount = chat.unreadCount,
                 loadingOlder = false,
@@ -2530,7 +2538,13 @@ class AppViewModel(
         // From the open chat or an info page's media tab (which may be another chat).
         val source = messageId?.let { id -> (s.messages + s.infoMedia?.items.orEmpty()).firstOrNull { it.id == id } }
         when (media.type) {
-            MediaType.PHOTO -> _state.update { it.copy(mediaViewer = MediaViewer.Image(media.url, source)) }
+            MediaType.PHOTO -> {
+                // Swipe through the photos of the list the tap came from: the chat or the info page's media tab.
+                val list = if (source != null && s.messages.any { it.id == source.id }) s.messages else s.infoMedia?.items.orEmpty()
+                val gallery = list.flatMap { m -> m.media.filter { it.type == MediaType.PHOTO }.map { MediaViewer.Image(it.url, m) } }
+                val current = MediaViewer.Image(media.url, source)
+                _state.update { it.copy(mediaViewer = current.copy(gallery = if (current in gallery) gallery else emptyList())) }
+            }
             MediaType.VIDEO -> {
                 val chatId = source?.chatId ?: s.currentChat?.id
                 val mid = messageId?.toLongOrNull()
@@ -2583,6 +2597,13 @@ class AppViewModel(
     fun openImage(url: String) = _state.update { it.copy(mediaViewer = MediaViewer.Image(url)) }
 
     fun closeMedia() = _state.update { it.copy(mediaViewer = null) }
+
+    /** The viewer swiped to another photo of its gallery: download/share/forward now act on that one. */
+    fun showGalleryPhoto(index: Int) =
+        _state.update { s ->
+            val v = s.mediaViewer as? MediaViewer.Image ?: return@update s
+            v.gallery.getOrNull(index)?.let { s.copy(mediaViewer = it.copy(gallery = v.gallery)) } ?: s
+        }
 
     /** Reconstructs ✓✓ on loaded history: our messages the other side has already read. */
     private fun withReadMarks(
