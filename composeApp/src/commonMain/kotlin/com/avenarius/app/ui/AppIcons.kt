@@ -3,49 +3,89 @@ package com.avenarius.app.ui
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.painter.Painter
 import com.avenarius.app.resources.Res
+import com.avenarius.app.resources.add
+import com.avenarius.app.resources.alternate_email
 import com.avenarius.app.resources.arrow_back
 import com.avenarius.app.resources.arrow_downward
 import com.avenarius.app.resources.attach_file
+import com.avenarius.app.resources.bar_chart
+import com.avenarius.app.resources.block
+import com.avenarius.app.resources.bookmark_filled
+import com.avenarius.app.resources.brightness_auto
 import com.avenarius.app.resources.call
 import com.avenarius.app.resources.call_end
 import com.avenarius.app.resources.cameraswitch
+import com.avenarius.app.resources.campaign_filled
 import com.avenarius.app.resources.chat
 import com.avenarius.app.resources.chat_filled
 import com.avenarius.app.resources.check
+import com.avenarius.app.resources.check_circle_filled
+import com.avenarius.app.resources.chevron_right
 import com.avenarius.app.resources.cleaning_services
 import com.avenarius.app.resources.close
 import com.avenarius.app.resources.collapse_content
 import com.avenarius.app.resources.content_copy
+import com.avenarius.app.resources.dark_mode
+import com.avenarius.app.resources.database
 import com.avenarius.app.resources.delete
+import com.avenarius.app.resources.description_filled
+import com.avenarius.app.resources.devices_filled
 import com.avenarius.app.resources.done_all
+import com.avenarius.app.resources.download
 import com.avenarius.app.resources.edit
 import com.avenarius.app.resources.expand_content
+import com.avenarius.app.resources.favorite_filled
+import com.avenarius.app.resources.folder
+import com.avenarius.app.resources.format_size
 import com.avenarius.app.resources.forward
 import com.avenarius.app.resources.group
+import com.avenarius.app.resources.group_add
 import com.avenarius.app.resources.group_filled
+import com.avenarius.app.resources.image_filled
 import com.avenarius.app.resources.info
+import com.avenarius.app.resources.keep_off
+import com.avenarius.app.resources.keyboard_arrow_down
+import com.avenarius.app.resources.keyboard_arrow_up
+import com.avenarius.app.resources.keyboard_return
+import com.avenarius.app.resources.light_mode
+import com.avenarius.app.resources.link
+import com.avenarius.app.resources.location_on
 import com.avenarius.app.resources.lock
 import com.avenarius.app.resources.logout
+import com.avenarius.app.resources.mark_chat_read
+import com.avenarius.app.resources.mark_chat_unread
 import com.avenarius.app.resources.mic
 import com.avenarius.app.resources.mic_off
+import com.avenarius.app.resources.mood
 import com.avenarius.app.resources.more_vert
 import com.avenarius.app.resources.notifications
 import com.avenarius.app.resources.notifications_off
 import com.avenarius.app.resources.open_in_new
+import com.avenarius.app.resources.palette_filled
 import com.avenarius.app.resources.pause
+import com.avenarius.app.resources.person_add
+import com.avenarius.app.resources.person_filled
+import com.avenarius.app.resources.photo_camera_filled
 import com.avenarius.app.resources.play_arrow
 import com.avenarius.app.resources.push_pin
 import com.avenarius.app.resources.qr_code_scanner
 import com.avenarius.app.resources.refresh
 import com.avenarius.app.resources.reply
+import com.avenarius.app.resources.schedule
 import com.avenarius.app.resources.search
 import com.avenarius.app.resources.send
 import com.avenarius.app.resources.settings
 import com.avenarius.app.resources.settings_filled
+import com.avenarius.app.resources.share
+import com.avenarius.app.resources.shield_filled
+import com.avenarius.app.resources.smart_toy_filled
+import com.avenarius.app.resources.verified_filled
 import com.avenarius.app.resources.video_chat
 import com.avenarius.app.resources.videocam
 import com.avenarius.app.resources.videocam_off
+import com.avenarius.app.resources.visibility
 import com.avenarius.app.resources.visibility_off
+import com.avenarius.app.resources.zoom_in
 import org.jetbrains.compose.resources.painterResource
 
 /**
@@ -129,4 +169,46 @@ object AppIcons {
     val Video: Painter @Composable get() = painterResource(Res.drawable.videocam)
     val VideoOff: Painter @Composable get() = painterResource(Res.drawable.videocam_off)
     val SwitchCamera: Painter @Composable get() = painterResource(Res.drawable.cameraswitch)
+
+    // Redesign additions.
+    val Add: Painter @Composable get() = painterResource(Res.drawable.add)
+    val PersonAdd: Painter @Composable get() = painterResource(Res.drawable.person_add)
+    val GroupAdd: Painter @Composable get() = painterResource(Res.drawable.group_add)
+    val Link: Painter @Composable get() = painterResource(Res.drawable.link)
+    val Share: Painter @Composable get() = painterResource(Res.drawable.share)
+    val ArrowDown: Painter @Composable get() = painterResource(Res.drawable.keyboard_arrow_down)
+    val ArrowUp: Painter @Composable get() = painterResource(Res.drawable.keyboard_arrow_up)
+    val Emoji: Painter @Composable get() = painterResource(Res.drawable.mood)
+    val MarkRead: Painter @Composable get() = painterResource(Res.drawable.mark_chat_read)
+    val MarkUnread: Painter @Composable get() = painterResource(Res.drawable.mark_chat_unread)
+    val Location: Painter @Composable get() = painterResource(Res.drawable.location_on)
+    val Poll: Painter @Composable get() = painterResource(Res.drawable.bar_chart)
+    val Block: Painter @Composable get() = painterResource(Res.drawable.block)
+    val Devices: Painter @Composable get() = painterResource(Res.drawable.devices_filled)
+    val Palette: Painter @Composable get() = painterResource(Res.drawable.palette_filled)
+    val Shield: Painter @Composable get() = painterResource(Res.drawable.shield_filled)
+    val Channel: Painter @Composable get() = painterResource(Res.drawable.campaign_filled)
+    val Person: Painter @Composable get() = painterResource(Res.drawable.person_filled)
+    val Username: Painter @Composable get() = painterResource(Res.drawable.alternate_email)
+    val Clock: Painter @Composable get() = painterResource(Res.drawable.schedule)
+    val Unpin: Painter @Composable get() = painterResource(Res.drawable.keep_off)
+    val Download: Painter @Composable get() = painterResource(Res.drawable.download)
+    val DarkMode: Painter @Composable get() = painterResource(Res.drawable.dark_mode)
+    val LightMode: Painter @Composable get() = painterResource(Res.drawable.light_mode)
+    val AutoMode: Painter @Composable get() = painterResource(Res.drawable.brightness_auto)
+    val ChevronRight: Painter @Composable get() = painterResource(Res.drawable.chevron_right)
+    val Visibility: Painter @Composable get() = painterResource(Res.drawable.visibility)
+    val Bookmark: Painter @Composable get() = painterResource(Res.drawable.bookmark_filled)
+    val Image: Painter @Composable get() = painterResource(Res.drawable.image_filled)
+    val Camera: Painter @Composable get() = painterResource(Res.drawable.photo_camera_filled)
+    val Document: Painter @Composable get() = painterResource(Res.drawable.description_filled)
+    val Folder: Painter @Composable get() = painterResource(Res.drawable.folder)
+    val Storage: Painter @Composable get() = painterResource(Res.drawable.database)
+    val FontSize: Painter @Composable get() = painterResource(Res.drawable.format_size)
+    val Zoom: Painter @Composable get() = painterResource(Res.drawable.zoom_in)
+    val Verified: Painter @Composable get() = painterResource(Res.drawable.verified_filled)
+    val CheckCircle: Painter @Composable get() = painterResource(Res.drawable.check_circle_filled)
+    val Enter: Painter @Composable get() = painterResource(Res.drawable.keyboard_return)
+    val Heart: Painter @Composable get() = painterResource(Res.drawable.favorite_filled)
+    val Bot: Painter @Composable get() = painterResource(Res.drawable.smart_toy_filled)
 }

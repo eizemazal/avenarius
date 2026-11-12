@@ -1,27 +1,30 @@
 package com.avenarius.app.ui
 
-import androidx.compose.foundation.background
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +56,7 @@ import com.avenarius.app.ui.screens.SharePickScreen
 import com.avenarius.app.ui.screens.TwoFaScreen
 import com.avenarius.app.ui.screens.UserScreen
 import com.avenarius.app.ui.theme.AvenariusTheme
+import com.avenarius.app.ui.theme.aurora
 import com.avenarius.app.ui.theme.isDark
 import okio.Path.Companion.toPath
 
@@ -82,7 +86,8 @@ fun App(viewModel: AppViewModel) {
                 }
             }.build()
     }
-    val state by viewModel.state.collectAsStateWithLifecycle()
+    val liveState by viewModel.state.collectAsStateWithLifecycle()
+    val state = liveState
     // A link the app couldn't resolve itself goes to the browser, so a tap never ends
     // in silence.
     val uriHandler = LocalUriHandler.current
@@ -102,19 +107,36 @@ fun App(viewModel: AppViewModel) {
             }
 
             Box(Modifier.fillMaxSize()) {
-                Column(Modifier.fillMaxSize()) {
-                    // Thin "reconnecting" strip while we transparently re-establish the
-                    // connection — shown over the chat list / open chat, never a bounce.
-                    val showBar = state.reconnecting && (state.screen == Screen.CHATS || state.screen == Screen.CHAT)
-                    if (showBar) {
-                        // On a cold start the cached chat list is already on screen while
-                        // the first sync runs, so the strip says "connecting" — calling
-                        // that a *re*connection would be wrong.
-                        ReconnectingBar(reconnecting = state.syncedOnce)
-                    }
-                    // The strip took the status-bar inset, so the screen's top bar mustn't add it again.
-                    Box(Modifier.weight(1f).then(if (showBar) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier)) {
-                        when (state.screen) {
+                // The connection state is shown inside each screen's header (see
+                // MainScreen / ChatScreen), not as a strip that pushes the UI down.
+                val mainState = rememberSaveableStateHolder()
+                // A chat keeps its scroll position while an info page is on top of it; leaving it
+                // (or opening another chat) forgets it, so the next open lands on the unread again.
+                val openChatId = liveState.currentChat?.id
+                val lastChatId = remember { arrayOf<Long?>(null) }
+                LaunchedEffect(openChatId) {
+                    lastChatId[0]?.takeIf { it != openChatId }?.let { mainState.removeState("chat-$it") }
+                    lastChatId[0] = openChatId
+                }
+                val connecting = if (state.reconnecting) (if (state.syncedOnce) "Переподключение…" else "Подключение…") else null
+                AnimatedContent(
+                    targetState = state.screen,
+                    transitionSpec = {
+                        // Going deeper slides in from the right, going back slides out to it.
+                        val dir = if (targetState.depth() >= initialState.depth()) 1 else -1
+                        (slideInHorizontally(tween(280)) { it / 5 * dir } + fadeIn(tween(220))) togetherWith
+                            (slideOutHorizontally(tween(280)) { -it / 5 * dir } + fadeOut(tween(160)))
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                    label = "screen",
+                ) { screen ->
+                    // A screen that is animating out keeps the state it was last shown with, so it
+                    // doesn't blank out (leaving a chat clears the open chat) while it slides away.
+                    val shown = remember { arrayOf(liveState) }
+                    if (liveState.screen == screen) shown[0] = liveState
+                    val state = shown[0]
+                    Box(Modifier.fillMaxSize()) {
+                        when (screen) {
                             Screen.LOADING -> LoadingScreen(reconnecting = state.reconnecting)
                             Screen.LOGIN ->
                                 LoginScreen(
@@ -180,114 +202,128 @@ fun App(viewModel: AppViewModel) {
                                     error = state.error,
                                     onSubmit = viewModel::submitRegister,
                                 )
-                            Screen.CHATS -> MainScreen(state, viewModel)
-                            Screen.USER ->
-                                UserScreen(
-                                    user = state.viewingUser,
-                                    isMe = state.viewingUser?.id == state.account?.userId,
-                                    onBack = viewModel::closeUser,
-                                    onWrite = viewModel::openDialogWith,
-                                    onAvatarClick = viewModel::openImage,
-                                    onEdit = viewModel::openEditProfile,
-                                )
+                            // Kept across visits (settings scroll, list position) while a chat or a page is open on top.
+                            Screen.CHATS -> mainState.SaveableStateProvider("main") { MainScreen(state, viewModel) }
+                            Screen.USER -> UserScreen(state, viewModel)
                             Screen.EDIT_PROFILE ->
                                 EditProfileScreen(
                                     initialFirstName = state.account?.firstName ?: "",
                                     initialLastName = state.account?.lastName ?: "",
                                     initialDescription = state.viewingUser?.description ?: "",
+                                    // Our profile (and so the bio) is in: until then saving could wipe the bio.
+                                    profileLoaded = state.viewingUser?.id != null && state.viewingUser?.id == state.account?.userId,
                                     currentAvatarUrl = state.account?.avatarUrl,
                                     busy = state.busy,
                                     onBack = viewModel::onBack,
                                     onSave = viewModel::saveProfile,
                                 )
                             Screen.CHAT ->
-                                ChatScreen(
-                                    chat = state.currentChat,
-                                    // Includes bubbles whose attachments are still
-                                    // uploading, so they survive leaving the chat.
-                                    messages = state.visibleMessages,
-                                    myId = state.account?.userId ?: -1L,
-                                    // Merge resolved non-contact group members so their
-                                    // name + avatar show instead of a "—" placeholder.
-                                    contacts = state.contacts + state.groupMembers.mapValues { it.value.name },
-                                    senderAvatars =
-                                        state.contactsList.associate { it.id to it.avatarUrl } +
-                                            state.groupMembers.mapValues { it.value.avatarUrl },
-                                    unreadAtOpen = state.openUnreadCount,
-                                    busy = state.busy,
-                                    error = state.error,
-                                    loadingOlder = state.loadingOlder,
-                                    replyingTo = state.replyingTo,
-                                    sendingAttachment = state.sendingAttachment,
-                                    stagedMedia = state.stagedMedia,
-                                    initialDraft = state.draft,
-                                    typingText =
-                                        state.typingText(
-                                            state.currentChat?.id,
-                                            state.contacts + state.groupMembers.mapValues { it.value.name },
-                                        ),
-                                    onlineUsers = state.onlineUsers,
-                                    presence = state.presence,
-                                    onLoadOlder = viewModel::loadOlder,
-                                    onBack = viewModel::backToChats,
-                                    onStartCall = viewModel::startCall,
-                                    onToggleMute = viewModel::toggleMuteCurrentChat,
-                                    onDraftChange = viewModel::setDraft,
-                                    onSend = viewModel::sendMessage,
-                                    onSendMedia = viewModel::sendMedia,
-                                    onStagedConsumed = viewModel::consumeStagedMedia,
-                                    onMediaClick = viewModel::openMedia,
-                                    onOpenUser = viewModel::openUser,
-                                    onReact = viewModel::toggleReaction,
-                                    onReply = viewModel::startReply,
-                                    onForward = viewModel::startForward,
-                                    onEditMessage = viewModel::editMessage,
-                                    onDeleteMessage = viewModel::deleteMessage,
-                                    onRetrySend = viewModel::retrySend,
-                                    onDiscardSend = viewModel::discardPendingSend,
-                                    onLinkClick = viewModel::openLink,
-                                    onSendVoice = viewModel::sendVoice,
-                                    onSendVideoNote = viewModel::sendVideoNote,
-                                    onVoiceClick = viewModel::toggleVoice,
-                                    onVoiceSeek = viewModel::seekVoice,
-                                    playingVoice = state.playingVoice,
-                                    onVideoNoteClick = viewModel::toggleVideoNote,
-                                    playingVideoNote = state.playingVideoNote,
-                                    onFileClick = viewModel::openOrDownloadFile,
-                                    downloadedFiles = state.downloadedFiles.keys,
-                                    downloadingFiles = state.downloadingFiles,
-                                    onCancelReply = viewModel::cancelReply,
-                                    onDeleteChat = viewModel::deleteCurrentChat,
-                                    onLeaveGroup = viewModel::leaveCurrentGroup,
-                                    onOpenGroup = { state.currentChat?.let { viewModel.openGroup(it) } },
-                                    readMarks = state.readMarks,
-                                    readingMessageId = state.readingMessageId,
-                                    readMarksLoading = state.readMarksLoading,
-                                    onShowReadBy = viewModel::openReadBy,
-                                    onCloseReadBy = viewModel::closeReadBy,
-                                    readerInfo = viewModel::readerInfo,
-                                )
-                            Screen.GROUP ->
-                                GroupScreen(
-                                    group = state.viewingGroup,
-                                    members = state.groupMemberList,
-                                    loading = state.groupMembersLoading,
-                                    myId = state.account?.userId ?: -1L,
-                                    contacts = state.contactsList,
-                                    notice = state.notice,
-                                    onNoticeShown = viewModel::clearNotice,
-                                    onBack = viewModel::closeGroup,
-                                    onOpenUser = viewModel::openUser,
-                                    onAddMembers = viewModel::addMembersToGroup,
-                                    onRemoveMember = viewModel::removeGroupMember,
-                                    onSetAdmin = viewModel::setGroupAdmin,
-                                )
+                                mainState.SaveableStateProvider("chat-${state.currentChat?.id}") {
+                                    ChatScreen(
+                                        chat = state.currentChat,
+                                        // Includes bubbles whose attachments are still
+                                        // uploading, so they survive leaving the chat.
+                                        messages = state.visibleMessages,
+                                        myId = state.account?.userId ?: -1L,
+                                        // Merge resolved non-contact group members so their
+                                        // name + avatar show instead of a "—" placeholder.
+                                        contacts = state.contacts + state.groupMembers.mapValues { it.value.name },
+                                        senderAvatars =
+                                            state.contactsList.associate { it.id to it.avatarUrl } +
+                                                state.groupMembers.mapValues { it.value.avatarUrl },
+                                        unreadAtOpen = state.openUnreadCount,
+                                        busy = state.busy,
+                                        error = state.error,
+                                        loadingOlder = state.loadingOlder,
+                                        replyingTo = state.replyingTo,
+                                        sendingAttachment = state.sendingAttachment,
+                                        stagedMedia = state.stagedMedia,
+                                        initialDraft = state.draft,
+                                        typingText =
+                                            state.typingText(
+                                                state.currentChat?.id,
+                                                state.contacts + state.groupMembers.mapValues { it.value.name },
+                                            ),
+                                        onlineUsers = state.onlineUsers,
+                                        presence = state.presence,
+                                        connecting = connecting,
+                                        onLoadOlder = viewModel::loadOlder,
+                                        onBack = viewModel::onBack,
+                                        onStartCall = viewModel::startCall,
+                                        onToggleMute = viewModel::toggleMuteCurrentChat,
+                                        onDraftChange = viewModel::setDraft,
+                                        onSend = viewModel::sendMessage,
+                                        onSendMedia = viewModel::sendMedia,
+                                        onStagedConsumed = viewModel::consumeStagedMedia,
+                                        onMediaClick = viewModel::openMedia,
+                                        onOpenUser = viewModel::openUser,
+                                        onReact = viewModel::toggleReaction,
+                                        onReply = viewModel::startReply,
+                                        onForward = viewModel::startForward,
+                                        onEditMessage = viewModel::editMessage,
+                                        onRetrySend = viewModel::retrySend,
+                                        onDiscardSend = viewModel::discardPendingSend,
+                                        onLinkClick = viewModel::openLink,
+                                        onSendVoice = viewModel::sendVoice,
+                                        onSendVideoNote = viewModel::sendVideoNote,
+                                        onVoiceClick = viewModel::toggleVoice,
+                                        onVoiceSeek = viewModel::seekVoice,
+                                        playingVoice = state.playingVoice,
+                                        onVideoNoteClick = viewModel::toggleVideoNote,
+                                        playingVideoNote = state.playingVideoNote,
+                                        onFileClick = viewModel::openOrDownloadFile,
+                                        downloadedFiles = state.downloadedFiles.keys,
+                                        downloadingFiles = state.downloadingFiles,
+                                        onCancelReply = viewModel::cancelReply,
+                                        onDeleteChat = viewModel::deleteCurrentChat,
+                                        onLeaveGroup = viewModel::leaveCurrentGroup,
+                                        onOpenGroup = { state.currentChat?.let { viewModel.openGroup(it) } },
+                                        readMarks = state.readMarks,
+                                        readingMessageId = state.readingMessageId,
+                                        readMarksLoading = state.readMarksLoading,
+                                        onShowReadBy = viewModel::openReadBy,
+                                        onCloseReadBy = viewModel::closeReadBy,
+                                        readerInfo = viewModel::readerInfo,
+                                        quickReaction = state.quickReaction,
+                                        sendOnEnter = state.sendOnEnter,
+                                        reactionsMenu = state.reactionsMenu,
+                                        onForwardMany = viewModel::startForward,
+                                        onDeleteMany = viewModel::deleteMessages,
+                                        onPin = viewModel::setPinned,
+                                        startSearch = state.searchOnOpen,
+                                        onSearchStarted = viewModel::searchOpened,
+                                        onSearch = viewModel::searchOpenChat,
+                                        serverHits = state.chatSearchHits,
+                                        onLoadUntil = viewModel::loadUntil,
+                                        jumpTo = state.jumpTo,
+                                        onJumped = viewModel::jumped,
+                                        onClearHistory = { state.currentChat?.let(viewModel::clearHistory) },
+                                        pressingButtons = state.pressingButtons,
+                                        onBotButton = viewModel::pressBotButton,
+                                        reactionsMessageId = state.reactionsMessageId,
+                                        reactedBy = state.reactedBy,
+                                        onShowReactions = viewModel::openReactions,
+                                        onCloseReactions = viewModel::closeReactions,
+                                        onVote = viewModel::vote,
+                                        onWriteTo = viewModel::openDialogWith,
+                                        stickerShelf = state.stickerShelf,
+                                        stickers = state.stickers,
+                                        onOpenStickers = viewModel::loadStickerShelf,
+                                        onLoadStickers = viewModel::loadStickers,
+                                        onSendSticker = viewModel::sendSticker,
+                                        pollsInDialogs = state.pollsInDialogs,
+                                        onSendPoll = viewModel::sendPoll,
+                                        wallpaper = state.wallpaper,
+                                        searchLeavesChat = state.searchOpenedChat,
+                                    )
+                                }
+                            Screen.GROUP -> GroupScreen(state, viewModel)
                             Screen.SHARE_PICK ->
                                 SharePickScreen(
                                     chats = state.chats,
                                     contacts = state.contactsList,
                                     myId = state.account?.userId ?: -1L,
-                                    count = state.sharePending.size,
+                                    count = state.sharePending.size + state.forwarding.size,
                                     onPick = viewModel::pickShareTarget,
                                     onCancel = viewModel::cancelShare,
                                 )
@@ -295,6 +331,25 @@ fun App(viewModel: AppViewModel) {
                         }
                     }
                 }
+                // Notices (server refusals, "copied") on every screen but the main one, which has its own host.
+                val snackbar = remember { SnackbarHostState() }
+                val ownHost = state.screen == Screen.CHATS
+                LaunchedEffect(state.notice, ownHost) {
+                    if (!ownHost) {
+                        state.notice?.let {
+                            snackbar.showSnackbar(it)
+                            viewModel.clearNotice()
+                        }
+                    }
+                }
+                SnackbarHost(
+                    snackbar,
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .imePadding()
+                        .navigationBarsPadding()
+                        .padding(bottom = 72.dp),
+                )
                 // Full-screen image/video viewer, layered above everything.
                 state.mediaViewer?.let {
                     MediaViewerOverlay(
@@ -331,36 +386,28 @@ fun App(viewModel: AppViewModel) {
     }
 }
 
+/** How deep a screen sits in the navigation, to pick the direction of the transition. */
+private fun Screen.depth(): Int =
+    when (this) {
+        Screen.LOADING -> 0
+        Screen.LOGIN -> 1
+        Screen.CODE, Screen.LOGIN_RESTRICTED, Screen.REGISTER -> 2
+        Screen.PASSWORD -> 3
+        Screen.PASSWORD_RESTORE -> 4
+        Screen.CHATS -> 5
+        Screen.CHAT, Screen.SHARE_PICK, Screen.ABOUT, Screen.TWOFA -> 6
+        Screen.USER, Screen.GROUP -> 7
+        Screen.EDIT_PROFILE -> 8
+    }
+
 @Composable
 private fun LoadingScreen(reconnecting: Boolean) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            CircularProgressIndicator()
+    Box(Modifier.fillMaxSize().aurora(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            CircularProgressIndicator(strokeWidth = 3.dp)
             if (reconnecting) {
                 Text("Переподключение…", style = MaterialTheme.typography.bodyMedium)
             }
         }
-    }
-}
-
-@Composable
-private fun ReconnectingBar(reconnecting: Boolean) {
-    Row(
-        // Edge-to-edge: sit below the status bar instead of under its icons.
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.secondaryContainer)
-            .statusBarsPadding()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-        Spacer(Modifier.width(8.dp))
-        Text(
-            if (reconnecting) "Переподключение…" else "Подключение…",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-        )
     }
 }

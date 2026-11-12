@@ -23,6 +23,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +46,8 @@ internal fun EditProfileScreen(
     initialFirstName: String,
     initialLastName: String,
     initialDescription: String,
+    /** Our profile has loaded; until then the bio is unknown and saving stays off. */
+    profileLoaded: Boolean = true,
     currentAvatarUrl: String?,
     busy: Boolean,
     onBack: () -> Unit,
@@ -52,7 +55,13 @@ internal fun EditProfileScreen(
 ) {
     var firstName by remember { mutableStateOf(initialFirstName) }
     var lastName by remember { mutableStateOf(initialLastName) }
+    // From Settings our bio arrives a moment after the screen opens: it is filled in then,
+    // unless the user has typed there already.
     var description by remember { mutableStateOf(initialDescription) }
+    var descriptionTouched by remember { mutableStateOf(false) }
+    LaunchedEffect(profileLoaded, initialDescription) {
+        if (profileLoaded && !descriptionTouched) description = initialDescription
+    }
     var avatar by remember { mutableStateOf<PickedMedia?>(null) }
     val pickAvatar = rememberSingleImagePickLauncher { avatar = it }
 
@@ -105,17 +114,20 @@ internal fun EditProfileScreen(
             )
             OutlinedTextField(
                 value = description,
-                onValueChange = { description = it },
+                onValueChange = {
+                    description = it
+                    descriptionTouched = true
+                },
                 label = { Text("О себе") },
                 modifier = Modifier.fillMaxWidth(),
                 maxLines = 4,
             )
             Button(
                 onClick = { onSave(firstName, lastName, description, avatar) },
-                enabled = firstName.isNotBlank() && !busy,
+                enabled = firstName.isNotBlank() && !busy && profileLoaded,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Text("Сохранить")
+                if (busy || !profileLoaded) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Text("Сохранить")
             }
         }
     }

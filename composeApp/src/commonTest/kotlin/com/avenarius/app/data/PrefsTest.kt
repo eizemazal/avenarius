@@ -4,6 +4,7 @@ import com.avenarius.app.ui.theme.Accent
 import com.avenarius.app.ui.theme.accentOf
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -91,7 +92,51 @@ class PrefsTest {
         assertEquals(setOf(5L, -12L), prefs.pinnedChats)
         storage.putString("pinned_chats", "7,junk,,9")
         assertEquals(setOf(7L, 9L), prefs.pinnedChats)
+        // Old bare ids read as time 0 next to timed ones; setting the set keeps known times.
+        storage.putString("pinned_chats", "7,9:1500")
+        assertEquals(mapOf(7L to 0L, 9L to 1500L), prefs.pinnedAt)
+        prefs.pinnedChats = setOf(9L, 4L)
+        assertEquals(mapOf(9L to 1500L, 4L to 0L), prefs.pinnedAt)
         prefs.clear()
         assertEquals(emptySet(), prefs.pinnedChats)
+    }
+
+    @Test
+    fun sendOnEnterDefaultsToFalseAndRoundTrips() {
+        val storage = InMemoryStorage()
+        val prefs = Prefs(storage)
+        assertFalse(prefs.sendOnEnter)
+
+        prefs.sendOnEnter = true
+        assertTrue(Prefs(storage).sendOnEnter)
+
+        prefs.sendOnEnter = false
+        assertFalse(Prefs(storage).sendOnEnter)
+    }
+
+    @Test
+    fun quickReactionDefaultsToNullAndRoundTrips() {
+        val storage = InMemoryStorage()
+        val prefs = Prefs(storage)
+        assertNull(prefs.quickReaction)
+
+        prefs.quickReaction = "👍"
+        assertEquals("👍", Prefs(storage).quickReaction)
+
+        prefs.quickReaction = null
+        assertNull(Prefs(storage).quickReaction)
+    }
+
+    @Test
+    fun clearKeepsInputPreferences() {
+        // They are device preferences, like the theme, not account data.
+        val prefs = Prefs(InMemoryStorage())
+        prefs.sendOnEnter = true
+        prefs.quickReaction = "❤"
+
+        prefs.clear()
+
+        assertTrue(prefs.sendOnEnter)
+        assertEquals("❤", prefs.quickReaction)
     }
 }

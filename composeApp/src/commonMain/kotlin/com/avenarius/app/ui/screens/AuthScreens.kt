@@ -1,5 +1,6 @@
 package com.avenarius.app.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -7,11 +8,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -25,11 +29,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.AppLinks
 import com.avenarius.app.ui.PasswordRestore
 import com.avenarius.app.ui.RestoreStep
@@ -37,13 +43,17 @@ import com.avenarius.app.ui.components.ErrorText
 import com.avenarius.app.ui.components.SmallSpinner
 import com.avenarius.app.ui.components.openUriSafely
 import com.avenarius.app.ui.nowMillis
+import com.avenarius.app.ui.plural
+import com.avenarius.app.ui.theme.accentGradient
+import com.avenarius.app.ui.theme.aurora
+import com.avenarius.app.ui.theme.onAccentGradient
 import kotlinx.coroutines.delay
 
 @Composable
 private fun CenteredForm(content: @Composable ColumnScopeAlias.() -> Unit) {
     // The form stays centred while it fits, and scrolls (rather than being clipped)
     // on short screens or once the soft keyboard has eaten half of the window.
-    Box(Modifier.fillMaxSize().imePadding(), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize().aurora().imePadding(), contentAlignment = Alignment.Center) {
         Column(
             modifier =
                 Modifier
@@ -79,7 +89,13 @@ internal fun LoginScreen(
 ) {
     var phone by remember { mutableStateOf("+7") }
     CenteredForm {
-        Text("Авенариус", style = MaterialTheme.typography.headlineMedium)
+        Box(
+            Modifier.size(84.dp).clip(RoundedCornerShape(28.dp)).background(accentGradient()),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(AppIcons.ChatsSelected, contentDescription = null, tint = onAccentGradient(), modifier = Modifier.size(42.dp))
+        }
+        Text("Авенариус", style = MaterialTheme.typography.headlineLarge)
         // What this app is, for the many who never open "About": said plainly, with
         // nothing it can't back up (messages do still go through Max's servers).
         Text(
@@ -126,7 +142,7 @@ internal fun CodeScreen(
     CenteredForm {
         Text("Подтверждение", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "Введите код из SMS ($codeLength цифр)",
+            "Введите код из SMS ($codeLength ${plural(codeLength, "цифра", "цифры", "цифр")})",
             style = MaterialTheme.typography.bodyMedium,
         )
         OutlinedTextField(

@@ -20,6 +20,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** Process-wide: the new-chat sheet opening again must not ask again after a denial. */
+private var contactsAskedThisSession = false
+
 @Composable
 actual fun rememberDeviceContacts(): List<DeviceContact> {
     val context = LocalContext.current
@@ -33,13 +36,15 @@ actual fun rememberDeviceContacts(): List<DeviceContact> {
         rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) load()
         }
-    // Ask once when the picker first appears; the address book is exactly relevant then.
+    // Ask when the picker first appears (the address book is exactly relevant then), at most once per app
+    // session. After a "don't ask again" denial the system answers the request itself without a prompt.
     LaunchedEffect(Unit) {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) ==
             PackageManager.PERMISSION_GRANTED
         ) {
             load()
-        } else {
+        } else if (!contactsAskedThisSession) {
+            contactsAskedThisSession = true
             requestPermission.launch(Manifest.permission.READ_CONTACTS)
         }
     }

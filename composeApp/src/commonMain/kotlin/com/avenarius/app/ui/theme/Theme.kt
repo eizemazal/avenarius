@@ -1,18 +1,40 @@
 package com.avenarius.app.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.avenarius.app.resources.Res
+import com.avenarius.app.resources.onest_bold
+import com.avenarius.app.resources.onest_medium
+import com.avenarius.app.resources.onest_regular
+import com.avenarius.app.resources.onest_semibold
+import org.jetbrains.compose.resources.Font
 
 /** User-selectable theme; SYSTEM follows the OS setting. */
 enum class ThemeMode { SYSTEM, DARK, LIGHT }
@@ -169,7 +191,164 @@ internal fun AvenariusTheme(
 ) {
     val base = LocalDensity.current
     CompositionLocalProvider(LocalDensity provides Density(base.density * uiScale, base.fontScale * fontScale)) {
-        MaterialTheme(colorScheme = appColorScheme(dark, accent), content = content)
+        MaterialTheme(
+            colorScheme = appColorScheme(dark, accent),
+            typography = appTypography(),
+            shapes = AppShapes,
+            content = content,
+        )
+    }
+}
+
+/** Generous, soft corners everywhere: sheets, cards, dialogs and menus share one family. */
+private val AppShapes =
+    Shapes(
+        extraSmall = RoundedCornerShape(10.dp),
+        small = RoundedCornerShape(14.dp),
+        medium = RoundedCornerShape(18.dp),
+        large = RoundedCornerShape(24.dp),
+        extraLarge = RoundedCornerShape(32.dp),
+    )
+
+/** Onest (SIL OFL, full Cyrillic) in place of the platform face, on the M3 type scale. */
+@Composable
+private fun appTypography(): Typography {
+    val onest =
+        FontFamily(
+            Font(Res.font.onest_regular, FontWeight.Normal),
+            Font(Res.font.onest_medium, FontWeight.Medium),
+            Font(Res.font.onest_semibold, FontWeight.SemiBold),
+            Font(Res.font.onest_bold, FontWeight.Bold),
+        )
+    val base = Typography()
+
+    fun TextStyle.onest(weight: FontWeight? = null) = copy(fontFamily = onest, fontWeight = weight ?: fontWeight)
+    return Typography(
+        displayLarge = base.displayLarge.onest(FontWeight.Bold),
+        displayMedium = base.displayMedium.onest(FontWeight.Bold),
+        displaySmall = base.displaySmall.onest(FontWeight.Bold),
+        headlineLarge = base.headlineLarge.onest(FontWeight.Bold),
+        headlineMedium = base.headlineMedium.onest(FontWeight.Bold),
+        headlineSmall = base.headlineSmall.onest(FontWeight.SemiBold),
+        titleLarge = base.titleLarge.onest(FontWeight.SemiBold),
+        titleMedium = base.titleMedium.onest(FontWeight.SemiBold).copy(letterSpacing = 0.sp),
+        titleSmall = base.titleSmall.onest(FontWeight.SemiBold),
+        bodyLarge = base.bodyLarge.onest().copy(letterSpacing = 0.sp),
+        bodyMedium = base.bodyMedium.onest().copy(letterSpacing = 0.sp),
+        bodySmall = base.bodySmall.onest().copy(letterSpacing = 0.sp),
+        labelLarge = base.labelLarge.onest(),
+        labelMedium = base.labelMedium.onest().copy(letterSpacing = 0.sp),
+        labelSmall = base.labelSmall.onest().copy(letterSpacing = 0.sp),
+    )
+}
+
+/**
+ * The signature accent gradient (own bubbles, the compose button, unread badges):
+ * vivid in light, a deeper mid-tone in dark so white text stays readable on it.
+ */
+@Composable
+@ReadOnlyComposable
+internal fun accentGradientColors(): List<Color> {
+    val cs = MaterialTheme.colorScheme
+    return if (isLightTheme()) {
+        listOf(cs.primary, lerp(cs.primary, cs.tertiary, 0.6f))
+    } else {
+        // Material You schemes can be nearly grey: lift the stops' saturation (not their
+        // brightness, which white text needs low) so the gradient still reads as one.
+        listOf(
+            lerp(cs.primaryContainer, cs.primary, 0.3f).atLeastSaturated(0.45f),
+            lerp(cs.tertiaryContainer, cs.tertiary, 0.3f).atLeastSaturated(0.45f),
+        )
+    }
+}
+
+@Composable
+@ReadOnlyComposable
+internal fun accentGradient(): Brush = Brush.linearGradient(accentGradientColors())
+
+/** Content color on [accentGradient]. */
+@Composable
+@ReadOnlyComposable
+internal fun onAccentGradient(): Color = if (isLightTheme()) MaterialTheme.colorScheme.onPrimary else Color.White
+
+/**
+ * "Aurora" backdrop: the surface with two soft accent glows bleeding in from opposite
+ * corners. Used behind conversations and profile headers; [strength] scales the glow.
+ */
+@Composable
+internal fun Modifier.aurora(strength: Float = 1f): Modifier {
+    val cs = MaterialTheme.colorScheme
+    val light = isLightTheme()
+    val base = if (light) lerp(cs.surface, cs.primaryContainer, 0.35f) else cs.surfaceContainerLowest
+    val a = cs.primary.copy(alpha = (if (light) 0.30f else 0.22f) * strength)
+    val b = cs.tertiary.copy(alpha = (if (light) 0.28f else 0.18f) * strength)
+    return drawBehind {
+        drawRect(base)
+        val r = size.maxDimension * 0.75f
+        drawRect(Brush.radialGradient(listOf(a, Color.Transparent), center = Offset(0f, 0f), radius = r))
+        drawRect(Brush.radialGradient(listOf(b, Color.Transparent), center = Offset(size.width, size.height), radius = r))
+    }
+}
+
+/** The chat backgrounds, in the picker's order: the aurora, a plain surface, four textured accent gradients. */
+internal val WALLPAPERS = listOf("Аврора", "Без фона", "Волна", "Рассвет", "Сумерки", "Глубина")
+
+/**
+ * The chat background [preset] (an index into [WALLPAPERS]): soft enough in both themes that
+ * bubbles, which are opaque, always read. The gradients carry a faint pattern, dots or diagonal
+ * lines, built once per size and only redrawn.
+ */
+@Composable
+internal fun Modifier.chatWallpaper(preset: Int): Modifier {
+    if (preset !in 1..WALLPAPERS.lastIndex) return aurora()
+    val cs = MaterialTheme.colorScheme
+    val light = isLightTheme()
+    val base = if (light) lerp(cs.surface, cs.primaryContainer, 0.28f) else cs.surfaceContainerLowest
+    if (preset == 1) return drawBehind { drawRect(base) }
+    val a = cs.primary.copy(alpha = if (light) 0.30f else 0.24f)
+    val b = cs.tertiary.copy(alpha = if (light) 0.28f else 0.20f)
+    val c = cs.primary.rotateHue(45f).copy(alpha = if (light) 0.26f else 0.20f)
+    val ink = (if (light) Color.Black else Color.White).copy(alpha = if (light) 0.05f else 0.06f)
+    val dots = preset % 2 == 0
+    return drawWithCache {
+        val w = size.width
+        val h = size.height
+        val brush =
+            when (preset) {
+                2 -> Brush.linearGradient(listOf(a, b), start = Offset.Zero, end = Offset(w, h))
+                3 -> Brush.verticalGradient(listOf(b, Color.Transparent, a))
+                4 -> Brush.linearGradient(listOf(c, Color.Transparent, a), start = Offset(w, 0f), end = Offset(0f, h))
+                else -> Brush.radialGradient(listOf(a, b, Color.Transparent), center = Offset(w / 2, h), radius = maxOf(w, h))
+            }
+        val step = 22.dp.toPx()
+        val pattern =
+            Path().apply {
+                if (dots) {
+                    var y = step / 2
+                    var row = 0
+                    while (y < h) {
+                        var x = if (row++ % 2 == 0) step / 2 else step
+                        while (x < w) {
+                            addOval(Rect(Offset(x, y), 1.6.dp.toPx()))
+                            x += step
+                        }
+                        y += step
+                    }
+                } else {
+                    var x = -h
+                    while (x < w) {
+                        moveTo(x, h)
+                        lineTo(x + h, 0f)
+                        x += step
+                    }
+                }
+            }
+        val stroke = Stroke(1.dp.toPx())
+        onDrawBehind {
+            drawRect(base)
+            drawRect(brush)
+            if (dots) drawPath(pattern, ink) else drawPath(pattern, ink, style = stroke)
+        }
     }
 }
 
@@ -225,8 +404,8 @@ internal val AvenariusColorsLight =
 /** Glyphs drawn over photos/video and their dark [ColorScheme.scrim]: light in every theme. */
 val ColorScheme.onScrim: Color get() = Color.White
 
-/** This color with its hue turned by [degrees]; saturation and brightness are kept. */
-fun Color.rotateHue(degrees: Float): Color {
+/** Hue (degrees), saturation and value of this color. */
+private fun Color.toHsv(): Triple<Float, Float, Float> {
     val max = maxOf(red, green, blue)
     val d = max - minOf(red, green, blue)
     val hue =
@@ -236,8 +415,19 @@ fun Color.rotateHue(degrees: Float): Color {
             max == green -> 60f * ((blue - red) / d + 2f)
             else -> 60f * ((red - green) / d + 4f)
         }
-    val turned = ((hue + degrees) % 360f + 360f) % 360f
-    return Color.hsv(turned, if (max == 0f) 0f else d / max, max, alpha)
+    return Triple(hue, if (max == 0f) 0f else d / max, max)
+}
+
+/** This color with its hue turned by [degrees]; saturation and brightness are kept. */
+fun Color.rotateHue(degrees: Float): Color {
+    val (hue, sat, value) = toHsv()
+    return Color.hsv(((hue + degrees) % 360f + 360f) % 360f, sat, value, alpha)
+}
+
+/** This color at least [min] saturated, brightness kept (a true grey has no hue to bring out). */
+internal fun Color.atLeastSaturated(min: Float): Color {
+    val (hue, sat, value) = toHsv()
+    return if (sat >= min || sat == 0f) this else Color.hsv((hue % 360f + 360f) % 360f, min, value, alpha)
 }
 
 // Kept for source compatibility; the dark scheme is the historical default.

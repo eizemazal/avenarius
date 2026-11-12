@@ -8,9 +8,11 @@ import com.avenarius.app.data.MessageCache
 import com.avenarius.app.data.Prefs
 import com.avenarius.app.data.RatePrompt
 import com.avenarius.app.model.Account
+import com.avenarius.app.model.BotButton
 import com.avenarius.app.model.CallState
 import com.avenarius.app.model.CallStatus
 import com.avenarius.app.model.Chat
+import com.avenarius.app.model.ChatFolder
 import com.avenarius.app.model.DeviceContact
 import com.avenarius.app.model.FileAttach
 import com.avenarius.app.model.MaxLink
@@ -23,24 +25,39 @@ import com.avenarius.app.model.OutAttach
 import com.avenarius.app.model.PendingAttach
 import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
+import com.avenarius.app.model.Poll
 import com.avenarius.app.model.Reaction
 import com.avenarius.app.model.RecordedVoice
 import com.avenarius.app.model.SearchResult
+import com.avenarius.app.model.Sticker
+import com.avenarius.app.model.StickerShelf
+import com.avenarius.app.model.TextSpan
 import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.UserInfo
+import com.avenarius.app.model.editable
+import com.avenarius.app.model.isSavedMessages
 import com.avenarius.app.model.parseMaxLink
 import com.avenarius.app.model.previewLabel
+import com.avenarius.app.model.remapSpans
 import com.avenarius.app.net.AuthRejectedException
 import com.avenarius.app.net.AuthSessionExpiredException
+import com.avenarius.app.net.BlockedPage
 import com.avenarius.app.net.CallEngine
 import com.avenarius.app.net.CallSession
 import com.avenarius.app.net.CodeResult
 import com.avenarius.app.net.DemoMaxApi
+import com.avenarius.app.net.FoldersUpdate
 import com.avenarius.app.net.FoundUser
 import com.avenarius.app.net.MaxApi
+import com.avenarius.app.net.MessageHit
 import com.avenarius.app.net.PasswordSetupRequiredException
 import com.avenarius.app.net.Presence
 import com.avenarius.app.net.Privacy
+import com.avenarius.app.net.SessionInfo
+import com.avenarius.app.net.SyncResult
+import com.avenarius.app.net.applying
+import com.avenarius.app.net.applyingOrder
+import com.avenarius.app.net.swapping
 import com.avenarius.app.ui.AppLinks.MAX_RECOVERY_DEFAULT
 import com.avenarius.app.ui.theme.Accent
 import com.avenarius.app.ui.theme.ThemeMode
@@ -61,7 +78,11 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.Uuid
 
 enum class Screen {
     LOADING,
@@ -181,9 +202,36 @@ fun AppState.typingText(
     return when (labels.size) {
         1 -> "${labels[0]} печатает…"
         2 -> "${labels[0]}, ${labels[1]} печатают…"
-        else -> "${labels.size} участника печатают…"
+        else -> "${labels.size} ${plural(labels.size, "участник", "участника", "участников")} печатают…"
     }
 }
+
+/** The info pages' attachment tabs, and the attach types each asks CHAT_MEDIA for. */
+enum class MediaKind(
+    val label: String,
+    val types: List<String>,
+    val matches: (Message) -> Boolean,
+) {
+    MEDIA("Медиа", listOf("PHOTO", "VIDEO"), { it.media.isNotEmpty() }),
+    FILES("Файлы", listOf("FILE"), { it.files.isNotEmpty() }),
+    LINKS("Ссылки", listOf("SHARE"), { it.linkPreview != null }),
+    VOICE("Голосовые", listOf("AUDIO"), { it.voice != null }),
+}
+
+/** One info-page tab of a chat's attachments, newest first, and where its loading stands. */
+data class ChatMedia(
+    val chatId: Long,
+    val kind: MediaKind,
+    val items: List<Message> = emptyList(),
+    val loading: Boolean = true,
+    /** Nothing older left to load. */
+    val end: Boolean = false,
+    /** The oldest message the server returned (matching the tab or not): the next page starts there. */
+    val anchor: String? = null,
+    /** Every id the server returned so far, to tell a page that brought nothing new. */
+    val seen: Set<String> = emptySet(),
+    val pages: Int = 0,
+)
 
 /** Full-screen media viewer overlay state. */
 sealed interface MediaViewer {
@@ -284,14 +332,26 @@ data class AppState(
     val groupMembers: Map<Long, UserInfo> = emptyMap(),
     /** Selected app theme (System/Dark/Light). */
     val theme: ThemeMode = ThemeMode.SYSTEM,
-    /** Chats pinned to the top of the list (per device, cleared on logout). */
-    val pinnedChats: Set<Long> = emptySet(),
+    /** How many chats may be pinned (server config); null = no limit known. */
+    val pinLimit: Int? = null,
+    /** Polls may be sent in 1:1 dialogs (server config). */
+    val pollsInDialogs: Boolean = false,
     /** Appearance settings, persisted like [theme]. */
     val accent: Accent = Accent.BLUE,
     val uiScale: Float = 1f,
     val fontScale: Float = 1f,
+    /** The chat background preset (an index into WALLPAPERS). */
+    val wallpaper: Int = 0,
     /** A message awaiting a chat pick to forward it (Screen.SHARE_PICK). */
-    val forwarding: Message? = null,
+    val forwarding: List<Message> = emptyList(),
+    /** "Отправка по вводу": Enter sends instead of breaking the line. */
+    val sendOnEnter: Boolean = false,
+    /** The emoji a double tap on a message reacts with; null = off. */
+    val quickReaction: String? = null,
+    /** The server's reaction picker; empty until the first sync (the UI then uses its own). */
+    val reactionsMenu: List<String> = emptyList(),
+    /** Signed-in devices for the "Устройства" sheet; null until loaded. */
+    val sessions: List<SessionInfo>? = null,
     /** True in the offline Google Play review "demo account" session. */
     val demoMode: Boolean = false,
     /** Show the "rate the app" card on the chat list (see [AppViewModel.rateNow]). */
@@ -340,6 +400,38 @@ data class AppState(
     val playingVideoNote: PlayingVideoNote? = null,
     /** The in-progress voice/video call (ringing, dialing, or active), or null. */
     val call: CallState? = null,
+    /** The open info page's attachment tab. */
+    val infoMedia: ChatMedia? = null,
+    /** The chat being opened should start with its in-chat search showing (the info page's «Найти»). */
+    val searchOnOpen: Boolean = false,
+    /** The info page whose «Найти» showed the open chat: back from the chat returns there. */
+    val searchBackTo: Screen? = null,
+    /** That «Найти» opened the chat itself (it was not open under the page): back closes it too. */
+    val searchOpenedChat: Boolean = false,
+    /** Marker for the next page of the chat-list search's public results; null: no more. */
+    val searchMarker: Long? = null,
+    /** The chat-list search's «СООБЩЕНИЯ»: one hit per chat. */
+    val messageHits: List<MessageHit> = emptyList(),
+    /** The server's hits for the open chat's in-chat search. */
+    val chatSearchHits: List<Message> = emptyList(),
+    /** A message of the open chat to scroll to and flash once it is loaded (a search hit). */
+    val jumpTo: String? = null,
+    /** The message whose «Реакции» sheet is open, if any. */
+    val reactionsMessageId: String? = null,
+    /** Who reacted with what in that sheet (emoji → user ids); null while loading. */
+    val reactedBy: Map<String, List<Long>>? = null,
+    /** Bot buttons whose press is on its way to the server. */
+    val pressingButtons: Set<BotButton> = emptySet(),
+    /** Settings → Безопасность → Чёрный список; null while loading. */
+    val blockedUsers: List<UserInfo>? = null,
+    /** The account's server-side chat folders, in their order («Все» included); empty = none (or not loaded). */
+    val folders: List<ChatFolder> = emptyList(),
+    /** The server's folder order as it sent it: system folders that come as an id alone are kept, so a reorder sends them back. */
+    val folderOrder: List<String> = emptyList(),
+    /** The sticker panel's sets and recents, loaded once a session; null until then. */
+    val stickerShelf: StickerShelf? = null,
+    /** Stickers fetched so far, by id. */
+    val stickers: Map<Long, Sticker> = emptyMap(),
 ) {
     /**
      * The open chat's messages with its still-sending bubbles merged in.
@@ -392,7 +484,9 @@ class AppViewModel(
                 accent = accentOf(prefs.accent),
                 uiScale = prefs.uiScale,
                 fontScale = prefs.fontScale,
-                pinnedChats = prefs.pinnedChats,
+                sendOnEnter = prefs.sendOnEnter,
+                quickReaction = prefs.quickReaction,
+                wallpaper = prefs.chatWallpaper,
             ),
         )
 
@@ -740,12 +834,33 @@ class AppViewModel(
             }
         }
 
+    // Where the profile editor was opened from (our profile page or Settings), to go back there.
+    private var editProfileReturn = Screen.CHATS
+
     /** Opens the edit-profile screen (for the signed-in user). */
-    fun openEditProfile() = _state.update { it.copy(screen = Screen.EDIT_PROFILE) }
+    fun openEditProfile() {
+        val s = _state.value
+        val myId = s.account?.userId ?: return
+        editProfileReturn = s.screen
+        _state.update { it.copy(screen = Screen.EDIT_PROFILE) }
+        // From Settings our profile isn't loaded: fetch it, or the bio field would start
+        // blank and saving would wipe the bio.
+        if (s.viewingUser?.id != myId) {
+            _state.update { it.copy(viewingUser = null) }
+            viewModelScope.launch {
+                runCatching { client.fetchUser(myId) }.getOrNull()?.let { me ->
+                    _state.update { if (it.screen == Screen.EDIT_PROFILE) it.copy(viewingUser = me) else it }
+                }
+            }
+        }
+    }
+
+    private fun AppState.leavingEditProfile() =
+        copy(screen = editProfileReturn, viewingUser = viewingUser.takeIf { editProfileReturn == Screen.USER })
 
     /**
      * Saves the profile: uploads [avatar] (if any) as the new photo, then PROFILE-updates
-     * name + bio. On success refreshes our account/profile and returns to the profile.
+     * name + bio. On success refreshes our account/profile and goes back where the editor was opened from.
      */
     fun saveProfile(
         firstName: String,
@@ -765,16 +880,16 @@ class AppViewModel(
             // Re-fetch our own profile so the new avatar/bio show immediately.
             val me = runCatching { client.fetchUser(myId) }.getOrNull()
             _state.update { s ->
-                s.copy(
-                    screen = Screen.USER,
-                    account =
-                        s.account?.copy(
-                            firstName = firstName.trim(),
-                            lastName = lastName.trim().ifBlank { null },
-                            avatarUrl = me?.avatarUrl ?: s.account.avatarUrl,
-                        ),
-                    viewingUser = me ?: s.viewingUser,
-                )
+                s
+                    .copy(
+                        account =
+                            s.account?.copy(
+                                firstName = firstName.trim(),
+                                lastName = lastName.trim().ifBlank { null },
+                                avatarUrl = me?.avatarUrl ?: s.account.avatarUrl,
+                            ),
+                        viewingUser = me ?: s.viewingUser,
+                    ).leavingEditProfile()
             }
         }
     }
@@ -835,6 +950,10 @@ class AppViewModel(
     // cids with an upload/send job running, so a retry can't double-fire.
     private val activeSends = mutableMapOf<Long, Job>()
 
+    // Users already asked for this session (whether or not the server answered). Declared
+    // before init, which resolves titles on its first sync.
+    private val askedUsers = mutableSetOf<Long>()
+
     // Unsent per-chat input, loaded once and written back on a debounce.
     private val drafts: MutableMap<Long, String> by lazy { cache.drafts().toMutableMap() }
     private var draftFlushJob: Job? = null
@@ -891,18 +1010,10 @@ class AppViewModel(
                     val known = s.chats.any { it.id == msg.chatId }
                     val updated =
                         if (known) {
-                            s.chats.map { c ->
-                                if (c.id != msg.chatId) {
-                                    c
-                                } else {
-                                    c.copy(
-                                        lastMessageText = msg.previewLabel().ifBlank { c.lastMessageText },
-                                        lastEventTime = maxOf(c.lastEventTime, msg.time),
-                                        // Bump the badge only for chats we aren't looking at,
-                                        // and never for our own (echoed) messages.
-                                        unreadCount = if (!isOpen && !fromMe) c.unreadCount + 1 else c.unreadCount,
-                                    )
-                                }
+                            s.chats.withLastMessage(msg).map { c ->
+                                // Bump the badge only for chats we aren't looking at,
+                                // and never for our own (echoed) messages.
+                                if (c.id == msg.chatId && !isOpen && !fromMe) c.copy(unreadCount = c.unreadCount + 1) else c
                             }
                         } else {
                             // A message for a chat not in our list: a dialog we deleted that
@@ -920,6 +1031,8 @@ class AppViewModel(
                                     title = title,
                                     lastMessageText = msg.previewLabel(),
                                     lastEventTime = msg.time,
+                                    lastSenderId = msg.senderId,
+                                    lastMessageTime = msg.time,
                                     unreadCount = if (fromMe) 0 else 1,
                                     isDialog = isDialog,
                                 )
@@ -931,11 +1044,11 @@ class AppViewModel(
                     )
                 }
                 // We're looking at this chat -> immediately mark the new message read.
-                // Use max(now, msg.time) so device-clock skew can't make the mark
-                // fall short of the (server-timestamped) message.
+                // The mark is the message's own (server) time: "now" would also mark
+                // anything that arrived after it as read.
                 val mid = msg.id
                 if (isOpen && mid != null) {
-                    runCatching { client.markRead(msg.chatId, mid, maxOf(nowMillis(), msg.time)) }
+                    runCatching { client.markRead(msg.chatId, mid, msg.time) }
                 }
                 if (isOpen && !fromMe) resolveUnknownSenders(listOf(msg))
             }
@@ -1051,16 +1164,35 @@ class AppViewModel(
                         } else {
                             chat
                         }
+
+                    // Mute state lives in the config, not on the chat object, and a title we
+                    // already resolved beats the push's placeholder: keep ours.
+                    fun over(old: Chat) =
+                        resolved.copy(
+                            muted = old.muted,
+                            favIndex = old.favIndex,
+                            title = if (resolved.title.startsWith("Диалог ")) old.title else resolved.title,
+                        )
                     val merged =
                         if (s.chats.any { it.id == chat.id }) {
-                            s.chats.map { if (it.id == chat.id) resolved else it }
+                            s.chats.map { if (it.id == chat.id) over(it) else it }
                         } else {
                             s.chats + resolved
                         }
-                    s.copy(chats = merged.sortedByDescending { it.lastEventTime })
+                    s.copy(
+                        chats = merged.sortedByDescending { it.lastEventTime },
+                        // The open chat follows too, so its pinned bar is right after someone (un)pins.
+                        currentChat = s.currentChat?.let { if (it.id == chat.id) over(it) else it },
+                    )
                 }
                 // A pushed dialog from a non-contact still reads "Диалог <id>" — resolve it.
                 resolveDialogTitles()
+            }
+        }
+        // Folders changed on another device (op277).
+        viewModelScope.launch {
+            client.folderUpdates.collect { u ->
+                _state.update { it.copy(folders = it.folders.applying(u), folderOrder = it.folderOrder.applyingOrder(u)) }
             }
         }
         // The other party deleted a message (op142): drop it from the open chat live.
@@ -1316,27 +1448,13 @@ class AppViewModel(
                     try {
                         client.connect(prefs.deviceId, prefs.mtInstance)
                         val result = client.sync(token)
-                        result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
-                        prefs.userId = result.account.userId
-                        _state.update { s ->
-                            s.copy(
-                                screen = if (s.screen == Screen.LOADING) Screen.CHATS else s.screen,
-                                account = result.account,
-                                chats = result.chats,
-                                contacts = result.contacts,
-                                contactsList = result.contactsList,
-                                onlineUsers = result.online,
-                                presence = result.presence,
-                                privacy = result.privacy,
-                                reconnecting = false,
-                                busy = false,
-                                error = null,
-                                syncedOnce = true,
-                            )
+                        applySync(result) { s ->
+                            s.copy(screen = if (s.screen == Screen.LOADING) Screen.CHATS else s.screen, reconnecting = false, busy = false)
                         }
                         lastReconnectAt = nowMillis()
                         ratePrompt.recordUse(lastReconnectAt)
                         resolveDialogTitles()
+                        afterSync()
                         _state.value.currentChat?.let { reloadOpenChat(it) } // catch up missed messages
                         return@launch
                     } catch (e: CancellationException) {
@@ -1474,7 +1592,8 @@ class AppViewModel(
     /** Starts the offline demo session against [DemoMaxApi] (no network). */
     private fun startDemo() {
         demoPending = false
-        client = DemoMaxApi()
+        val demo = DemoMaxApi()
+        client = demo
         viewModelScope.launch {
             val result = client.sync("demo")
             _state.update {
@@ -1488,11 +1607,17 @@ class AppViewModel(
                     onlineUsers = result.online,
                     presence = result.presence,
                     privacy = result.privacy,
+                    reactionsMenu = result.reactionsMenu,
+                    pinLimit = result.pinLimit,
+                    pollsInDialogs = result.pollsInDialogs,
+                    // The demo has no live pushes, so its typing hint is set once and stays.
+                    typing = demo.typingNow,
                     busy = false,
                     error = null,
                     reconnecting = false,
                 )
             }
+            loadFolders()
         }
     }
 
@@ -1620,27 +1745,10 @@ class AppViewModel(
         client.disconnect()
         client.connect(prefs.deviceId, prefs.mtInstance)
         val result = client.sync(token)
-        // Token refresh: the server rolls the login token on each sync. Persist the
-        // new one so it doesn't expire between launches and force a re-login.
-        result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
-        prefs.userId = result.account.userId
-        _state.update {
-            it.copy(
-                screen = Screen.CHATS,
-                account = result.account,
-                chats = result.chats,
-                contacts = result.contacts,
-                contactsList = result.contactsList,
-                onlineUsers = result.online,
-                presence = result.presence,
-                privacy = result.privacy,
-                busy = false,
-                error = null,
-                syncedOnce = true,
-            )
-        }
+        applySync(result) { it.copy(screen = Screen.CHATS, busy = false) }
         ratePrompt.recordUse(nowMillis())
         resolveDialogTitles()
+        afterSync()
         pendingInvite?.let { invite ->
             pendingInvite = null
             openInvite(invite)
@@ -1661,7 +1769,11 @@ class AppViewModel(
         if (chat != null) openChat(chat) else pendingOpenChatId = id // open once chats load
     }
 
-    fun openChat(chat: Chat) {
+    fun openChat(
+        chat: Chat,
+        /** A message to load history back to and scroll to (a search hit). */
+        jumpTo: Message? = null,
+    ) {
         // Snapshot the unread count now (for the "new messages" divider), since
         // we're about to clear it by marking the chat read.
         // Paint the cached tail straight away; the history fetch below replaces it.
@@ -1675,6 +1787,12 @@ class AppViewModel(
                 openUnreadCount = chat.unreadCount,
                 loadingOlder = false,
                 noMoreOlder = false,
+                chatSearchHits = emptyList(),
+                jumpTo = null,
+                searchBackTo = null,
+                searchOpenedChat = false,
+                reactionsMessageId = null,
+                reactedBy = null,
             )
         }
         launchBusy {
@@ -1692,14 +1810,31 @@ class AppViewModel(
             history.lastOrNull()?.let { last ->
                 val lastId = last.id
                 if (lastId != null) {
-                    runCatching { client.markRead(chat.id, lastId, maxOf(nowMillis(), last.time)) }
+                    runCatching { client.markRead(chat.id, lastId, last.time) }
                 }
             }
             _state.update { s ->
                 s.copy(chats = s.chats.map { if (it.id == chat.id) it.copy(unreadCount = 0) else it })
             }
+            if (jumpTo != null) {
+                // Flagged, so a scroll to the top can't fetch the same page alongside it.
+                _state.update { it.copy(loadingOlder = true) }
+                try {
+                    pageBackTo(chat, jumpTo)
+                } finally {
+                    _state.update { it.copy(loadingOlder = false) }
+                }
+                _state.update { it.copy(jumpTo = jumpTo.id) }
+            }
         }
     }
+
+    /** Opens "Избранное" (notes to self), creating the row if the chat was never used. */
+    fun openSavedMessages() =
+        openChat(
+            _state.value.chats.firstOrNull { it.isSavedMessages }
+                ?: Chat(id = 0L, title = "Избранное", lastMessageText = null, lastEventTime = nowMillis(), isDialog = true),
+        )
 
     fun backToChats() {
         stopVoice()
@@ -1707,7 +1842,16 @@ class AppViewModel(
         // Decided before the chat is closed: its draft and failed sends matter.
         val offerRating = isCalmMomentForRating()
         flushDrafts()
-        _state.update { it.copy(screen = Screen.CHATS, currentChat = null, messages = emptyList(), draft = "") }
+        _state.update {
+            it.copy(
+                screen = Screen.CHATS,
+                currentChat = null,
+                messages = emptyList(),
+                draft = "",
+                searchBackTo = null,
+                searchOpenedChat = false,
+            )
+        }
         if (offerRating) {
             ratePromptShownThisSession = true
             _state.update { it.copy(showRatePrompt = true) }
@@ -1769,7 +1913,7 @@ class AppViewModel(
     fun closeUser() {
         // Return to the conversation if one is open, otherwise the main screen.
         _state.update {
-            it.copy(screen = if (it.currentChat != null) Screen.CHAT else Screen.CHATS, viewingUser = null)
+            it.copy(screen = if (it.currentChat != null) Screen.CHAT else Screen.CHATS, viewingUser = null, infoMedia = null)
         }
     }
 
@@ -1799,7 +1943,7 @@ class AppViewModel(
 
     fun closeGroup() {
         _state.update {
-            it.copy(screen = if (it.currentChat != null) Screen.CHAT else Screen.CHATS, viewingGroup = null)
+            it.copy(screen = if (it.currentChat != null) Screen.CHAT else Screen.CHATS, viewingGroup = null, infoMedia = null)
         }
     }
 
@@ -1833,6 +1977,36 @@ class AppViewModel(
                 }
             }
         }
+    }
+
+    /** Opens the «Реакции» sheet: who reacted to [message], grouped by emoji. */
+    fun openReactions(message: Message) {
+        val id = message.id ?: return
+        _state.update { it.copy(reactionsMessageId = id, reactedBy = null) }
+        viewModelScope.launch {
+            val result = runCatching { client.getReactionUsers(message.chatId, id) }
+            _state.update { s ->
+                when {
+                    s.reactionsMessageId != id -> s
+                    result.isFailure ->
+                        s.copy(reactionsMessageId = null, notice = result.exceptionOrNull()?.message ?: "Не удалось загрузить реакции")
+                    else -> s.copy(reactedBy = result.getOrThrow().groupBy({ it.second }, { it.first }))
+                }
+            }
+            // Reactors who are neither contacts nor known members get their names fetched.
+            result.getOrNull()?.let { pairs -> resolveUsers(pairs.map { it.first }) }
+        }
+    }
+
+    fun closeReactions() = _state.update { it.copy(reactionsMessageId = null, reactedBy = null) }
+
+    /** Fetches, in one batch, the users among [ids] we have no name for (for lists of people). */
+    private suspend fun resolveUsers(ids: List<Long>) {
+        val s = _state.value
+        val unknown = ids.distinct().filter { it != s.account?.userId && it !in s.contacts && it !in s.groupMembers }
+        if (unknown.isEmpty()) return
+        val fetched = runCatching { client.fetchUsers(unknown) }.getOrDefault(emptyList())
+        if (fetched.isNotEmpty()) _state.update { st -> st.copy(groupMembers = st.groupMembers + fetched.associateBy { it.id }) }
     }
 
     /** Closes the "who read this message" sheet. */
@@ -1887,7 +2061,7 @@ class AppViewModel(
             val msg =
                 when {
                     rateLimited -> RATE_LIMIT_MSG
-                    notOnMax > 0 -> "Не в MAX: $notOnMax контакт(ов) не добавлено"
+                    notOnMax > 0 -> "Не добавлено: $notOnMax ${plural(notOnMax, "контакт", "контакта", "контактов")} не в MAX"
                     else -> null
                 }
             if (msg != null) _state.update { it.copy(notice = msg) }
@@ -1951,22 +2125,195 @@ class AppViewModel(
                 }
             }
             if (rateLimited) _state.update { it.copy(notice = RATE_LIMIT_MSG) }
-            val newId = client.createGroup(title, (memberIds + resolved).distinct(), token)
-            // Re-sync so the new group appears, then open it if we learned its id.
-            val syncToken = prefs.token
-            if (syncToken != null) {
-                runCatching {
-                    client.disconnect()
-                    client.connect(prefs.deviceId, prefs.mtInstance)
-                    val result = client.sync(syncToken)
-                    result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
-                    _state.update {
-                        it.copy(chats = result.chats, contacts = result.contacts, contactsList = result.contactsList)
-                    }
+            syncAndOpen(client.createGroup(title, (memberIds + resolved).distinct(), token))
+        }
+    }
+
+    /** «Создать канал»: [title], an optional [description] (set right after) and photo. */
+    fun createChannel(
+        name: String,
+        description: String,
+        avatar: PickedMedia?,
+    ) {
+        val title = name.trim()
+        if (title.isEmpty()) return
+        launchBusy {
+            val token = avatar?.let { client.uploadPhoto(it.content, it.fileName, it.mime).token }
+            val newId = client.createChannel(title, token)
+            if (newId != null && description.isNotBlank()) {
+                // The channel exists either way; a refused description is only said.
+                runCatching { client.editChat(newId, description = description.trim()) }
+                    .onFailure { e -> _state.update { it.copy(notice = e.message ?: "Не удалось сохранить описание") } }
+            }
+            syncAndOpen(newId)
+        }
+    }
+
+    /** Re-syncs so a chat we just created is in the list, then opens it if we learned its id. */
+    private suspend fun syncAndOpen(newId: Long?) {
+        // The demo keeps no token but its offline sync still has the new chat.
+        val syncToken = prefs.token ?: "demo".takeIf { _state.value.demoMode }
+        if (syncToken != null) {
+            runCatching {
+                client.disconnect()
+                client.connect(prefs.deviceId, prefs.mtInstance)
+                val result = client.sync(syncToken)
+                result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
+                _state.update {
+                    it.copy(chats = withLocalPins(result.chats), contacts = result.contacts, contactsList = result.contactsList)
                 }
             }
-            val chat = newId?.let { id -> _state.value.chats.firstOrNull { it.id == id } }
-            if (chat != null) openChat(chat) else _state.update { it.copy(screen = Screen.CHATS, busy = false) }
+        }
+        val chat = newId?.let { id -> _state.value.chats.firstOrNull { it.id == id } }
+        if (chat != null) openChat(chat) else _state.update { it.copy(screen = Screen.CHATS, busy = false) }
+    }
+
+    /**
+     * Saves the group/channel editor: only what the user changed since the editor opened on [opened] is sent
+     * ([options] are the flags as the editor shows them). Name, description and flags show at once on [chat]
+     * and revert if refused; a new photo shows once uploaded.
+     */
+    fun editChat(
+        chat: Chat,
+        title: String,
+        description: String,
+        avatar: PickedMedia?,
+        options: Map<String, Boolean>,
+        opened: Chat = chat,
+    ) {
+        val newTitle = title.trim().takeIf { it.isNotEmpty() && it != opened.title }
+        val newDescription = description.trim().takeIf { it != (opened.description ?: "") }
+        val flips = options.filter { (k, v) -> (k in opened.options) != v }
+        if (newTitle == null && newDescription == null && flips.isEmpty() && avatar == null) return
+        val shown =
+            chat
+                .copy(
+                    title = newTitle ?: chat.title,
+                    description = if (newDescription != null) newDescription.ifEmpty { null } else chat.description,
+                    options = chat.options + flips.filterValues { it }.keys - flips.filterValues { !it }.keys,
+                ).let { it.copy(allCanPin = "ALL_CAN_PIN_MESSAGE" in it.options) }
+        showChat(shown)
+        viewModelScope.launch {
+            try {
+                val token = avatar?.let { client.uploadPhoto(it.content, it.fileName, it.mime).token }
+                client.editChat(chat.id, newTitle, newDescription, token, flips)?.let(::showChat)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                showChat(chat)
+                _state.update { it.copy(notice = e.message ?: "Не удалось изменить чат") }
+            }
+        }
+    }
+
+    /** «Изменить контакт»: our own name for [user]. Shows at once; reverts if refused. */
+    fun renameContact(
+        user: UserInfo,
+        firstName: String,
+        lastName: String,
+    ) {
+        val first = firstName.trim()
+        val last = lastName.trim().ifEmpty { null }
+        if (first.isEmpty()) return
+        val renamed = user.copy(name = listOfNotNull(first, last).joinToString(" "), firstName = first, lastName = last)
+        showUser(renamed)
+        viewModelScope.launch {
+            try {
+                client.renameContact(user.id, first, last)?.let(::showUser)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                showUser(user)
+                _state.update { it.copy(notice = e.message ?: "Не удалось изменить контакт") }
+            }
+        }
+    }
+
+    /** «Удалить контакт»: off the Contacts tab (the dialog stays). Optimistic; back if refused. */
+    fun removeContact(user: UserInfo) {
+        val before = _state.value.contactsList
+        _state.update { s -> s.copy(contactsList = s.contactsList.filterNot { it.id == user.id }) }
+        viewModelScope.launch {
+            try {
+                client.removeContact(user.id)
+                _state.update { it.copy(notice = "Контакт удалён") }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { s ->
+                    s.copy(
+                        contactsList = if (s.contactsList.none { it.id == user.id }) before else s.contactsList,
+                        notice = e.message ?: "Не удалось удалить контакт",
+                    )
+                }
+            }
+        }
+    }
+
+    /** Puts [user]'s name wherever it shows: their page, the contacts, the dialog's title. Only the name: the rest of an open page stays. */
+    private fun showUser(user: UserInfo) {
+        val myId = _state.value.account?.userId
+
+        fun retitle(c: Chat) = if (myId != null && c.isDialog && c.id == (myId xor user.id) && c.id != 0L) c.copy(title = user.name) else c
+        _state.update { s ->
+            s.copy(
+                viewingUser =
+                    s.viewingUser?.let {
+                        if (it.id == user.id) it.copy(name = user.name, firstName = user.firstName, lastName = user.lastName) else it
+                    },
+                contacts = if (user.id in s.contacts) s.contacts + (user.id to user.name) else s.contacts,
+                contactsList =
+                    s.contactsList.map {
+                        if (it.id ==
+                            user.id
+                        ) {
+                            it.copy(name = user.name, firstName = user.firstName, lastName = user.lastName)
+                        } else {
+                            it
+                        }
+                    },
+                chats = s.chats.map(::retitle),
+                // The open dialog's header too, for going straight back from their page.
+                currentChat = s.currentChat?.let(::retitle),
+            )
+        }
+    }
+
+    /** «Сбросить ссылку»: a new private invite link; the old one stops working. */
+    fun revokeChatLink(chat: Chat) {
+        viewModelScope.launch {
+            try {
+                val updated = client.revokeChatLink(chat.id)
+                updated?.let(::showChat)
+                _state.update {
+                    it.copy(
+                        notice =
+                            if (updated?.link !=
+                                null
+                            ) {
+                                "Ссылка сброшена"
+                            } else {
+                                "Ссылка сброшена, новая появится после обновления"
+                            },
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(notice = e.message ?: "Не удалось сбросить ссылку") }
+            }
+        }
+    }
+
+    /** Puts [chat] wherever it is shown (list, open chat, info page), keeping what the server's copy lacks (mute, pin). */
+    private fun showChat(chat: Chat) {
+        fun over(old: Chat) = chat.copy(muted = old.muted, favIndex = old.favIndex, pinnedMessage = chat.pinnedMessage ?: old.pinnedMessage)
+        _state.update { s ->
+            s.copy(
+                chats = s.chats.map { if (it.id == chat.id) over(it) else it },
+                currentChat = s.currentChat?.let { if (it.id == chat.id) over(it) else it },
+                viewingGroup = s.viewingGroup?.let { if (it.id == chat.id) over(it) else it },
+            )
         }
     }
 
@@ -2023,19 +2370,126 @@ class AppViewModel(
                         subtitle = c.phone,
                     )
                 }
-        _state.update { it.copy(searchResults = (serverLocal + book).distinctBy { r -> r.chatId }, searching = true) }
+        _state.update { it.copy(searchResults = (serverLocal + book).distinctBy { r -> r.chatId }, searching = true, searchMarker = null) }
         viewModelScope.launch {
             // 3) Public search (channels etc.) ranked last.
-            val remote = runCatching { client.searchChats(q) }.getOrDefault(emptyList())
+            val remote = runCatching { client.searchChats(q) }.getOrNull()
             if (lastSearchQuery == q) {
                 _state.update {
-                    it.copy(searchResults = (serverLocal + book + remote).distinctBy { r -> r.chatId }, searching = false)
+                    it.copy(
+                        searchResults = (serverLocal + book + remote?.results.orEmpty()).distinctBy { r -> r.chatId },
+                        searchMarker = remote?.marker,
+                        searching = false,
+                    )
                 }
             }
         }
     }
 
-    fun clearSearch() = _state.update { it.copy(searchResults = emptyList(), searching = false) }
+    // The query of the latest «СООБЩЕНИЯ» search, so a slow answer to an older one is dropped.
+    private var messageSearchQuery = ""
+
+    /** «СООБЩЕНИЯ» of the chat-list search: [query] across all chats (CHAT_SEARCH). The caller debounces. */
+    fun searchAllMessages(query: String) {
+        val q = query.trim()
+        messageSearchQuery = q
+        if (q.length < 2) {
+            _state.update { it.copy(messageHits = emptyList()) }
+            return
+        }
+        viewModelScope.launch {
+            val hits = runCatching { client.searchMessages(null, q) }.getOrDefault(emptyList())
+            if (messageSearchQuery == q) _state.update { it.copy(messageHits = hits) }
+        }
+    }
+
+    /** «Показать больше» under the public results: their next page. */
+    fun searchMore() {
+        val q = lastSearchQuery
+        val marker = _state.value.searchMarker ?: return
+        if (_state.value.searching) return
+        _state.update { it.copy(searching = true) }
+        viewModelScope.launch {
+            val page = runCatching { client.searchChats(q, marker) }.getOrNull()
+            if (lastSearchQuery != q) return@launch
+            _state.update {
+                it.copy(
+                    searchResults = (it.searchResults + page?.results.orEmpty()).distinctBy { r -> r.chatId },
+                    // A failed page keeps its marker, so «Показать больше» can be tried again.
+                    searchMarker = if (page == null) marker else page.marker,
+                    searching = false,
+                )
+            }
+        }
+    }
+
+    fun clearSearch() =
+        _state.update {
+            it.copy(searchResults = emptyList(), searching = false, searchMarker = null, messageHits = emptyList())
+        }
+
+    /** Opens the chat of a «СООБЩЕНИЯ» hit at that message. */
+    fun openMessageHit(hit: MessageHit) {
+        val chatId = hit.message.chatId
+        val chat =
+            _state.value.chats.firstOrNull { it.id == chatId }
+                ?: hit.chat
+                ?: Chat(id = chatId, title = "Чат", lastMessageText = null, lastEventTime = hit.message.time)
+        openChat(chat, jumpTo = hit.message)
+    }
+
+    // The query of the latest in-chat search, so a slow answer to an older one is dropped.
+    private var chatSearchQuery = ""
+
+    /** The open chat's in-chat search on the server (its loaded messages are searched by the screen itself). */
+    fun searchOpenChat(query: String) {
+        val chat = _state.value.currentChat ?: return
+        chatSearchQuery = query
+        _state.update { it.copy(chatSearchHits = emptyList()) }
+        if (query.isBlank()) return
+        viewModelScope.launch {
+            val hits = runCatching { client.searchMessages(chat.id, query) }.getOrDefault(emptyList()).map { it.message }
+            if (chatSearchQuery == query && _state.value.currentChat?.id == chat.id) _state.update { it.copy(chatSearchHits = hits) }
+        }
+    }
+
+    /** Loads history back to [target] (a search hit older than what is loaded) so the screen can scroll to it. */
+    fun loadUntil(target: Message) {
+        val chat = _state.value.currentChat ?: return
+        if (_state.value.loadingOlder) return
+        _state.update { it.copy(loadingOlder = true) }
+        viewModelScope.launch {
+            try {
+                pageBackTo(chat, target)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(error = e.message ?: "Не удалось загрузить историю") }
+            } finally {
+                _state.update { it.copy(loadingOlder = false) }
+            }
+        }
+    }
+
+    /**
+     * Prepends history pages until [target] is loaded or passed. History is kept contiguous
+     * (the cached tail and the unread divider depend on it), so this pages rather than
+     * jumping to a window around the hit.
+     */
+    private suspend fun pageBackTo(
+        chat: Chat,
+        target: Message,
+    ) {
+        repeat(MAX_JUMP_PAGES) {
+            val loaded = _state.value.messages
+            if (loaded.any { it.id == target.id }) return
+            // shortcut: a hit older than MAX_JUMP_PAGES pages stays out of reach; load around the hit instead (op 49 forward+backward) if that matters.
+            if ((loaded.firstOrNull()?.time ?: 0L) < target.time || !fetchOlderPage(chat)) return
+        }
+        if (_state.value.messages.none { it.id == target.id }) _state.update { it.copy(notice = "Сообщение слишком далеко в истории") }
+    }
+
+    fun jumped() = _state.update { it.copy(jumpTo = null) }
 
     /** Opens a chat/channel chosen from search results. */
     fun openSearchResult(result: SearchResult) {
@@ -2072,19 +2526,21 @@ class AppViewModel(
         media: MediaAttach,
         messageId: String?,
     ) {
-        val source = messageId?.let { id -> _state.value.messages.firstOrNull { it.id == id } }
+        val s = _state.value
+        // From the open chat or an info page's media tab (which may be another chat).
+        val source = messageId?.let { id -> (s.messages + s.infoMedia?.items.orEmpty()).firstOrNull { it.id == id } }
         when (media.type) {
             MediaType.PHOTO -> _state.update { it.copy(mediaViewer = MediaViewer.Image(media.url, source)) }
             MediaType.VIDEO -> {
-                val chat = _state.value.currentChat
+                val chatId = source?.chatId ?: s.currentChat?.id
                 val mid = messageId?.toLongOrNull()
-                if (chat == null || mid == null || media.videoId == 0L) {
+                if (chatId == null || mid == null || media.videoId == 0L) {
                     _state.update { it.copy(mediaViewer = MediaViewer.Image(media.url, source)) } // fallback: thumbnail
                     return
                 }
                 _state.update { it.copy(mediaViewer = MediaViewer.Loading) }
                 viewModelScope.launch {
-                    val url = runCatching { client.getVideoUrl(chat.id, mid, media.videoId) }.getOrNull()
+                    val url = runCatching { client.getVideoUrl(chatId, mid, media.videoId) }.getOrNull()
                     _state.update {
                         it.copy(
                             mediaViewer =
@@ -2148,32 +2604,39 @@ class AppViewModel(
     fun loadOlder() {
         val s = _state.value
         val chat = s.currentChat ?: return
-        val oldest = s.messages.firstOrNull() ?: return
-        if (s.loadingOlder || s.noMoreOlder) return
+        if (s.messages.isEmpty() || s.loadingOlder || s.noMoreOlder) return
         _state.update { it.copy(loadingOlder = true) }
         viewModelScope.launch {
             try {
-                val older = client.fetchHistory(chat.id, fromTime = oldest.time, count = 50)
-                val existingIds =
-                    _state.value.messages
-                        .mapNotNull { it.id }
-                        .toSet()
-                val fresh =
-                    withReadMarks(
-                        older.filter { it.time < oldest.time && (it.id == null || it.id !in existingIds) },
-                        chat,
-                    )
-                _state.update {
-                    it.copy(
-                        messages = fresh + it.messages,
-                        loadingOlder = false,
-                        noMoreOlder = fresh.isEmpty(),
-                    )
-                }
+                fetchOlderPage(chat)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Throwable) {
-                _state.update { it.copy(loadingOlder = false, error = e.message ?: "Не удалось загрузить историю") }
+                _state.update { it.copy(error = e.message ?: "Не удалось загрузить историю") }
+            } finally {
+                _state.update { it.copy(loadingOlder = false) }
             }
         }
+    }
+
+    /** Prepends the page of history before the oldest loaded message; false when there was none. */
+    private suspend fun fetchOlderPage(chat: Chat): Boolean {
+        val oldest = _state.value.messages.firstOrNull() ?: return false
+        val older = client.fetchHistory(chat.id, fromTime = oldest.time, count = 50)
+        val existingIds =
+            _state.value.messages
+                .mapNotNull { it.id }
+                .toSet()
+        // Only a page with nothing older than our oldest is the end; one that brought only
+        // messages we already hold is not.
+        val anyOlder = older.any { it.time < oldest.time }
+        val fresh =
+            withReadMarks(
+                older.filter { it.time < oldest.time && (it.id == null || it.id !in existingIds) },
+                chat,
+            )
+        _state.update { it.copy(messages = fresh + it.messages, noMoreOlder = !anyOlder) }
+        return anyOlder
     }
 
     /** Resolves a phone number to a Max user and opens a dialog with them. */
@@ -2217,11 +2680,18 @@ class AppViewModel(
         when (s.screen) {
             Screen.USER -> closeUser()
             Screen.GROUP -> closeGroup()
-            Screen.CHAT -> backToChats()
+            Screen.CHAT ->
+                when (val info = s.searchBackTo) {
+                    null -> backToChats()
+                    else -> {
+                        if (s.searchOpenedChat) backToChats()
+                        _state.update { it.copy(screen = info, searchBackTo = null, searchOpenedChat = false) }
+                    }
+                }
             Screen.SHARE_PICK -> cancelShare()
             Screen.ABOUT -> _state.update { it.copy(screen = Screen.CHATS) }
             Screen.TWOFA -> closeTwoFa()
-            Screen.EDIT_PROFILE -> _state.update { it.copy(screen = Screen.USER) }
+            Screen.EDIT_PROFILE -> _state.update { it.leavingEditProfile() }
             Screen.PASSWORD_RESTORE -> cancelPasswordRestore()
             Screen.CODE, Screen.PASSWORD, Screen.REGISTER, Screen.LOGIN_RESTRICTED -> restartLogin()
             Screen.CHATS -> if (s.tab != Tab.CHATS) _state.update { it.copy(tab = Tab.CHATS) }
@@ -2244,7 +2714,7 @@ class AppViewModel(
 
     /** Pull-to-refresh on the chat list: re-runs sync over the open connection. */
     fun refresh() {
-        if (prefs.token == null) return
+        // No early return: every path (demo, no session, failure) goes through the finally below.
         _state.update { it.copy(refreshing = true) }
         viewModelScope.launch {
             try {
@@ -2269,38 +2739,71 @@ class AppViewModel(
         client.disconnect()
         client.connect(prefs.deviceId, prefs.mtInstance)
         val result = client.sync(token)
-        result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
-        _state.update {
-            it.copy(
-                chats = result.chats,
-                account = result.account,
-                contacts = result.contacts,
-                contactsList = result.contactsList,
-                onlineUsers = result.online,
-                presence = result.presence,
-                privacy = result.privacy,
-                error = null,
-            )
-        }
+        applySync(result)
         resolveDialogTitles()
+        afterSync()
     }
 
-    fun sendMessage(text: String) {
+    /**
+     * Puts a sync's result into the state the same way on every path (first sync, reconnect, pull-to-refresh), so
+     * what the server holds (pins and mutes among it) reads back alike everywhere; [extra] adds a path's own changes.
+     */
+    private fun applySync(
+        result: SyncResult,
+        extra: (AppState) -> AppState = { it },
+    ) {
+        // The server rolls the login token on each sync: persist it so it doesn't expire between launches.
+        result.refreshedToken?.let { if (it != prefs.token) prefs.token = it }
+        prefs.userId = result.account.userId
+        _state.update {
+            extra(
+                it.copy(
+                    account = result.account,
+                    chats = withLocalPins(result.chats),
+                    contacts = result.contacts,
+                    contactsList = result.contactsList,
+                    onlineUsers = result.online,
+                    presence = result.presence,
+                    privacy = result.privacy,
+                    reactionsMenu = result.reactionsMenu,
+                    pinLimit = result.pinLimit,
+                    pollsInDialogs = result.pollsInDialogs,
+                    error = null,
+                    syncedOnce = true,
+                ),
+            )
+        }
+    }
+
+    /** Sends [text] to the open chat with its formatting [spans] (moved along if trimming shifts the text). */
+    fun sendMessage(
+        text: String,
+        spans: List<TextSpan> = emptyList(),
+    ) {
         val chat = _state.value.currentChat ?: return
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        // Trimming moves the text left by its leading blanks and cuts the tail: the runs follow.
+        val lead = text.indexOfFirst { !it.isWhitespace() }
+        val elements =
+            spans.mapNotNull { s ->
+                val from = (s.from - lead).coerceAtLeast(0)
+                val end = (s.from + s.length - lead).coerceAtMost(trimmed.length)
+                s.copy(from = from, length = end - from).takeIf { end > from }
+            }
         val cid = nextCid()
         val replyToId = _state.value.replyingTo?.id
         _state.update { it.copy(replyingTo = null) } // clear the reply banner on send
         launchBusyless {
-            val sent = client.sendMessage(chat.id, trimmed, cid, replyToId)
+            val sent = client.sendMessage(chat.id, trimmed, cid, replyToId, spans = elements)
             if (sent != null) {
                 ratePrompt.recordMessageSent()
                 _state.update { s ->
+                    val chats = s.chats.withLastMessage(sent)
                     if (s.messages.any { it.id == sent.id }) {
-                        s
+                        s.copy(chats = chats)
                     } else {
-                        s.copy(messages = s.messages + sent)
+                        s.copy(messages = s.messages + sent, chats = chats)
                     }
                 }
             }
@@ -2717,6 +3220,7 @@ class AppViewModel(
                         s.messages
                     },
                 notice = if (failedCount > 0) "Не отправлено вложений: $failedCount" else s.notice,
+                chats = sent.fold(s.chats) { chats, m -> chats.withLastMessage(m) },
             )
         }
     }
@@ -2765,9 +3269,22 @@ class AppViewModel(
     }
 
     /** Begins forwarding [msg]: show the chat picker to choose where to send it. */
-    fun startForward(msg: Message) {
-        if (msg.id == null) return
-        _state.update { it.copy(forwarding = msg, screen = Screen.SHARE_PICK) }
+    fun startForward(msg: Message) = startForward(listOf(msg))
+
+    /** Begins forwarding several messages at once (multi-select); unsent ones are skipped. */
+    fun startForward(msgs: List<Message>) {
+        val sendable = msgs.filter { it.id != null }
+        if (sendable.isEmpty()) return
+        _state.update { it.copy(forwarding = sendable, screen = Screen.SHARE_PICK) }
+    }
+
+    /** Deletes several messages at once (multi-select), for us only. */
+    fun deleteMessages(
+        msgs: List<Message>,
+        forAll: Boolean = false,
+    ) {
+        msgs.filter { it.id == null }.forEach(::discardPendingSend)
+        msgs.filter { it.id != null }.groupBy { it.chatId }.forEach { (chatId, list) -> removeMessages(chatId, list, forAll) }
     }
 
     /**
@@ -2777,22 +3294,31 @@ class AppViewModel(
     fun pickShareTarget(chat: Chat) {
         val media = _state.value.sharePending
         val fwd = _state.value.forwarding
-        _state.update { it.copy(sharePending = emptyList(), forwarding = null, stagedMedia = media) }
+        _state.update { it.copy(sharePending = emptyList(), forwarding = emptyList(), stagedMedia = media) }
         openChat(chat)
-        val fwdId = fwd?.id
-        if (fwdId != null) {
+        if (fwd.isNotEmpty()) {
             launchBusyless {
-                val sent = client.forwardMessage(chat.id, fwdId, fwd.chatId, nextCid())
-                if (sent != null) {
-                    _state.update { s ->
-                        if (s.messages.any { it.id == sent.id }) s else s.copy(messages = s.messages + sent)
+                // One at a time and in order, so they land as they were written.
+                for (m in fwd.sortedBy { it.time }) {
+                    val sent = client.forwardMessage(chat.id, m.id ?: continue, m.chatId, nextCid())
+                    if (sent != null) {
+                        _state.update { s ->
+                            val chats = s.chats.withLastMessage(sent)
+                            if (s.messages.any { it.id == sent.id }) {
+                                s.copy(
+                                    chats = chats,
+                                )
+                            } else {
+                                s.copy(messages = s.messages + sent, chats = chats)
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    fun cancelShare() = _state.update { it.copy(sharePending = emptyList(), forwarding = null, screen = Screen.CHATS) }
+    fun cancelShare() = _state.update { it.copy(sharePending = emptyList(), forwarding = emptyList(), screen = Screen.CHATS) }
 
     /** ChatScreen calls this once it has moved [AppState.stagedMedia] into its input. */
     fun consumeStagedMedia() = _state.update { it.copy(stagedMedia = emptyList()) }
@@ -2820,10 +3346,11 @@ class AppViewModel(
                 }
             }
         val unknown =
-            ids.filter { it != 0L && it != myId && !s.contacts.containsKey(it) && !s.groupMembers.containsKey(it) }
+            ids.filter { it != 0L && it != myId && !s.contacts.containsKey(it) && !s.groupMembers.containsKey(it) && it !in askedUsers }
         if (unknown.isEmpty()) return
+        askedUsers += unknown
         viewModelScope.launch {
-            val fetched = unknown.mapNotNull { id -> runCatching { client.fetchUser(id) }.getOrNull() }
+            val fetched = runCatching { client.fetchUsers(unknown) }.getOrDefault(emptyList())
             if (fetched.isNotEmpty()) {
                 _state.update { st -> st.copy(groupMembers = st.groupMembers + fetched.associateBy { it.id }) }
             }
@@ -2831,21 +3358,26 @@ class AppViewModel(
     }
 
     /**
-     * Dialogs whose peer isn't in our contacts arrive titled "Диалог <id>" (the
-     * server sends no title and we have no contact name). Fetch each such peer's
-     * profile, patch the chat title with their real name, and cache the profile so
-     * the list avatar resolves too.
+     * People the chat list needs but we have no name for, fetched in one batch: peers of
+     * dialogs titled "Диалог <id>" (no title from the server, not in our contacts) and
+     * the last senders of groups, for the "Имя: …" preview prefix. Their profiles are
+     * cached so the list avatars resolve too.
      */
     private fun resolveDialogTitles() {
         val s = _state.value
         val myId = s.account?.userId ?: return
-        val unresolved = s.chats.filter { it.isDialog && it.title.startsWith("Диалог ") }
-        if (unresolved.isEmpty()) return
+        val peers = s.chats.filter { it.isDialog && it.title.startsWith("Диалог ") }.map { it.id xor myId }
+        val senders =
+            s.chats
+                .filter { !it.isDialog && !it.isChannel }
+                .map { it.lastSenderId }
+                .filter { it != 0L && it != myId && it !in s.contacts && it !in s.groupMembers }
+        // Each id is asked once a session: one the server never answers for must not be asked on every push.
+        val ids = (peers + senders).distinct().filter { it !in askedUsers }
+        if (ids.isEmpty()) return
+        askedUsers += ids
         viewModelScope.launch {
-            val fetched =
-                unresolved.mapNotNull { chat ->
-                    runCatching { client.fetchUser(chat.id xor myId) }.getOrNull()
-                }
+            val fetched = runCatching { client.fetchUsers(ids) }.getOrDefault(emptyList())
             if (fetched.isEmpty()) return@launch
             val byId = fetched.associateBy { it.id }
             _state.update { st ->
@@ -3042,10 +3574,14 @@ class AppViewModel(
         val id = msg.id ?: return
         val trimmed = newText.trim()
         if (trimmed.isEmpty() || trimmed == msg.text) return
+        // Mentions can't be carried over, so a message with one is edited without `elements`
+        // at all: the server then keeps its runs rather than losing the mentions.
+        val spans = remapSpans(msg.text, trimmed, msg.spans).takeIf { msg.spans.all { it.editable } }
+        val edited = msg.copy(text = trimmed, spans = spans ?: msg.spans, edited = true)
         _state.update { s ->
-            s.copy(messages = s.messages.map { if (it.id == id) it.copy(text = trimmed) else it })
+            s.copy(messages = s.messages.map { if (it.id == id) edited else it }, chats = s.chats.withLastMessage(edited))
         }
-        launchBusyless { client.editMessage(msg.chatId, id, trimmed) }
+        launchBusyless { client.editMessage(msg.chatId, id, trimmed, spans) }
     }
 
     /** Deletes [msg] ([forAll] = for everyone), removing it from the open chat. */
@@ -3058,9 +3594,29 @@ class AppViewModel(
             discardPendingSend(msg)
             return
         }
-        val id = msg.id
-        _state.update { s -> s.copy(messages = s.messages.filterNot { it.id == id }) }
-        launchBusyless { client.deleteMessages(msg.chatId, listOf(id), forAll) }
+        removeMessages(msg.chatId, listOf(msg), forAll)
+    }
+
+    /** Deletes [msgs] of [chatId] in one MSG_DELETE. Optimistic; a refusal puts them back with a notice. */
+    private fun removeMessages(
+        chatId: Long,
+        msgs: List<Message>,
+        forAll: Boolean,
+    ) {
+        val ids = msgs.mapNotNull { it.id }.toSet()
+        val s0 = _state.value
+        val row = s0.chats.firstOrNull { it.id == chatId }
+        _state.update { s ->
+            val left = s.messages.filterNot { it.id in ids }
+            val chats = if (s.currentChat?.id == chatId) msgs.fold(s.chats) { c, m -> c.withoutMessage(m, left) } else s.chats
+            s.copy(messages = left, chats = chats)
+        }
+        launchReverting("Не удалось удалить сообщения", { client.deleteMessages(chatId, ids.toList(), forAll) }) { s ->
+            s.copy(
+                messages = if (s.currentChat?.id == chatId) (s.messages + msgs).distinctBy { it.id }.sortedBy { it.time } else s.messages,
+                chats = s.chats.map { if (it.id == chatId && row != null && it.lastMessageTime <= row.lastMessageTime) row else it },
+            )
+        }
     }
 
     /** Begins replying to [msg] (shows a banner above the input). */
@@ -3081,11 +3637,550 @@ class AppViewModel(
         // Tapping our current reaction clears it; otherwise it replaces/sets ours.
         val had = msg.reactions.any { it.mine && it.emoji == emoji }
         val target = if (had) null else emoji
+        val before = msg.reactions.firstOrNull { it.mine }?.emoji
         _state.update { s ->
             s.copy(messages = s.messages.map { if (it.id == id) applyMyReaction(it, target) else it })
         }
-        launchBusyless { client.setReaction(chatId, id, target) }
+        launchReverting("Не удалось изменить реакцию", { client.setReaction(chatId, id, target) }) { s ->
+            s.copy(messages = s.messages.map { if (it.id == id) applyMyReaction(it, before) else it })
+        }
     }
+
+    /** Pins [msg] in its chat, or unpins it when [pin] is false. Optimistic; reverts with a notice if refused. */
+    fun setPinned(
+        msg: Message,
+        pin: Boolean,
+        /** Notify the members (the confirm dialog's «Уведомить участников»). */
+        notify: Boolean = false,
+    ) {
+        val chatId = msg.chatId
+        val before =
+            _state.value.chats
+                .firstOrNull { it.id == chatId }
+                ?.pinnedMessage ?: _state.value.currentChat?.pinnedMessage
+
+        fun apply(pinned: Message?) =
+            _state.update { s ->
+                s.copy(
+                    currentChat = s.currentChat?.let { if (it.id == chatId) it.copy(pinnedMessage = pinned) else it },
+                    chats = s.chats.map { if (it.id == chatId) it.copy(pinnedMessage = pinned) else it },
+                )
+            }
+        apply(msg.takeIf { pin })
+        viewModelScope.launch {
+            try {
+                // The server's copy, when it sends one, is the truth (it may carry more than ours).
+                client.pinMessage(chatId, msg.id.takeIf { pin }, notify)?.let { apply(it.pinnedMessage) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                apply(before)
+                _state.update { it.copy(notice = e.message ?: if (pin) "Не удалось закрепить" else "Не удалось открепить") }
+            }
+        }
+    }
+
+    /** Loads the [kind] tab of [chatId]'s info page, or its next (older) page when [more]. */
+    fun loadChatMedia(
+        chatId: Long,
+        kind: MediaKind,
+        more: Boolean = false,
+    ) {
+        val current = _state.value.infoMedia?.takeIf { it.chatId == chatId && it.kind == kind }
+        if (more && (current == null || current.loading || current.end || current.anchor == null)) return
+        if (!more && current != null) return // already showing (or loading) this tab
+        _state.update { it.copy(infoMedia = (current ?: ChatMedia(chatId, kind)).copy(loading = true)) }
+        viewModelScope.launch {
+            val anchor = if (more) current?.anchor else newestMessageId(chatId)
+            val page =
+                anchor?.let { a ->
+                    runCatching { client.fetchChatMedia(chatId, kind.types, a, MEDIA_PAGE, withAnchor = !more) }.getOrNull()
+                }
+            _state.update { s ->
+                val now = s.infoMedia?.takeIf { it.chatId == chatId && it.kind == kind } ?: return@update s
+                val raw = page.orEmpty().filter { it.id != null }
+                val fresh = raw.filter { it.id !in now.seen }
+                // The next page is anchored on what the server returned, not on what this tab shows:
+                // a page of messages the tab can't draw must still move it on.
+                val oldest = raw.minByOrNull { it.time }?.id
+                val shown = fresh.filter(kind.matches).sortedByDescending { it.time }
+                val pages = now.pages + 1
+                val end = page == null || page.size < MEDIA_PAGE || fresh.isEmpty() || oldest == now.anchor || pages >= MAX_MEDIA_PAGES
+                val media =
+                    if (!more && shown.isEmpty()) {
+                        // A miss on the first page (refused, empty, or a shape we can't read):
+                        // show what this device already holds rather than a blank tab.
+                        now.copy(items = localMessages(chatId).filter(kind.matches).sortedByDescending { it.time }, end = true)
+                    } else {
+                        now.copy(items = now.items + shown, end = end)
+                    }
+                s.copy(
+                    infoMedia =
+                        media.copy(
+                            loading = false,
+                            anchor = oldest ?: now.anchor,
+                            seen = now.seen + fresh.mapNotNull { it.id },
+                            pages = pages,
+                        ),
+                )
+            }
+        }
+    }
+
+    /** The newest message id of [chatId]: the anchor CHAT_MEDIA pages back from. */
+    private suspend fun newestMessageId(chatId: Long): String? {
+        val s = _state.value
+        if (s.currentChat?.id == chatId) {
+            s.messages
+                .lastOrNull { it.id != null }
+                ?.id
+                ?.let { return it }
+        }
+        return runCatching { client.fetchHistory(chatId, fromTime = nowMillis(), count = 1) }.getOrNull()?.lastOrNull { it.id != null }?.id
+    }
+
+    private fun localMessages(chatId: Long): List<Message> =
+        _state.value.let { s -> if (s.currentChat?.id == chatId) s.messages else messageCache.load(chatId) }
+
+    /** The info page's «Найти»: [chat] with its in-chat search open. */
+    fun searchInChat(chat: Chat) {
+        val from = _state.value.screen
+        val wasOpen = _state.value.currentChat?.id == chat.id
+        if (wasOpen) {
+            _state.update { it.copy(screen = Screen.CHAT) }
+        } else {
+            openChat(chat)
+        }
+        _state.update { it.copy(searchOnOpen = true, searchBackTo = from, searchOpenedChat = !wasOpen) }
+    }
+
+    fun searchOpened() = _state.update { it.copy(searchOnOpen = false) }
+
+    // Polls with a vote on its way: one request per poll at a time, so replies can't land out of order.
+    private val votingPolls = mutableSetOf<String>()
+
+    /** Sets our answers in [msg]'s poll to [ids] (empty retracts). Optimistic; ignored while a vote is in flight. */
+    fun vote(
+        msg: Message,
+        ids: Set<Int>,
+    ) {
+        val id = msg.id ?: return
+        // The live copy: a bubble's captured message may be a tap behind.
+        val poll =
+            _state.value.messages
+                .firstOrNull { it.id == id }
+                ?.poll ?: msg.poll ?: return
+        val mine =
+            poll.answers
+                .filter { it.mine }
+                .map { it.id }
+                .toSet()
+        if (id in votingPolls || !poll.canChoose || ids == mine || (ids.isEmpty() && !poll.revote)) return
+        votingPolls += id
+
+        fun show(p: Poll) = _state.update { s -> s.copy(messages = s.messages.map { if (it.id == id) it.copy(poll = p) else it }) }
+        show(poll.withMyVotes(ids))
+        viewModelScope.launch {
+            try {
+                client.votePoll(msg.chatId, id, poll, ids.toList())?.let { counted ->
+                    // A tally that doesn't say which answers are ours keeps the ones we just picked.
+                    show(
+                        if (counted.voted ||
+                            ids.isEmpty()
+                        ) {
+                            counted
+                        } else {
+                            counted.copy(answers = counted.answers.map { it.copy(mine = it.id in ids) })
+                        },
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                show(poll)
+                _state.update { it.copy(notice = e.message ?: "Не удалось проголосовать") }
+            } finally {
+                votingPolls -= id
+            }
+        }
+    }
+
+    /** Presses a bot's CALLBACK [button]; it shows busy until the server has it. */
+    fun pressBotButton(button: BotButton) {
+        if (!button.isCallback || button in _state.value.pressingButtons) return
+        _state.update { it.copy(pressingButtons = it.pressingButtons + button) }
+        viewModelScope.launch {
+            try {
+                client.pressBotButton(button)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(notice = e.message ?: "Бот не ответил на кнопку") }
+            } finally {
+                _state.update { it.copy(pressingButtons = it.pressingButtons - button) }
+            }
+        }
+    }
+
+    /** «Отметить непрочитанным»: the row gets an unread badge. Optimistic; reverts if refused. */
+    fun markUnread(chat: Chat) {
+        val before =
+            _state.value.chats
+                .firstOrNull { it.id == chat.id }
+                ?.unreadCount ?: chat.unreadCount
+
+        fun badge(count: Int) =
+            _state.update { s ->
+                s.copy(
+                    chats =
+                        s.chats.map {
+                            if (it.id ==
+                                chat.id
+                            ) {
+                                it.copy(unreadCount = count)
+                            } else {
+                                it
+                            }
+                        },
+                )
+            }
+        badge(maxOf(before, 1))
+        viewModelScope.launch {
+            try {
+                client.markUnread(chat.id, chat.lastMessageTime.takeIf { it > 0 } ?: chat.lastEventTime)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                badge(before)
+                _state.update { it.copy(notice = e.message ?: "Не удалось отметить непрочитанным") }
+            }
+        }
+    }
+
+    /** «Стереть переписку»: empties [chat]'s history for us, keeping the chat. Optimistic; reverts if refused. */
+    fun clearHistory(chat: Chat) {
+        val s0 = _state.value
+        val open = s0.currentChat?.id == chat.id
+        val before = s0.messages.takeIf { open }
+        val row = s0.chats.firstOrNull { it.id == chat.id }
+        // Up to the newest thing we know of in it.
+        val upTo = maxOf(chat.lastEventTime, row?.lastEventTime ?: 0L, before?.lastOrNull()?.time ?: 0L)
+        // What CHAT_CLEAR does with no time was never measured: don't ask.
+        if (upTo <= 0L) {
+            _state.update { it.copy(notice = "Переписка пуста") }
+            return
+        }
+        _state.update { s ->
+            s.copy(
+                messages = if (open) emptyList() else s.messages,
+                chats =
+                    s.chats.map {
+                        if (it.id ==
+                            chat.id
+                        ) {
+                            it.copy(lastMessageText = null, lastSenderId = 0L, lastMessageTime = 0L, unreadCount = 0)
+                        } else {
+                            it
+                        }
+                    },
+            )
+        }
+        viewModelScope.launch {
+            try {
+                client.clearHistory(chat.id, upTo)
+                // The disk copy goes only once the server has agreed.
+                if (!s0.demoMode) messageCache.save(chat.id, emptyList())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // Put back what the clear took, keeping anything that arrived since.
+                _state.update { s ->
+                    s.copy(
+                        messages =
+                            if (before != null && s.currentChat?.id == chat.id) {
+                                (before + s.messages).distinctBy { it.id ?: it.cid ?: it.time }.sortedBy { it.time }
+                            } else {
+                                s.messages
+                            },
+                        chats =
+                            s.chats.map { c ->
+                                if (c.id == chat.id && row != null && c.lastMessageTime == 0L) {
+                                    c.copy(
+                                        lastMessageText = row.lastMessageText,
+                                        lastSenderId = row.lastSenderId,
+                                        lastMessageTime = row.lastMessageTime,
+                                        unreadCount = row.unreadCount,
+                                    )
+                                } else {
+                                    c
+                                }
+                            },
+                        notice = e.message ?: "Не удалось стереть переписку",
+                    )
+                }
+            }
+        }
+    }
+
+    /** Blocks or unblocks [user]. Optimistic; reverts with a notice if the server refuses. */
+    fun setBlocked(
+        user: UserInfo,
+        blocked: Boolean,
+    ) {
+        val before = _state.value.blockedUsers
+
+        fun apply(on: Boolean) =
+            _state.update { s ->
+                s.copy(
+                    viewingUser = s.viewingUser?.let { if (it.id == user.id) it.copy(blocked = on) else it },
+                    blockedUsers =
+                        s.blockedUsers?.let { list ->
+                            if (on) {
+                                (
+                                    list.filterNot { it.id == user.id } +
+                                        user.copy(
+                                            blocked = true,
+                                        )
+                                )
+                            } else {
+                                list.filterNot { it.id == user.id }
+                            }
+                        },
+                )
+            }
+        apply(blocked)
+        viewModelScope.launch {
+            try {
+                client.setBlocked(user.id, blocked)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                apply(!blocked)
+                _state.update { it.copy(blockedUsers = before, notice = e.message ?: "Не удалось изменить чёрный список") }
+            }
+        }
+    }
+
+    /** Loads the black list for its settings sheet. */
+    fun loadBlockedUsers() {
+        _state.update { it.copy(blockedUsers = null) }
+        viewModelScope.launch {
+            try {
+                // `from` counts the raw entries received, so one we can't read doesn't shift the pages.
+                // A page with nothing new, a short one, or the cap ends it, in case the server ignores `from`.
+                val list = LinkedHashMap<Long, UserInfo>()
+                var from = 0
+                for (i in 0 until MAX_BLACKLIST_PAGES) {
+                    val page = client.getBlockedPage(from)
+                    val fresh = page.users.filter { it.id !in list }
+                    fresh.forEach { list[it.id] = it }
+                    from += page.received
+                    if (page.received < BlockedPage.SIZE || fresh.isEmpty()) break
+                }
+                _state.update { it.copy(blockedUsers = list.values.toList()) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(blockedUsers = emptyList(), notice = e.message ?: "Не удалось загрузить чёрный список") }
+            }
+        }
+    }
+
+    /** Fetches the chat folders once a sync is in; a refusal keeps the built-in chips. */
+    private fun loadFolders() {
+        viewModelScope.launch {
+            val update = runCatching { client.getFolders() }.getOrNull() ?: return@launch
+            _state.update {
+                it.copy(
+                    folders = emptyList<ChatFolder>().applying(update),
+                    folderOrder = emptyList<String>().applyingOrder(update),
+                )
+            }
+        }
+    }
+
+    // Folder writes go one at a time. For a folder with writes still to finish, what the server last
+    // accepted (null: it has no such folder) and how many writes are left.
+    private val folderWrites = Mutex()
+    private val folderAccepted = mutableMapOf<String, ChatFolder?>()
+    private val folderWritesLeft = mutableMapOf<String, Int>()
+
+    /**
+     * Creates or changes [folder] (sent whole). Optimistic; a refusal says so and, unless a newer change
+     * of the folder is still on its way, puts back what the server last accepted.
+     */
+    fun saveFolder(folder: ChatFolder) {
+        val id = folder.id
+        if (id !in folderAccepted) folderAccepted[id] = _state.value.folders.firstOrNull { it.id == id }
+        folderWritesLeft[id] = (folderWritesLeft[id] ?: 0) + 1
+        val update = FoldersUpdate(listOf(folder))
+        _state.update { it.copy(folders = it.folders.applying(update), folderOrder = it.folderOrder.applyingOrder(update)) }
+        viewModelScope.launch {
+            folderWrites.withLock {
+                try {
+                    client.saveFolder(folder)
+                    folderAccepted[id] = folder
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    val accepted = folderAccepted[id]
+                    val newer = (folderWritesLeft[id] ?: 1) > 1
+                    _state.update { s ->
+                        when {
+                            newer -> s // the newer write carries this change too
+                            accepted != null -> s.copy(folders = s.folders.map { if (it.id == id) accepted else it })
+                            else -> s.copy(folders = s.folders.filterNot { it.id == id }, folderOrder = s.folderOrder - id)
+                        }.copy(notice = e.message ?: "Не удалось сохранить папку")
+                    }
+                } finally {
+                    val left = (folderWritesLeft[id] ?: 1) - 1
+                    if (left > 0) {
+                        folderWritesLeft[id] = left
+                    } else {
+                        folderWritesLeft.remove(id)
+                        folderAccepted.remove(id)
+                    }
+                }
+            }
+        }
+    }
+
+    /** A new folder named [title] holding [chatIds]. */
+    @OptIn(ExperimentalUuidApi::class)
+    fun createFolder(
+        title: String,
+        chatIds: List<Long>,
+    ) = saveFolder(ChatFolder(id = Uuid.random().toString(), title = title.trim(), include = chatIds))
+
+    /** Puts [chatId] into folder [folderId] by hand, or takes it out when it is there. */
+    fun toggleChatInFolder(
+        folderId: String,
+        chatId: Long,
+    ) {
+        val folder = _state.value.folders.firstOrNull { it.id == folderId } ?: return
+        saveFolder(folder.copy(include = if (chatId in folder.include) folder.include - chatId else folder.include + chatId))
+    }
+
+    /** Deletes folder [id] (its chats stay). Optimistic; reverts if refused. */
+    fun deleteFolder(id: String) {
+        val before = _state.value.folders
+        if (before.none { it.id == id }) return
+        val beforeOrder = _state.value.folderOrder
+        _state.update { s -> s.copy(folders = s.folders.filterNot { it.id == id }, folderOrder = s.folderOrder - id) }
+        launchReverting("Не удалось удалить папку", { client.deleteFolder(id) }) { s ->
+            if (s.folders.any { it.id == id }) s else s.copy(folders = before, folderOrder = beforeOrder)
+        }
+    }
+
+    /** Moves folder [id] one place up ([by] = -1) or down (1); «Все» stays first. Optimistic. */
+    fun moveFolder(
+        id: String,
+        by: Int,
+    ) {
+        val before = _state.value.folders
+        val i = before.indexOfFirst { it.id == id }
+        val j = i + by
+        if (i < 0 || j !in before.indices || before[i].isAll || before[j].isAll) return
+        val moved = before.toMutableList().apply { add(j, removeAt(i)) }
+        // The two trade places inside the server's own order, so ids it sent without a folder go back too.
+        val beforeOrder = _state.value.folderOrder
+        val order = beforeOrder.swapping(before[i].id, before[j].id)
+        _state.update { it.copy(folders = moved, folderOrder = order) }
+        launchReverting("Не удалось изменить порядок папок", { client.reorderFolders(order) }) { s ->
+            s.copy(folders = s.folders.sortedBy { f -> before.indexOfFirst { it.id == f.id } }, folderOrder = beforeOrder)
+        }
+    }
+
+    private var shelfLoading = false
+
+    // Sticker ids asked for, so a set opened twice (or a recomposition) asks once.
+    private val stickersAsked = mutableSetOf<Long>()
+
+    /** The sticker panel opened: its sets are loaded once a session (a failure lets the next opening retry). */
+    fun loadStickerShelf() {
+        if (_state.value.stickerShelf != null || shelfLoading) return
+        shelfLoading = true
+        viewModelScope.launch {
+            try {
+                val shelf = client.getStickerShelf()
+                _state.update { it.copy(stickerShelf = shelf) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(notice = e.message ?: "Не удалось загрузить стикеры") }
+            } finally {
+                shelfLoading = false
+            }
+        }
+    }
+
+    /** Fetches whichever of [ids] (the open set, or the recents) aren't known yet, in one go. */
+    fun loadStickers(ids: List<Long>) {
+        val missing = ids.filter { it !in _state.value.stickers && it !in stickersAsked }
+        if (missing.isEmpty()) return
+        stickersAsked += missing
+        viewModelScope.launch {
+            try {
+                val got = client.getStickers(missing)
+                _state.update { it.copy(stickers = it.stickers + got.associateBy { s -> s.id }) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                stickersAsked -= missing.toSet()
+                _state.update { it.copy(notice = e.message ?: "Не удалось загрузить стикеры") }
+            }
+        }
+    }
+
+    /** Sends [sticker] to the open chat (a reply, if one is set up), and puts it first among the recents. */
+    fun sendSticker(sticker: Sticker) {
+        val chat = _state.value.currentChat ?: return
+        val replyToId = _state.value.replyingTo?.id
+        _state.update { s ->
+            s.copy(
+                replyingTo = null,
+                stickerShelf = s.stickerShelf?.let { it.copy(recent = listOf(sticker.id) + (it.recent - sticker.id)) },
+            )
+        }
+        sendLone(chat.id, OutAttach.Sticker(sticker.id), replyToId)
+    }
+
+    /** Sends a message that is only [attach] (a sticker, a poll) to [chatId] and shows the server's echo. */
+    private fun sendLone(
+        chatId: Long,
+        attach: OutAttach,
+        replyToId: String? = null,
+    ) {
+        launchBusyless {
+            val sent = client.sendMessage(chatId, "", nextCid(), replyToId, listOf(attach)) ?: return@launchBusyless
+            _state.update { s ->
+                val chats = s.chats.withLastMessage(sent)
+                if (s.messages.any { it.id == sent.id } ||
+                    s.currentChat?.id != chatId
+                ) {
+                    s.copy(chats = chats)
+                } else {
+                    s.copy(messages = s.messages + sent, chats = chats)
+                }
+            }
+        }
+    }
+
+    /** Sends a new poll to the open chat: [question], 2–12 [answers], the server's [settings] bits. */
+    fun sendPoll(
+        question: String,
+        answers: List<String>,
+        settings: Int,
+    ) {
+        val chat = _state.value.currentChat ?: return
+        val title = question.trim()
+        val texts = answers.map { it.trim() }.filter { it.isNotEmpty() }
+        if (title.isEmpty() || texts.size < 2) return
+        sendLone(chat.id, OutAttach.Poll(title, texts, settings))
+    }
+
+    /** A transient message in the snackbar. */
+    fun showNotice(text: String) = _state.update { it.copy(notice = text) }
 
     /** Mutes/unmutes notifications for the open chat (optimistic; persisted server-side). */
     fun toggleMuteCurrentChat() {
@@ -3095,13 +4190,17 @@ class AppViewModel(
     /** Mutes/unmutes [chat] (from the open chat's menu or a chat-list long press). */
     fun toggleMute(chat: Chat) {
         val newMuted = !chat.muted
-        _state.update { s ->
-            s.copy(
-                currentChat = s.currentChat?.let { if (it.id == chat.id) it.copy(muted = newMuted) else it },
-                chats = s.chats.map { if (it.id == chat.id) it.copy(muted = newMuted) else it },
-            )
-        }
-        viewModelScope.launch { runCatching { client.setChatMuted(chat.id, newMuted) } }
+
+        fun mute(
+            s: AppState,
+            on: Boolean,
+        ) = s.copy(
+            currentChat = s.currentChat?.let { if (it.id == chat.id) it.copy(muted = on) else it },
+            viewingGroup = s.viewingGroup?.let { if (it.id == chat.id) it.copy(muted = on) else it },
+            chats = s.chats.map { if (it.id == chat.id) it.copy(muted = on) else it },
+        )
+        _state.update { mute(it, newMuted) }
+        launchReverting("Не удалось изменить уведомления", { client.setChatMuted(chat.id, newMuted) }) { mute(it, chat.muted) }
     }
 
     /** Saves privacy settings optimistically; reverts and says so if the server refuses. */
@@ -3120,11 +4219,97 @@ class AppViewModel(
         }
     }
 
-    /** Pins/unpins a chat at the top of the list (local to this device). */
+    fun setWallpaper(preset: Int) {
+        prefs.chatWallpaper = preset
+        _state.update { it.copy(wallpaper = preset) }
+    }
+
+    fun setSendOnEnter(on: Boolean) {
+        prefs.sendOnEnter = on
+        _state.update { it.copy(sendOnEnter = on) }
+    }
+
+    /** Sets the double-tap reaction; null turns the gesture off. */
+    fun setQuickReaction(emoji: String?) {
+        prefs.quickReaction = emoji
+        _state.update { it.copy(quickReaction = emoji) }
+    }
+
+    /** Loads the signed-in devices for the settings sheet. */
+    fun loadSessions() {
+        _state.update { it.copy(sessions = null) }
+        viewModelScope.launch {
+            try {
+                val list = client.getSessions()
+                _state.update { it.copy(sessions = list) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(sessions = emptyList(), notice = e.message ?: "Не удалось получить список устройств") }
+            }
+        }
+    }
+
+    /**
+     * «Завершить все сессии, кроме текущей». The server answers with a new login token for this
+     * device, which replaces the stored one exactly as a sync's refreshed token does. Without one
+     * (no token, or the reply lost) the outcome is unknown, and the notice says so.
+     */
+    fun closeOtherSessions() {
+        viewModelScope.launch {
+            try {
+                val token = client.closeOtherSessions()
+                if (token == null) {
+                    // The server may have ended them and revoked our token without us getting the new one.
+                    _state.update { it.copy(notice = "Не удалось узнать, завершены ли другие сеансы. Возможно, придётся войти заново.") }
+                    return@launch
+                }
+                if (token != prefs.token) prefs.token = token
+                _state.update { it.copy(notice = "Другие сеансы завершены") }
+                loadSessions()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(notice = e.message ?: "Не удалось завершить сеансы") }
+            }
+        }
+    }
+
+    /**
+     * Pins [chatId] at the top of the list, or unpins it. The server is asked too (favIndex), but it
+     * was measured to accept the write and still report favIndex 0 at the next sync, so the device's
+     * own pin ([Prefs.pinnedAt]) is what keeps it: a refused or ignored server write changes nothing
+     * here. The demo keeps its pins in its own offline data, not on the device.
+     */
     fun togglePin(chatId: Long) {
-        val pins = _state.value.pinnedChats.let { if (chatId in it) it - chatId else it + chatId }
-        prefs.pinnedChats = pins
-        _state.update { it.copy(pinnedChats = pins) }
+        val s = _state.value
+        val chat = s.chats.firstOrNull { it.id == chatId } ?: return
+        val pin = chat.favIndex == 0L
+        val limit = s.pinLimit
+        if (pin && limit != null && s.chats.count { it.favIndex > 0 } >= limit) {
+            _state.update { it.copy(notice = "Закрепить можно не больше $limit ${plural(limit, "чата", "чатов", "чатов")}") }
+            return
+        }
+        val index = if (pin) nowMillis() else 0L
+        _state.update { st -> st.copy(chats = st.chats.map { if (it.id == chatId) it.copy(favIndex = index) else it }) }
+        if (!s.demoMode) prefs.pinnedAt = if (pin) prefs.pinnedAt + (chatId to index) else prefs.pinnedAt - chatId
+        viewModelScope.launch { runCatching { client.setFavIndex(mapOf(chatId to index)) } }
+    }
+
+    /**
+     * [chats] as the server sent them, with this device's pins added: pinned when either side says so,
+     * at the later of the two times, so the latest pin stays on top. A pin from before times were kept
+     * counts as the oldest.
+     */
+    private fun withLocalPins(chats: List<Chat>): List<Chat> {
+        val local = prefs.pinnedAt
+        if (local.isEmpty()) return chats
+        return chats.map { c -> local[c.id]?.let { at -> c.copy(favIndex = maxOf(c.favIndex, at, 1L)) } ?: c }
+    }
+
+    /** Runs once a sync is in: the folders. */
+    private fun afterSync() {
+        loadFolders()
     }
 
     /** Deletes the current 1:1 chat (removes it locally and returns to the list). */
@@ -3147,16 +4332,28 @@ class AppViewModel(
 
     /** Leaves the current group chat (removes it locally and returns to the list). */
     fun leaveCurrentGroup() {
-        val chat = _state.value.currentChat ?: return
-        launchBusy {
-            client.leaveGroup(chat.id)
-            _state.update {
-                it.copy(
-                    screen = Screen.CHATS,
-                    currentChat = null,
-                    messages = emptyList(),
-                    chats = it.chats.filterNot { c -> c.id == chat.id },
-                )
+        _state.value.currentChat?.let(::leaveGroup)
+    }
+
+    /** Leaves [chat] (a group or channel), drops it from the list and returns there. */
+    fun leaveGroup(chat: Chat) {
+        viewModelScope.launch {
+            try {
+                client.leaveGroup(chat.id)
+                _state.update {
+                    it.copy(
+                        screen = Screen.CHATS,
+                        currentChat = null,
+                        viewingGroup = null,
+                        messages = emptyList(),
+                        chats = it.chats.filterNot { c -> c.id == chat.id },
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // Nothing was taken away yet: we stay in the chat and say why.
+                _state.update { it.copy(notice = e.message ?: "Не удалось выйти из чата") }
             }
         }
     }
@@ -3193,7 +4390,14 @@ class AppViewModel(
         demoPending = false
         _state.update {
             // Appearance is per device, not per account.
-            AppState(screen = Screen.LOGIN, theme = it.theme, accent = it.accent, uiScale = it.uiScale, fontScale = it.fontScale)
+            AppState(
+                screen = Screen.LOGIN,
+                theme = it.theme,
+                accent = it.accent,
+                uiScale = it.uiScale,
+                fontScale = it.fontScale,
+                wallpaper = it.wallpaper,
+            )
         }
     }
 
@@ -3268,6 +4472,26 @@ class AppViewModel(
         }
     }
 
+    /**
+     * Runs [call] for a change already shown optimistically; if the server refuses, [revert]
+     * undoes it and the server's words (or [fallback]) go to the snackbar.
+     */
+    private fun launchReverting(
+        fallback: String,
+        call: suspend () -> Unit,
+        revert: (AppState) -> AppState,
+    ) {
+        viewModelScope.launch {
+            try {
+                call()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { revert(it).copy(notice = e.message ?: fallback) }
+            }
+        }
+    }
+
     /** Like [launchBusy] but does not toggle the global busy spinner (for sends). */
     private fun launchBusyless(block: suspend () -> Unit) {
         viewModelScope.launch {
@@ -3332,10 +4556,59 @@ class AppViewModel(
         /** Minimum gap between our own MSG_TYPING sends for one chat. */
         const val TYPING_SEND_INTERVAL_MS = 5_000L
 
+        /** History pages a jump to a search hit may load before giving up. */
+        const val MAX_JUMP_PAGES = 40
+
+        /** Messages asked of CHAT_MEDIA per page of an info-page tab. */
+        const val MEDIA_PAGE = 60
+
+        /** Pages an info-page tab may load in one visit. */
+        const val MAX_MEDIA_PAGES = 20
+
+        /** Black-list pages, at most (1000 people). */
+        const val MAX_BLACKLIST_PAGES = 25
+
         // Minimum interval between warm-start snapshot writes.
         const val CACHE_WRITE_THROTTLE_MS = 1_000L
     }
 }
+
+/** These chats with [msg] as its row's newest message (unless the row has a newer one), newest first. */
+private fun List<Chat>.withLastMessage(msg: Message): List<Chat> =
+    map { c ->
+        if (c.id != msg.chatId || msg.time < c.lastMessageTime) {
+            c
+        } else {
+            c.copy(
+                lastMessageText = msg.previewLabel().ifBlank { c.lastMessageText },
+                lastEventTime = maxOf(c.lastEventTime, msg.time),
+                lastSenderId = msg.senderId,
+                lastMessageTime = msg.time,
+            )
+        }
+    }.sortedByDescending { it.lastEventTime }
+
+/**
+ * When [removed] was its row's newest message, the row falls back to the newest of [left] (that chat's loaded
+ * messages), its time too when the removed one was the row's latest event.
+ */
+private fun List<Chat>.withoutMessage(
+    removed: Message,
+    left: List<Message>,
+): List<Chat> =
+    map { c ->
+        if (c.id != removed.chatId || removed.time < c.lastMessageTime) {
+            c
+        } else {
+            val newest = left.lastOrNull()
+            c.copy(
+                lastMessageText = newest?.previewLabel()?.ifBlank { null },
+                lastSenderId = newest?.senderId ?: 0L,
+                lastMessageTime = newest?.time ?: 0L,
+                lastEventTime = if (newest != null && removed.time >= c.lastEventTime) newest.time else c.lastEventTime,
+            )
+        }
+    }.sortedByDescending { it.lastEventTime }
 
 /** The voice message currently playing, and how far through it is. */
 data class PlayingVoice(

@@ -57,6 +57,18 @@ actual fun shareMediaToOtherApps(
     }
 }
 
+actual fun shareText(text: String) {
+    val context = Session.appContext
+    val send =
+        Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+    runCatching {
+        context.startActivity(Intent.createChooser(send, "Поделиться").apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+    }
+}
+
 private fun mainToast(
     context: Context,
     message: String,

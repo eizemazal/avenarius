@@ -1,12 +1,27 @@
 package com.avenarius.app.ui.screens
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -14,6 +29,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -36,12 +52,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -54,7 +72,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -63,19 +80,22 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -84,10 +104,17 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -95,6 +122,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.compose.SubcomposeAsyncImage
+import com.avenarius.app.model.BotButton
 import com.avenarius.app.model.Chat
 import com.avenarius.app.model.FileAttach
 import com.avenarius.app.model.LinkPreview
@@ -107,9 +135,17 @@ import com.avenarius.app.model.PickedKind
 import com.avenarius.app.model.PickedMedia
 import com.avenarius.app.model.RecordedVoice
 import com.avenarius.app.model.ServiceEvent
+import com.avenarius.app.model.Sticker
+import com.avenarius.app.model.StickerShelf
+import com.avenarius.app.model.TextSpan
 import com.avenarius.app.model.UploadState
 import com.avenarius.app.model.UserInfo
 import com.avenarius.app.model.VoiceAttach
+import com.avenarius.app.model.canPinMessages
+import com.avenarius.app.model.isSavedMessages
+import com.avenarius.app.model.previewLabel
+import com.avenarius.app.model.remapSpans
+import com.avenarius.app.model.toggled
 import com.avenarius.app.net.Presence
 import com.avenarius.app.ui.AppIcons
 import com.avenarius.app.ui.MediaViewer
@@ -118,27 +154,37 @@ import com.avenarius.app.ui.PlayingVideoNote
 import com.avenarius.app.ui.PlayingVoice
 import com.avenarius.app.ui.VideoPlayer
 import com.avenarius.app.ui.cameraCaptureSupported
+import com.avenarius.app.ui.components.AppSheet
 import com.avenarius.app.ui.components.Avatar
 import com.avenarius.app.ui.components.CenteredSpinner
 import com.avenarius.app.ui.components.LinkedText
+import com.avenarius.app.ui.components.PillTextField
+import com.avenarius.app.ui.components.SheetAction
 import com.avenarius.app.ui.components.openUriSafely
 import com.avenarius.app.ui.components.senderNameColor
+import com.avenarius.app.ui.components.spanStyleOf
+import com.avenarius.app.ui.components.tileColor
 import com.avenarius.app.ui.formatClock
 import com.avenarius.app.ui.formatDay
 import com.avenarius.app.ui.lastSeenText
 import com.avenarius.app.ui.nowMillis
+import com.avenarius.app.ui.plural
 import com.avenarius.app.ui.rememberCameraPhotoLauncher
 import com.avenarius.app.ui.rememberCameraVideoLauncher
 import com.avenarius.app.ui.rememberFilePickLauncher
 import com.avenarius.app.ui.rememberPhotoPickLauncher
 import com.avenarius.app.ui.rememberVoiceRecorder
 import com.avenarius.app.ui.sameDay
+import com.avenarius.app.ui.theme.accentGradient
+import com.avenarius.app.ui.theme.chatWallpaper
 import com.avenarius.app.ui.theme.isLightTheme
+import com.avenarius.app.ui.theme.onAccentGradient
 import com.avenarius.app.ui.theme.onScrim
 import com.avenarius.app.ui.voiceRecordingSupported
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -163,6 +209,8 @@ internal fun ChatScreen(
     onlineUsers: Set<Long> = emptySet(),
     /** Last-seen info, for "был(а) в сети …" when the partner is offline. */
     presence: Map<Long, Presence> = emptyMap(),
+    /** "Подключение…" while the connection is being (re)established; shown in place of the status line. */
+    connecting: String? = null,
     onLoadOlder: () -> Unit,
     onBack: () -> Unit,
     /** Starts a call with the dialog partner ([userId], [isVideo]). */
@@ -170,7 +218,8 @@ internal fun ChatScreen(
     /** Toggles muting notifications for this chat. */
     onToggleMute: () -> Unit,
     onDraftChange: (String) -> Unit,
-    onSend: (String) -> Unit,
+    /** Sends the text with its formatting runs. */
+    onSend: (String, List<TextSpan>) -> Unit,
     onSendMedia: (List<PickedMedia>, String) -> Unit,
     onStagedConsumed: () -> Unit,
     onMediaClick: (MediaAttach, String?) -> Unit,
@@ -179,7 +228,6 @@ internal fun ChatScreen(
     onReply: (Message) -> Unit,
     onForward: (Message) -> Unit,
     onEditMessage: (Message, String) -> Unit,
-    onDeleteMessage: (Message, Boolean) -> Unit,
     onRetrySend: (Message) -> Unit,
     onDiscardSend: (Message) -> Unit,
     /** Handles a tapped link in-app (Max links); false means "open externally". */
@@ -219,15 +267,79 @@ internal fun ChatScreen(
     onCloseReadBy: () -> Unit = {},
     /** Resolves a reader's name + avatar for the sheet. */
     readerInfo: (Long) -> UserInfo = { UserInfo(it, "Пользователь $it") },
+    /** The emoji a double tap reacts with; null leaves the gesture off. */
+    quickReaction: String? = null,
+    /** Enter sends the message instead of breaking the line. */
+    sendOnEnter: Boolean = false,
+    /** The server's reaction picker; the built-in set is used while it is empty. */
+    reactionsMenu: List<String> = emptyList(),
+    /** Multi-select actions. */
+    onForwardMany: (List<Message>) -> Unit = {},
+    /** Deletes these messages, for everyone or just for us. */
+    onDeleteMany: (List<Message>, Boolean) -> Unit = { _, _ -> },
+    /** Pins (true, notifying the members or not) or unpins (false) a message. */
+    onPin: (Message, Boolean, Boolean) -> Unit = { _, _, _ -> },
+    /** Open with the in-chat search showing (the info page's «Найти»); [onSearchStarted] acknowledges it. */
+    startSearch: Boolean = false,
+    onSearchStarted: () -> Unit = {},
+    /** Asks the server for in-chat [query] hits ("" clears them); they come back as [serverHits]. */
+    onSearch: (String) -> Unit = {},
+    serverHits: List<Message> = emptyList(),
+    /** Loads history back to a hit that isn't loaded yet. */
+    onLoadUntil: (Message) -> Unit = {},
+    /** A message to scroll to once loaded; [onJumped] acknowledges it. */
+    jumpTo: String? = null,
+    onJumped: () -> Unit = {},
+    /** «Стереть переписку» (asked to confirm first). */
+    onClearHistory: () -> Unit = {},
+    /** Bot callback buttons in flight, and pressing one. */
+    pressingButtons: Set<BotButton> = emptySet(),
+    onBotButton: (BotButton) -> Unit = {},
+    /** The «Реакции» sheet: which message, who reacted with what (null while loading), open/close. */
+    reactionsMessageId: String? = null,
+    reactedBy: Map<String, List<Long>>? = null,
+    onShowReactions: (Message) -> Unit = {},
+    onCloseReactions: () -> Unit = {},
+    /** Our answers in a poll set to these (empty retracts). */
+    onVote: (Message, Set<Int>) -> Unit = { _, _ -> },
+    /** «Написать» on a shared contact. */
+    onWriteTo: (UserInfo) -> Unit = {},
+    /** The sticker panel: its sets (null while loading), the stickers fetched so far, and the calls behind it. */
+    stickerShelf: StickerShelf? = null,
+    stickers: Map<Long, Sticker> = emptyMap(),
+    onOpenStickers: () -> Unit = {},
+    onLoadStickers: (List<Long>) -> Unit = {},
+    onSendSticker: (Sticker) -> Unit = {},
+    /** Polls may be sent in 1:1 dialogs (server config). */
+    pollsInDialogs: Boolean = false,
+    /** Sends a new poll: question, answers, settings bits. */
+    onSendPoll: (String, List<String>, Int) -> Unit = { _, _, _ -> },
+    /** The chat background (Настройки → Оформление → Фон чата). */
+    wallpaper: Int = 0,
+    /** The chat was opened by an info page's «Найти»: back goes to that page even while the search shows. */
+    searchLeavesChat: Boolean = false,
 ) {
-    var draft by remember(chat?.id) { mutableStateOf(initialDraft) }
-    // What was typed before an edit took over the input, so cancelling an edit puts
-    // the draft back instead of clearing it.
+    // The whole field value (selection and IME composition included), not just its text: rebuilding
+    // it from the text on every change would break the keyboard's composing state.
+    var field by remember(chat?.id) { mutableStateOf(TextFieldValue(initialDraft, TextRange(initialDraft.length))) }
+    // Formatting picked in the composer, kept in step with later typing by remapSpans.
+    var draftSpans by remember(chat?.id) { mutableStateOf(emptyList<TextSpan>()) }
+
+    fun setDraftText(
+        text: String,
+        spans: List<TextSpan> = emptyList(),
+    ) {
+        field = TextFieldValue(text, TextRange(text.length))
+        draftSpans = spans
+    }
+    // What was typed (and its formatting) before an edit took over the input, so ending the
+    // edit puts the draft back instead of clearing it.
     var draftBeforeEdit by remember(chat?.id) { mutableStateOf("") }
+    var spansBeforeEdit by remember(chat?.id) { mutableStateOf(emptyList<TextSpan>()) }
     // The message currently being edited (input shows its text + an "editing" banner).
     var editing by remember(chat?.id) { mutableStateOf<Message?>(null) }
-    // The message pending a delete confirmation.
-    var deleteTarget by remember(chat?.id) { mutableStateOf<Message?>(null) }
+    // The messages pending a delete confirmation (one from its menu, or the multi-select).
+    var deleteTargets by remember(chat?.id) { mutableStateOf(emptyList<Message>()) }
     // Photos/videos/files staged for sending, with an optional caption (the draft).
     var pending by remember(chat?.id) { mutableStateOf<List<PickedMedia>>(emptyList()) }
     val pickFromGallery = rememberPhotoPickLauncher { pending = pending + it }
@@ -236,6 +348,20 @@ internal fun ChatScreen(
     val recordVideoNote = rememberCameraVideoLauncher { onSendVideoNote(it) }
     val pickFile = rememberFilePickLauncher { pending = pending + it }
     var attachMenu by remember { mutableStateOf(false) }
+    var stickerPanel by remember { mutableStateOf(false) }
+    var pollForm by remember(chat?.id) { mutableStateOf(false) }
+    if (pollForm) {
+        PollFormSheet(onCreate = { q, a, settings ->
+            pollForm = false
+            onSendPoll(q, a, settings)
+        }) { pollForm = false }
+    }
+    if (stickerPanel) {
+        StickerSheet(stickerShelf, stickers, onLoadStickers, onSend = {
+            stickerPanel = false
+            onSendSticker(it)
+        }) { stickerPanel = false }
+    }
     // Voice recording: tap the mic to start, then send or discard. Deliberately not
     // hold-to-record — a press-and-hold inside a scrolling list is the same gesture
     // fight that the voice bubble's scrubbing lost.
@@ -261,17 +387,71 @@ internal fun ChatScreen(
         }
     }
     val listState = rememberLazyListState()
+    val jumpScope = rememberCoroutineScope()
+    // Replying or editing means typing next: focus the composer and raise the keyboard.
+    val composerFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(replyingTo?.id, editing?.id) {
+        if (replyingTo != null || editing != null) {
+            runCatching { composerFocus.requestFocus() }
+            keyboard?.show()
+        }
+    }
+    val clipboard = LocalClipboardManager.current
+    // Multi-select: ids of the picked messages; a long press on a bubble starts it.
+    var selected by remember(chat?.id) { mutableStateOf(setOf<String>()) }
+    val selecting = selected.isNotEmpty()
+    PlatformBackHandler(enabled = selecting) { selected = emptySet() }
+    // The message briefly tinted after jumping to it (from a reply quote or the pinned bar).
+    var flashId by remember(chat?.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(flashId) {
+        if (flashId != null) {
+            delay(1600)
+            flashId = null
+        }
+    }
+    var showPinned by remember(chat?.id) { mutableStateOf(false) }
     val isDialog = chat?.isDialog ?: true
+    // Service notices and bots: nobody to call, and their "last seen" means nothing.
+    val isService = chat?.isServiceChat == true
     // For a 1:1 dialog the other user's id is chatId XOR myId.
     val otherUserId = if (isDialog && chat != null && myId >= 0) chat.id xor myId else null
     // The message whose context menu is open (overlay shown above the conversation).
     var menuTarget by remember(chat?.id) { mutableStateOf<Message?>(null) }
+    // The message waiting for the pin confirmation.
+    var pinTarget by remember(chat?.id) { mutableStateOf<Message?>(null) }
+    pinTarget?.let { target ->
+        var notify by remember(target.id) { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { pinTarget = null },
+            title = { Text("Закрепить сообщение?") },
+            text = {
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).toggleable(value = notify, onValueChange = { notify = it }),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = notify, onCheckedChange = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (chat?.isChannel == true) "Уведомить подписчиков" else "Уведомить участников")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onPin(target, true, notify)
+                    pinTarget = null
+                }) { Text("Закрепить") }
+            },
+            dismissButton = { TextButton(onClick = { pinTarget = null }) { Text("Отмена") } },
+        )
+    }
 
     // Index of the first unread message (the divider sits just before it).
     val firstUnread = if (unreadAtOpen in 1..messages.size) messages.size - unreadAtOpen else -1
 
-    var positioned by remember(chat?.id) { mutableStateOf(false) }
-    var prevSize by remember(chat?.id) { mutableStateOf(0) }
+    // Saved (with the list state), so coming back from the info page keeps the place instead of re-running the open jump.
+    var positioned by rememberSaveable(chat?.id) { mutableStateOf(false) }
+    var prevSize by rememberSaveable(chat?.id) { mutableStateOf(0) }
+    var prevLastKey by remember(chat?.id) { mutableStateOf<Any?>(null) }
     // When loading older messages we remember the top item so we can stay on it
     // after the prepend (otherwise the list visibly jumps).
     var restoreAnchor by remember(chat?.id) { mutableStateOf<Pair<Any, Int>?>(null) }
@@ -280,27 +460,33 @@ internal fun ChatScreen(
         if (messages.isEmpty()) return@LaunchedEffect
         when {
             !positioned -> {
-                // Jump INSTANTLY to the first unread (or bottom) on open.
-                listState.scrollToItem(if (firstUnread > 0) firstUnread else messages.lastIndex)
+                // Jump INSTANTLY to the first unread (or the very end) on open.
+                if (firstUnread > 0) listState.scrollToItem(firstUnread) else listState.scrollToEnd(messages.lastIndex)
                 positioned = true
             }
-            restoreAnchor != null -> {
+            olderPrepended(messages.first().listKey(), restoreAnchor?.first) -> {
                 // Older page prepended: scroll back to the previously-top message.
                 val (key, offset) = restoreAnchor!!
                 val idx = messages.indexOfFirst { (it.id ?: it.cid ?: it.time) == key }
                 if (idx >= 0) listState.scrollToItem(idx, offset)
                 restoreAnchor = null
             }
-            messages.size > prevSize -> {
-                // New message appended: follow it only if already near the bottom.
+            // New message appended (not history prepended): ours always, others only if already near the bottom.
+            messages.size > prevSize && messages.last().listKey() != prevLastKey -> {
+                // An anchor still on the first message is stale (no older page came: the start of the
+                // history); restoring it here would throw the list back to the top.
+                restoreAnchor = null
                 val lastVisible =
                     listState.layoutInfo.visibleItemsInfo
                         .lastOrNull()
                         ?.index ?: 0
-                if (lastVisible >= prevSize - 2) listState.animateScrollToItem(messages.lastIndex)
+                if (followAppended(messages.last().senderId == myId, lastVisible, prevSize)) {
+                    listState.animateScrollToItem(messages.lastIndex, END_OFFSET)
+                }
             }
         }
         prevSize = messages.size
+        prevLastKey = messages.last().listKey()
     }
 
     // Trigger loading older messages when the user reaches the very top.
@@ -315,92 +501,296 @@ internal fun ChatScreen(
             }
     }
 
+    // In-chat search: the loaded messages at once, the server's hits (older history too) a moment later.
+    var searchOpen by remember(chat?.id) { mutableStateOf(false) }
+    LaunchedEffect(startSearch) {
+        if (startSearch) {
+            searchOpen = true
+            onSearchStarted()
+        }
+    }
+    var searchQuery by remember(chat?.id) { mutableStateOf("") }
+    val query = searchQuery.trim().takeIf { searchOpen && it.length >= 2 }
+    LaunchedEffect(query) {
+        delay(400) // let typing settle before asking the server
+        onSearch(query ?: "")
+    }
+    val matches =
+        remember(messages, query, serverHits) {
+            if (query == null) {
+                emptyList()
+            } else {
+                (messages.filter { it.id != null && it.text.contains(query, ignoreCase = true) } + serverHits)
+                    .distinctBy { it.id }
+                    .sortedBy { it.time }
+            }
+        }
+    // Position within [matches], counted from the newest hit.
+    var searchPos by remember(chat?.id, query) { mutableIntStateOf(0) }
+    // History is paged back to a hit only once the user has stepped (↑/↓), never as results land.
+    var stepped by remember(chat?.id, query) { mutableStateOf(false) }
+    val hit = matches.getOrNull(matches.lastIndex - searchPos)
+    val matchIndex = hit?.let { h -> messages.indexOfFirst { it.id == h.id } }?.takeIf { it >= 0 }
+    LaunchedEffect(hit?.id, matchIndex, stepped) {
+        when {
+            matchIndex != null -> listState.animateScrollToItem(matchIndex)
+            // Older than what is loaded: load back to it; the list then scrolls here.
+            hit != null && stepped -> onLoadUntil(hit)
+        }
+    }
+    // A search hit opened from the chat list: scroll to it once its history is in.
+    LaunchedEffect(jumpTo, messages.size, positioned) {
+        val idx = jumpTo?.let { id -> messages.indexOfFirst { it.id == id } } ?: -1
+        if (positioned && idx >= 0) {
+            listState.scrollToItem(idx)
+            // A third of the way down rather than flush under the top bar, where the tint goes unseen.
+            listState.scrollBy(-listState.layoutInfo.viewportSize.height / 3f)
+            flashId = jumpTo
+            onJumped()
+        }
+    }
+    // Opened by the info page's «Найти»: back leaves to that page straight away (App's handler).
+    PlatformBackHandler(enabled = searchOpen && !searchLeavesChat) {
+        searchOpen = false
+        searchQuery = ""
+    }
+
+    /** Scrolls to a loaded message and flashes it; false when it isn't in the loaded history. */
+    val jumpTo: (String) -> Boolean = { id ->
+        val idx = messages.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            flashId = id
+            jumpScope.launch { listState.animateScrollToItem(idx) }
+        }
+        idx >= 0
+    }
+
     var menuOpen by remember { mutableStateOf(false) }
     var confirmAction by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
+    if (confirmClear) ClearHistoryDialog(onClearHistory) { confirmClear = false }
     // Heading avatar: a 1:1 dialog uses the contact's photo; a group uses its own.
     val headingAvatar = if (isDialog) otherUserId?.let { senderAvatars[it] } else chat?.avatarUrl
+    val cs = MaterialTheme.colorScheme
+    val isSaved = chat?.isSavedMessages == true
+    if (attachMenu) {
+        AttachSheet(
+            onDismiss = { attachMenu = false },
+            onGallery = pickFromGallery,
+            onFile = pickFile,
+            onPhoto = takePhoto.takeIf { cameraCaptureSupported },
+            onVideo = takeVideo.takeIf { cameraCaptureSupported },
+            // Where we can write; a 1:1 dialog only when the server allows polls there.
+            onPoll = { pollForm = true }.takeIf { chat?.canWrite == true && (!chat.isDialog || pollsInDialogs) },
+        )
+    }
     Scaffold(
-        modifier = Modifier.background(chatWallpaper()),
+        modifier = Modifier.chatWallpaper(wallpaper),
         containerColor = Color.Transparent,
-        contentColor = MaterialTheme.colorScheme.onSurface,
+        contentColor = cs.onSurface,
         topBar = {
-            TopAppBar(
-                title = {
-                    // 1:1 → open the contact's profile; group/channel → open the group page.
-                    val onHeaderClick: (() -> Unit)? =
-                        when {
-                            !isDialog && chat != null -> onOpenGroup
-                            otherUserId != null -> {
-                                { onOpenUser(otherUserId) }
-                            }
-                            else -> null
-                        }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = if (onHeaderClick != null) Modifier.clickable(onClick = onHeaderClick) else Modifier,
-                    ) {
-                        Avatar(chat?.title ?: "Чат", headingAvatar, 40.dp)
-                        Spacer(Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                chat?.title ?: "Чат",
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            val partnerOnline = otherUserId != null && otherUserId in onlineUsers
-                            val active = typingText != null || partnerOnline
-                            val lastSeen = otherUserId?.let { presence[it] }?.let { lastSeenText(it, nowMillis()) }
-                            val members =
-                                chat?.takeIf { !isDialog && it.participantsCount > 0 }?.let {
-                                    participantsLabel(it.participantsCount, it.isChannel)
+            // 1:1 → open the contact's profile; group/channel → open the group page.
+            val onHeaderClick: (() -> Unit)? =
+                when {
+                    isSaved -> null
+                    !isDialog && chat != null -> onOpenGroup
+                    otherUserId != null -> {
+                        { onOpenUser(otherUserId) }
+                    }
+                    else -> null
+                }
+            Surface(color = cs.surface.copy(alpha = 0.9f)) {
+                Column {
+                    if (selecting) {
+                        val picked = messages.filter { it.id in selected }
+                        SelectionBar(
+                            count = selected.size,
+                            onClose = { selected = emptySet() },
+                            onCopy =
+                                {
+                                    clipboard.setText(AnnotatedString(picked.joinToString("\n\n") { it.text }.trim()))
+                                    selected = emptySet()
+                                }.takeIf { picked.any { it.text.isNotBlank() } },
+                            onForward = {
+                                onForwardMany(picked)
+                                selected = emptySet()
+                            },
+                            onDelete = { deleteTargets = picked },
+                        )
+                    } else if (searchOpen) {
+                        ChatSearchBar(
+                            query = searchQuery,
+                            onQuery = { searchQuery = it },
+                            position = if (matches.isEmpty()) null else "${searchPos + 1} из ${matches.size}",
+                            nothingFound = matches.isEmpty() && searchQuery.trim().length >= 2,
+                            loading = loadingOlder,
+                            onOlder = {
+                                if (searchPos < matches.lastIndex) searchPos++
+                                stepped = true
+                            },
+                            // At the newest hit, ↓ fetches that hit when it isn't loaded yet.
+                            onNewer = {
+                                if (searchPos > 0) searchPos--
+                                stepped = true
+                            },
+                            onClose = {
+                                searchOpen = false
+                                searchQuery = ""
+                            },
+                        )
+                    } else {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .statusBarsPadding()
+                                .height(64.dp)
+                                .padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(onClick = onBack) { Icon(AppIcons.Back, contentDescription = "Назад") }
+                            Row(
+                                Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .then(if (onHeaderClick != null) Modifier.clickable(onClick = onHeaderClick) else Modifier)
+                                    .padding(horizontal = 4.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                if (isSaved) {
+                                    SavedMessagesAvatar(42.dp)
+                                } else {
+                                    Avatar(
+                                        chat?.title ?: "Чат",
+                                        headingAvatar,
+                                        42.dp,
+                                        online = otherUserId != null && otherUserId in onlineUsers,
+                                    )
                                 }
-                            val status = typingText ?: if (partnerOnline) "в сети" else lastSeen ?: members
-                            if (status != null) {
-                                Text(
-                                    status,
-                                    maxLines = 1,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            chat?.title ?: "Чат",
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            modifier = Modifier.weight(1f, fill = false),
+                                        )
+                                        if (chat?.official == true) {
+                                            Spacer(Modifier.width(4.dp))
+                                            Icon(
+                                                AppIcons.Verified,
+                                                contentDescription = "Официальный",
+                                                tint = cs.primary,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                        }
+                                    }
+                                    val partnerOnline = !isSaved && otherUserId != null && otherUserId in onlineUsers
+                                    val active = connecting == null && (typingText != null || partnerOnline)
+                                    val lastSeen =
+                                        otherUserId?.takeIf { !isSaved && !isService }?.let { presence[it] }?.let {
+                                            lastSeenText(
+                                                it,
+                                                nowMillis(),
+                                            )
+                                        }
+                                    val members =
+                                        chat?.takeIf { !isDialog && it.participantsCount > 0 }?.let {
+                                            participantsLabel(it.participantsCount, it.isChannel)
+                                        }
+                                    val status =
+                                        connecting?.lowercase()
+                                            ?: typingText
+                                            ?: when {
+                                                isSaved -> "заметки для себя"
+                                                partnerOnline -> "в сети"
+                                                else -> lastSeen ?: members
+                                            }
+                                    if (status != null) {
+                                        Text(
+                                            status,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (active) cs.primary else cs.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                            if (isDialog && !isSaved && !isService && otherUserId != null && otherUserId >= 0) {
+                                IconButton(onClick = { onStartCall(otherUserId, false) }) {
+                                    Icon(AppIcons.Call, contentDescription = "Аудиозвонок")
+                                }
+                                IconButton(onClick = { onStartCall(otherUserId, true) }) {
+                                    Icon(AppIcons.Video, contentDescription = "Видеозвонок")
+                                }
+                            }
+                            Box {
+                                IconButton(onClick = { menuOpen = true }) {
+                                    Icon(AppIcons.More, contentDescription = "Меню")
+                                }
+                                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                    DropdownMenuItem(
+                                        text = { Text("Поиск") },
+                                        leadingIcon = { Icon(AppIcons.Search, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            searchOpen = true
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(if (chat?.muted == true) "Включить уведомления" else "Отключить уведомления") },
+                                        leadingIcon = {
+                                            Icon(
+                                                if (chat?.muted ==
+                                                    true
+                                                ) {
+                                                    AppIcons.Unmuted
+                                                } else {
+                                                    AppIcons.Muted
+                                                },
+                                                contentDescription = null,
+                                            )
+                                        },
+                                        onClick = {
+                                            menuOpen = false
+                                            onToggleMute()
+                                        },
+                                    )
+                                    if (chat?.isChannel != true) {
+                                        DropdownMenuItem(
+                                            text = { Text("Стереть переписку", color = cs.error) },
+                                            leadingIcon = { Icon(AppIcons.Clean, contentDescription = null, tint = cs.error) },
+                                            onClick = {
+                                                menuOpen = false
+                                                confirmClear = true
+                                            },
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                        text = { Text(if (isDialog) "Удалить чат" else "Выйти из группы", color = cs.error) },
+                                        leadingIcon = {
+                                            Icon(
+                                                if (isDialog) AppIcons.Delete else AppIcons.Logout,
+                                                contentDescription = null,
+                                                tint = cs.error,
+                                            )
+                                        },
+                                        onClick = {
+                                            menuOpen = false
+                                            confirmAction = true
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(AppIcons.Back, contentDescription = "Назад") }
-                },
-                actions = {
-                    if (isDialog && otherUserId != null && otherUserId >= 0) {
-                        IconButton(onClick = { onStartCall(otherUserId, false) }) {
-                            Icon(AppIcons.Call, contentDescription = "Аудиозвонок")
-                        }
-                        IconButton(onClick = { onStartCall(otherUserId, true) }) {
-                            Icon(AppIcons.VideoCall, contentDescription = "Видеозвонок")
-                        }
+                    chat?.pinnedMessage?.takeIf { !selecting && !searchOpen }?.let { pinned ->
+                        PinnedBar(pinned) { if (pinned.id?.let(jumpTo) != true) showPinned = true }
                     }
-                    IconButton(onClick = { menuOpen = true }) {
-                        Icon(AppIcons.More, contentDescription = "Меню")
-                    }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        DropdownMenuItem(
-                            text = { Text(if (chat?.muted == true) "Включить уведомления" else "Отключить уведомления") },
-                            onClick = {
-                                menuOpen = false
-                                onToggleMute()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text(if (isDialog) "Удалить чат" else "Выйти из группы") },
-                            onClick = {
-                                menuOpen = false
-                                confirmAction = true
-                            },
-                        )
-                    }
-                },
-            )
+                }
+            }
         },
         bottomBar = {
             // With enableEdgeToEdge + adjustResize (see AndroidManifest) the keyboard
@@ -410,243 +800,262 @@ internal fun ChatScreen(
             // so we sum the two paddings: ime + navigationBars = full keyboard height
             // while typing, and just the nav bar when the keyboard is hidden (ime = 0).
             Column(Modifier.fillMaxWidth().imePadding().navigationBarsPadding()) {
+                // A read-only service chat: nothing to write and nothing to say about it.
+                if (chat != null && !chat.canWrite && chat.isDialog) return@Column
                 // Read-only chats (channels we don't run): no composer, just a note.
                 if (chat != null && !chat.canWrite) {
+                    // A channel we only read gets the one action that makes sense there.
                     Text(
-                        "У вас нет прав писать в этот чат",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        when {
+                            !chat.isChannel -> "Писать в этот чат могут только администраторы"
+                            chat.muted -> "Включить уведомления"
+                            else -> "Отключить уведомления"
+                        },
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (chat.isChannel) cs.primary else cs.onSurfaceVariant,
                         textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp),
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 8.dp)
+                                .clip(CircleShape)
+                                .background(incomingBubbleColor())
+                                .then(if (chat.isChannel) Modifier.clickable(onClick = onToggleMute) else Modifier)
+                                .padding(vertical = 15.dp),
                     )
                     return@Column
                 }
-                if (editing != null) {
-                    EditBanner(editing!!.text) {
-                        editing = null
-                        draft = draftBeforeEdit
+                // Sends whatever the composer holds: an edit, staged attachments or plain text.
+                val submit = {
+                    val target = editing
+                    when {
+                        target != null -> {
+                            onEditMessage(target, field.text)
+                            editing = null
+                            setDraftText(draftBeforeEdit, spansBeforeEdit)
+                        }
+                        pending.isNotEmpty() -> {
+                            onSendMedia(pending, field.text)
+                            pending = emptyList()
+                            setDraftText("")
+                            onDraftChange("")
+                        }
+                        else -> {
+                            onSend(field.text, draftSpans)
+                            setDraftText("")
+                            onDraftChange("")
+                        }
                     }
-                } else if (replyingTo != null) {
-                    ReplyBanner(replyingTo, contacts, myId, onCancelReply)
                 }
-                if (pending.isNotEmpty()) {
-                    StagedAttachments(pending, onRemove = { item -> pending = pending - item })
-                }
-                // Telegram-style rounded input pill: attach + text field + send button.
-                Surface(
-                    shape = RoundedCornerShape(24.dp),
-                    color = incomingBubbleColor(),
-                    shadowElevation = 1.dp,
-                    modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
+                val canSend = recording || ((field.text.isNotBlank() || pending.isNotEmpty()) && !sendingAttachment)
+                // Nothing to send yet: the round button records a voice message instead.
+                val micMode = voiceRecordingSupported && !recording && !canSend && !sendingAttachment
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.Bottom,
                 ) {
-                    val canSend = recording || ((draft.isNotBlank() || pending.isNotEmpty()) && !sendingAttachment)
-                    Row(
-                        Modifier.padding(start = 4.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-                        verticalAlignment = Alignment.Bottom,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    // The input pill: reply/edit strip and staged attachments ride on top of the field.
+                    Surface(
+                        shape = RoundedCornerShape(26.dp),
+                        color = incomingBubbleColor(),
+                        shadowElevation = 2.dp,
+                        modifier = Modifier.weight(1f),
                     ) {
-                        if (recording) {
-                            IconButton(
-                                onClick = {
-                                    recording = false
-                                    recorder.cancel()
-                                },
-                                modifier = Modifier.size(40.dp),
-                            ) {
-                                Icon(
-                                    AppIcons.Delete,
-                                    contentDescription = "Отменить запись",
-                                    tint = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.size(22.dp),
-                                )
-                            }
-                        }
-                        Box {
-                            IconButton(
-                                onClick = { attachMenu = true },
-                                enabled = !recording,
-                                modifier = Modifier.size(if (recording) 0.dp else 40.dp),
-                            ) {
-                                if (!recording) {
-                                    Icon(
-                                        AppIcons.Attach,
-                                        contentDescription = "Прикрепить",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(22.dp),
-                                    )
+                        Column {
+                            if (editing != null) {
+                                EditBanner(editing!!.text) {
+                                    editing = null
+                                    setDraftText(draftBeforeEdit, spansBeforeEdit)
                                 }
+                            } else if (replyingTo != null) {
+                                ReplyBanner(replyingTo, contacts, myId, onCancelReply)
                             }
-                            DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Галерея") },
-                                    onClick = {
-                                        attachMenu = false
-                                        pickFromGallery()
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Файл") },
-                                    onClick = {
-                                        attachMenu = false
-                                        pickFile()
-                                    },
-                                )
-                                if (cameraCaptureSupported) {
-                                    DropdownMenuItem(
-                                        text = { Text("Сделать фото") },
-                                        onClick = {
-                                            attachMenu = false
-                                            takePhoto()
-                                        },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Снять видео") },
-                                        onClick = {
-                                            attachMenu = false
-                                            takeVideo()
-                                        },
-                                    )
-                                }
+                            if (pending.isNotEmpty()) {
+                                StagedAttachments(pending, onRemove = { item -> pending = pending - item })
                             }
-                        }
-                        if (recording) {
                             Row(
-                                Modifier.weight(1f).padding(vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                Modifier.padding(horizontal = 4.dp, vertical = 4.dp).heightIn(min = 44.dp),
+                                verticalAlignment = Alignment.Bottom,
                             ) {
-                                Box(
-                                    Modifier.size(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error),
-                                )
-                                Text(
-                                    "Запись… ${recordedSeconds / 60}:${(recordedSeconds % 60).toString().padStart(2, '0')}",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                )
-                            }
-                        }
-                        if (!recording) {
-                            BasicTextField(
-                                value = draft,
-                                onValueChange = {
-                                    draft = it
-                                    // While editing, the input holds the message being
-                                    // edited — that must not overwrite the chat's draft.
-                                    if (editing == null) onDraftChange(it)
-                                },
-                                modifier = Modifier.weight(1f).padding(vertical = 10.dp),
-                                textStyle =
-                                    MaterialTheme.typography.bodyLarge.copy(
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                    ),
-                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                                // Auto-capitalize sentences, like other messengers.
-                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                                maxLines = 5,
-                                decorationBox = { inner ->
-                                    if (draft.isEmpty()) {
-                                        Text(
-                                            if (pending.isNotEmpty()) "Подпись…" else "Сообщение",
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                if (recording) {
+                                    IconButton(
+                                        onClick = {
+                                            recording = false
+                                            recorder.cancel()
+                                        },
+                                        modifier = Modifier.size(44.dp),
+                                    ) {
+                                        Icon(
+                                            AppIcons.Delete,
+                                            contentDescription = "Отменить запись",
+                                            tint = cs.error,
+                                            modifier = Modifier.size(24.dp),
                                         )
                                     }
-                                    inner()
-                                },
-                            )
-                        }
-                        // Recording buttons instead of send when there is nothing typed.
-                        if (voiceRecordingSupported && !recording && !canSend) {
-                            IconButton(
-                                onClick = { recordVideoNote() },
-                                modifier = Modifier.size(40.dp),
-                            ) {
-                                Icon(
-                                    AppIcons.VideoNote,
-                                    contentDescription = "Записать видеосообщение",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(22.dp),
-                                )
-                            }
-                            IconButton(
-                                onClick = {
-                                    recording = true
-                                    recorder.start()
-                                },
-                                modifier = Modifier.size(40.dp),
-                            ) {
-                                Icon(
-                                    AppIcons.Mic,
-                                    contentDescription = "Записать голосовое сообщение",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(22.dp),
-                                )
-                            }
-                        }
-                        Box(
-                            Modifier
-                                .size(if (voiceRecordingSupported && !recording && !canSend) 0.dp else 40.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (canSend) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
-                                    },
-                                ).then(
-                                    if (canSend) {
-                                        Modifier.clickable {
-                                            if (recording) {
-                                                // Hands the take to onRecorded, which sends it.
-                                                recorder.stop()
-                                                return@clickable
+                                    Row(
+                                        Modifier.weight(1f).height(44.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        RecordingDot()
+                                        Text(
+                                            "${recordedSeconds / 60}:${(recordedSeconds % 60).toString().padStart(2, '0')}",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            fontWeight = FontWeight.Medium,
+                                            color = cs.onSurface,
+                                        )
+                                        Text(
+                                            "Идёт запись…",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = cs.onSurfaceVariant,
+                                        )
+                                    }
+                                } else {
+                                    if (editing == null) {
+                                        IconButton(
+                                            onClick = {
+                                                onOpenStickers()
+                                                stickerPanel = true
+                                            },
+                                            modifier = Modifier.size(44.dp),
+                                        ) {
+                                            Icon(
+                                                AppIcons.Emoji,
+                                                contentDescription = "Стикеры",
+                                                tint = cs.onSurfaceVariant,
+                                                modifier = Modifier.size(24.dp),
+                                            )
+                                        }
+                                    }
+                                    IconButton(onClick = { attachMenu = true }, modifier = Modifier.size(44.dp)) {
+                                        Icon(
+                                            AppIcons.Attach,
+                                            contentDescription = "Прикрепить",
+                                            tint = cs.onSurfaceVariant,
+                                            modifier = Modifier.size(24.dp),
+                                        )
+                                    }
+                                    BasicTextField(
+                                        value = field,
+                                        onValueChange = { v ->
+                                            val old = field.text
+                                            // "Отправка по вводу": a line break typed at the end sends.
+                                            if (sendOnEnter &&
+                                                v.text.length == old.length + 1 &&
+                                                v.text.endsWith('\n') &&
+                                                old.isNotBlank()
+                                            ) {
+                                                submit()
+                                                return@BasicTextField
                                             }
-                                            val target = editing
-                                            when {
-                                                target != null -> {
-                                                    onEditMessage(target, draft)
-                                                    editing = null
-                                                    draft = draftBeforeEdit
-                                                }
-                                                pending.isNotEmpty() -> {
-                                                    onSendMedia(pending, draft)
-                                                    pending = emptyList()
-                                                    draft = ""
-                                                    onDraftChange("")
-                                                }
-                                                else -> {
-                                                    onSend(draft)
-                                                    draft = ""
-                                                    onDraftChange("")
-                                                }
+                                            if (v.text != old) draftSpans = remapSpans(old, v.text, draftSpans)
+                                            field = v
+                                            // While editing, the input holds the message being
+                                            // edited — that must not overwrite the chat's draft.
+                                            if (editing == null && v.text != old) onDraftChange(v.text)
+                                        },
+                                        visualTransformation = spansShown(draftSpans),
+                                        modifier =
+                                            Modifier
+                                                .weight(1f)
+                                                .padding(vertical = 11.dp, horizontal = 2.dp)
+                                                .focusRequester(composerFocus),
+                                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = cs.onSurface),
+                                        cursorBrush = SolidColor(cs.primary),
+                                        // Auto-capitalize sentences, like other messengers.
+                                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                                        maxLines = 6,
+                                        decorationBox = { inner ->
+                                            if (field.text.isEmpty()) {
+                                                Text(
+                                                    if (pending.isNotEmpty()) "Подпись…" else "Сообщение",
+                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    color = cs.onSurfaceVariant,
+                                                )
                                             }
+                                            inner()
+                                        },
+                                    )
+                                    // Round video messages share the "nothing typed yet" state with the mic.
+                                    if (micMode) {
+                                        IconButton(onClick = { recordVideoNote() }, modifier = Modifier.size(44.dp)) {
+                                            Icon(
+                                                AppIcons.VideoNote,
+                                                contentDescription = "Записать видеосообщение",
+                                                tint = cs.onSurfaceVariant,
+                                                modifier = Modifier.size(24.dp),
+                                            )
                                         }
                                     } else {
-                                        Modifier
+                                        Spacer(Modifier.width(10.dp))
+                                    }
+                                }
+                            }
+                            // Text selected in a new message: a small bar to format it, under the field, where
+                            // the system's own selection toolbar (drawn above the selection) does not go.
+                            if (!field.selection.collapsed && editing == null && pending.isEmpty() && !recording) {
+                                FormatBar { type ->
+                                    draftSpans = draftSpans.toggled(type, field.selection.min, field.selection.length)
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    // The round action button: mic when idle, otherwise send.
+                    val enabled = micMode || canSend
+                    Box(
+                        Modifier
+                            .size(52.dp)
+                            .then(if (enabled) Modifier.shadow(4.dp, CircleShape) else Modifier)
+                            .clip(CircleShape)
+                            .background(if (enabled) accentGradient() else SolidColor(incomingBubbleColor()))
+                            .clickable(enabled = enabled) {
+                                if (micMode) {
+                                    recording = true
+                                    recorder.start()
+                                    return@clickable
+                                }
+                                if (recording) {
+                                    // Hands the take to onRecorded, which sends it.
+                                    recorder.stop()
+                                    return@clickable
+                                }
+                                submit()
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (sendingAttachment) {
+                            CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp, color = cs.onSurfaceVariant)
+                        } else {
+                            AnimatedContent(
+                                targetState =
+                                    if (micMode) {
+                                        0
+                                    } else if (editing != null) {
+                                        2
+                                    } else {
+                                        1
                                     },
-                                ),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            if (sendingAttachment) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(20.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            } else {
+                                transitionSpec = {
+                                    (androidx.compose.animation.scaleIn() + androidx.compose.animation.fadeIn()) togetherWith
+                                        (androidx.compose.animation.scaleOut() + androidx.compose.animation.fadeOut())
+                                },
+                                label = "action",
+                            ) { mode ->
                                 Icon(
-                                    AppIcons.Send,
-                                    contentDescription = "Отправить",
-                                    tint =
-                                        if (canSend) {
-                                            MaterialTheme.colorScheme.onPrimary
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    when (mode) {
+                                        0 -> AppIcons.Mic
+                                        2 -> AppIcons.Delivered
+                                        else -> AppIcons.Send
+                                    },
+                                    contentDescription =
+                                        when (mode) {
+                                            0 -> "Записать голосовое сообщение"
+                                            2 -> "Сохранить"
+                                            else -> "Отправить"
                                         },
-                                    modifier = Modifier.size(20.dp),
+                                    tint = if (enabled) onAccentGradient() else cs.onSurfaceVariant.copy(alpha = 0.5f),
+                                    modifier = Modifier.size(24.dp),
                                 )
                             }
                         }
@@ -658,7 +1067,7 @@ internal fun ChatScreen(
         BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
             // Bubbles may span most of the screen, as messengers do; a fixed cap left a wide
             // empty margin on large or scaled-down screens and wrapped text early.
-            val bubbleMax = maxWidth * 0.85f
+            val bubbleMax = maxWidth * 0.82f
             if (busy && messages.isEmpty()) {
                 CenteredSpinner()
             }
@@ -680,55 +1089,81 @@ internal fun ChatScreen(
             }
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
+                contentPadding = PaddingValues(vertical = 6.dp),
             ) {
                 itemsIndexed(messages, key = { _, m -> m.id ?: m.cid ?: m.time }) { index, msg ->
-                    // A day chip at every date change, as the official client does; the
-                    // floating chip above still tracks the day while scrolling.
-                    val prevAny = messages.getOrNull(index - 1)
-                    if (prevAny == null || !sameDay(prevAny.time, msg.time)) ServiceMessageChip(formatDay(msg.time))
-                    if (index == firstUnread && firstUnread > 0) NewMessagesDivider()
-                    // Group service events ("X joined", "X added Y") render as a centered chip.
-                    val service = msg.service
-                    if (service != null) {
-                        ServiceMessageChip(serviceMessageText(service, contacts, myId))
-                        return@itemsIndexed
+                    // New bubbles fade in; placement stays instant so prepending history never slides the view.
+                    Column(Modifier.animateItem(placementSpec = null)) {
+                        // A day chip at every date change, as the official client does; the
+                        // floating chip above still tracks the day while scrolling.
+                        val prevAny = messages.getOrNull(index - 1)
+                        if (prevAny == null || !sameDay(prevAny.time, msg.time)) ServiceMessageChip(formatDay(msg.time))
+                        if (index == firstUnread && firstUnread > 0) NewMessagesDivider()
+                        // Group service events ("X joined", "X added Y") render as a centered chip.
+                        val service = msg.service
+                        if (service != null) {
+                            ServiceMessageChip(serviceMessageText(service, contacts, myId))
+                            return@Column
+                        }
+                        val isMine = msg.senderId == myId
+                        val prev = messages.getOrNull(index - 1)
+                        // Show the avatar only on the first message of a run from one sender.
+                        val startsRun = prev == null || prev.senderId != msg.senderId
+                        MessageRow(
+                            msg = msg,
+                            isMine = isMine,
+                            maxWidth = bubbleMax,
+                            senderName = contacts[msg.senderId] ?: "—",
+                            senderAvatar = senderAvatars[msg.senderId],
+                            isGroup = !isDialog,
+                            startsRun = startsRun,
+                            highlighted = index == matchIndex || (msg.id != null && msg.id == flashId),
+                            selecting = selecting,
+                            selected = msg.id != null && msg.id in selected,
+                            searchQuery = searchQuery.trim().takeIf { searchOpen && it.length >= 2 },
+                            onLongClick = { msg.id?.let { id -> selected = if (id in selected) selected - id else selected + id } },
+                            onDoubleClick =
+                                quickReaction?.takeIf { !selecting && msg.id != null }?.let { emoji -> { onReact(msg, emoji) } },
+                            onReplyClick = msg.replyTo?.messageId?.let { id -> { jumpTo(id) } },
+                            replyAuthor =
+                                msg.replyTo?.let { if (it.senderId == myId) "Вы" else contacts[it.senderId] ?: "—" },
+                            // Read as «Переслано от …», so ours is «вас», not «Вы».
+                            forwardAuthor =
+                                msg.forwardedFrom?.let { if (it == myId) "вас" else contacts[it] ?: "—" },
+                            onForwardClick = msg.forwardedFrom?.let { id -> { onOpenUser(id) } },
+                            onMediaClick = onMediaClick,
+                            onAvatarClick = { onOpenUser(msg.senderId) },
+                            onClick = {
+                                val id = msg.id
+                                if (selecting &&
+                                    id != null
+                                ) {
+                                    selected = if (id in selected) selected - id else selected + id
+                                } else {
+                                    menuTarget = msg
+                                }
+                            },
+                            onSwipeReply = { onReply(msg) },
+                            onReactionClick = { emoji -> onReact(msg, emoji) },
+                            onDownloadFile = { file -> onFileClick(msg, file) },
+                            onLinkClick = onLinkClick,
+                            onVoiceClick = { onVoiceClick(msg) },
+                            onVoiceSeek = onVoiceSeek,
+                            voiceState = playingVoice?.takeIf { it.messageId == msg.id },
+                            onVideoNoteClick = { onVideoNoteClick(msg) },
+                            videoNoteState = playingVideoNote?.takeIf { it.messageId == msg.id },
+                            downloadedFiles = downloadedFiles,
+                            downloadingFiles = downloadingFiles,
+                            onRetry = { onRetrySend(msg) },
+                            onDiscard = { onDiscardSend(msg) },
+                            pressingButtons = pressingButtons,
+                            onBotButton = onBotButton,
+                            onVote = { onVote(msg, it) },
+                            onWriteTo = onWriteTo,
+                        )
                     }
-                    val isMine = msg.senderId == myId
-                    val prev = messages.getOrNull(index - 1)
-                    // Show the avatar only on the first message of a run from one sender.
-                    val startsRun = prev == null || prev.senderId != msg.senderId
-                    MessageRow(
-                        msg = msg,
-                        isMine = isMine,
-                        maxWidth = bubbleMax,
-                        senderName = contacts[msg.senderId] ?: "—",
-                        senderAvatar = senderAvatars[msg.senderId],
-                        isGroup = !isDialog,
-                        startsRun = startsRun,
-                        replyAuthor =
-                            msg.replyTo?.let { if (it.senderId == myId) "Вы" else contacts[it.senderId] ?: "—" },
-                        forwardAuthor =
-                            msg.forwardedFrom?.let { if (it == myId) "Вы" else contacts[it] ?: "—" },
-                        onForwardClick = msg.forwardedFrom?.let { id -> { onOpenUser(id) } },
-                        onMediaClick = onMediaClick,
-                        onAvatarClick = { onOpenUser(msg.senderId) },
-                        onClick = { menuTarget = msg },
-                        onSwipeReply = { onReply(msg) },
-                        onReactionClick = { emoji -> onReact(msg, emoji) },
-                        onDownloadFile = { file -> onFileClick(msg, file) },
-                        onLinkClick = onLinkClick,
-                        onVoiceClick = { onVoiceClick(msg) },
-                        onVoiceSeek = onVoiceSeek,
-                        voiceState = playingVoice?.takeIf { it.messageId == msg.id },
-                        onVideoNoteClick = { onVideoNoteClick(msg) },
-                        videoNoteState = playingVideoNote?.takeIf { it.messageId == msg.id },
-                        downloadedFiles = downloadedFiles,
-                        downloadingFiles = downloadingFiles,
-                        onRetry = { onRetrySend(msg) },
-                        onDiscard = { onDiscardSend(msg) },
-                    )
                 }
             }
 
@@ -741,42 +1176,46 @@ internal fun ChatScreen(
                 exit = androidx.compose.animation.fadeOut(),
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp),
             ) {
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f),
-                    tonalElevation = 3.dp,
-                ) {
+                Surface(shape = CircleShape, color = incomingBubbleColor(), shadowElevation = 4.dp) {
                     Text(
                         topTime?.let { formatDay(it) } ?: "",
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
                         style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium,
                     )
                 }
             }
 
             // Jump-to-latest button (bottom-right), shown only when scrolled up off the newest.
             val scrollScope = rememberCoroutineScope()
-            val notAtBottom by remember { derivedStateOf { listState.canScrollForward } }
+            // Only while the newest bubble is out of sight, so the button never covers its time and ticks.
+            val notAtBottom by remember {
+                derivedStateOf {
+                    val info = listState.layoutInfo
+                    (info.visibleItemsInfo.lastOrNull()?.index ?: 0) < info.totalItemsCount - 1
+                }
+            }
             androidx.compose.animation.AnimatedVisibility(
                 visible = notAtBottom,
-                enter = androidx.compose.animation.fadeIn(),
-                exit = androidx.compose.animation.fadeOut(),
-                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 16.dp),
+                enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(),
+                exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 12.dp),
             ) {
                 Surface(
                     onClick = {
-                        scrollScope.launch { listState.animateScrollToItem(messages.lastIndex.coerceAtLeast(0)) }
+                        scrollScope.launch { listState.animateScrollToItem(messages.lastIndex.coerceAtLeast(0), END_OFFSET) }
                     },
                     shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    tonalElevation = 4.dp,
-                    modifier = Modifier.size(44.dp),
+                    color = incomingBubbleColor(),
+                    shadowElevation = 6.dp,
+                    modifier = Modifier.size(46.dp),
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            AppIcons.ScrollDown,
+                            AppIcons.ArrowDown,
                             contentDescription = "К последним сообщениям",
-                            modifier = Modifier.size(22.dp),
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(28.dp),
                         )
                     }
                 }
@@ -789,12 +1228,38 @@ internal fun ChatScreen(
         MessageContextMenu(
             message = target,
             // Editing is for our own text messages (not media/service messages).
-            canEdit = target.senderId == myId && target.service == null && target.media.isEmpty() && target.files.isEmpty(),
+            // Only plain text: what MSG_EDIT does to attachments it isn't sent was never measured.
+            canEdit =
+                target.senderId == myId &&
+                    target.service == null &&
+                    target.media.isEmpty() &&
+                    target.files.isEmpty() &&
+                    target.poll == null &&
+                    target.voice == null &&
+                    target.stickerUrl == null &&
+                    target.location == null &&
+                    target.contact == null &&
+                    target.buttons.isEmpty() &&
+                    target.pending.isEmpty(),
             isMine = target.senderId == myId,
             // Read receipts are only meaningful where several people can read one
             // message: groups and channels, never a 1:1 dialog.
             canShowReadBy = target.senderId == myId && !isDialog,
+            pinned = target.id != null && target.id == chat?.pinnedMessage?.id,
+            onPin =
+                { pin: Boolean ->
+                    if (pin) pinTarget = target else onPin(target, false, false)
+                    menuTarget = null
+                }.takeIf { target.id != null && target.service == null && chat?.canPinMessages(myId) == true },
             readByCount = if (readMarks.isEmpty()) null else readMarks.count { it.value >= target.time },
+            quick = reactionsMenu.ifEmpty { QuickReactions },
+            onSelect =
+                target.id?.let { id ->
+                    {
+                        selected = selected + id
+                        menuTarget = null
+                    }
+                },
             onDismiss = { menuTarget = null },
             onReact = { emoji ->
                 onReact(target, emoji)
@@ -809,20 +1274,34 @@ internal fun ChatScreen(
                 menuTarget = null
             },
             onEdit = {
-                draftBeforeEdit = draft
+                draftBeforeEdit = field.text
+                spansBeforeEdit = draftSpans
                 editing = target
-                draft = target.text
+                // With its formatting, which the save keeps (the server's runs, moved along with the edits).
+                setDraftText(target.text, target.spans)
                 menuTarget = null
             },
             onDelete = {
-                deleteTarget = target
+                deleteTargets = listOf(target)
                 menuTarget = null
             },
             onShowReadBy = {
                 onShowReadBy(target)
                 menuTarget = null
             },
+            onShowReactions =
+                {
+                    onShowReactions(target)
+                    menuTarget = null
+                }.takeIf { target.id != null && target.reactions.isNotEmpty() },
         )
+    }
+
+    if (reactionsMessageId != null) {
+        ReactionsSheet(reactedBy, myId, readerInfo, onDismiss = onCloseReactions) {
+            onCloseReactions()
+            onOpenUser(it)
+        }
     }
 
     // "Who read this message" sheet (groups/channels).
@@ -847,29 +1326,51 @@ internal fun ChatScreen(
         )
     }
 
-    // Delete confirmation: "for everyone" is offered only for our own messages.
-    deleteTarget?.let { target ->
-        val mine = target.senderId == myId
+    // The pinned message in full, when it is too old to jump to.
+    chat?.pinnedMessage?.takeIf { showPinned }?.let { pinned ->
         AlertDialog(
-            onDismissRequest = { deleteTarget = null },
-            title = { Text("Удалить сообщение?") },
-            text = { Text(if (mine) "Сообщение будет удалено." else "Сообщение будет удалено у вас.") },
-            confirmButton = {
-                Column {
-                    if (mine) {
-                        TextButton(onClick = {
-                            onDeleteMessage(target, true)
-                            deleteTarget = null
-                        }) { Text("Удалить у всех") }
-                    }
-                    TextButton(onClick = {
-                        onDeleteMessage(target, false)
-                        deleteTarget = null
-                    }) { Text("Удалить у меня") }
+            onDismissRequest = { showPinned = false },
+            title = { Text("Закреплённое сообщение") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    LinkedText(
+                        pinned.text.ifBlank { pinned.previewLabel() },
+                        MaterialTheme.typography.bodyLarge,
+                        MaterialTheme.colorScheme.onSurface,
+                        onLinkClick,
+                        spans = pinned.spans,
+                    )
                 }
             },
-            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Отмена") } },
+            confirmButton = { TextButton(onClick = { showPinned = false }) { Text("Закрыть") } },
         )
+    }
+
+    // Delete confirmation, the same for one message and a selection: "for everyone" only when all are ours.
+    if (deleteTargets.isNotEmpty()) {
+        val targets = deleteTargets
+        val delete = { forAll: Boolean ->
+            onDeleteMany(targets, forAll)
+            deleteTargets = emptyList()
+            selected = emptySet()
+        }
+        AppSheet(onDismiss = { deleteTargets = emptyList() }) {
+            Text(
+                if (targets.size == 1) {
+                    "Удалить сообщение?"
+                } else {
+                    "Удалить ${targets.size} ${plural(targets.size, "сообщение", "сообщения", "сообщений")}?"
+                },
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(start = 24.dp, bottom = 8.dp),
+            )
+            if (targets.all { it.senderId == myId }) {
+                SheetAction(AppIcons.Delete, "Удалить у всех", danger = true) { delete(true) }
+            }
+            SheetAction(AppIcons.Delete, "Удалить у меня", danger = true) { delete(false) }
+            SheetAction(AppIcons.Close, "Отмена") { deleteTargets = emptyList() }
+            Spacer(Modifier.height(12.dp))
+        }
     }
 
     // Confirmation for the destructive top-right menu action.
@@ -890,7 +1391,7 @@ internal fun ChatScreen(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 private fun MessageRow(
     msg: Message,
@@ -901,6 +1402,18 @@ private fun MessageRow(
     senderAvatar: String?,
     isGroup: Boolean,
     startsRun: Boolean,
+    /** The current in-chat search hit: the row is tinted so it stands out. */
+    highlighted: Boolean = false,
+    /** Multi-select is on: every row shows its pick mark. */
+    selecting: Boolean = false,
+    selected: Boolean = false,
+    /** The in-chat search query, marked inside the text. */
+    searchQuery: String? = null,
+    onLongClick: () -> Unit = {},
+    /** Double tap (quick reaction); null keeps single taps instant. */
+    onDoubleClick: (() -> Unit)? = null,
+    /** Jumps to the quoted message; null when there is nothing to jump to. */
+    onReplyClick: (() -> Unit)? = null,
     replyAuthor: String?,
     forwardAuthor: String?,
     onForwardClick: (() -> Unit)?,
@@ -922,6 +1435,10 @@ private fun MessageRow(
     downloadingFiles: Map<Long, Float>,
     onRetry: () -> Unit,
     onDiscard: () -> Unit,
+    pressingButtons: Set<BotButton> = emptySet(),
+    onBotButton: (BotButton) -> Unit = {},
+    onVote: (Set<Int>) -> Unit = {},
+    onWriteTo: (UserInfo) -> Unit = {},
 ) {
     // Swipe-to-reply: drag the row left; past the threshold a reply icon is revealed
     // (with a haptic tick) and releasing there starts a reply to this message.
@@ -934,7 +1451,44 @@ private fun MessageRow(
     val maxPx = with(density) { 88.dp.toPx() }
     var triggered by remember(rowKey) { mutableStateOf(false) }
 
-    Box(Modifier.fillMaxWidth().padding(top = if (startsRun) 6.dp else 0.dp)) {
+    val tint by animateColorAsState(
+        if (highlighted || selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent,
+        label = "hit",
+    )
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = if (startsRun) 6.dp else 0.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(tint),
+    ) {
+        if (selecting) {
+            // The pick mark sits on the side the bubble doesn't.
+            Box(
+                Modifier
+                    .align(if (isMine) Alignment.CenterStart else Alignment.CenterEnd)
+                    .padding(horizontal = 12.dp)
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .then(
+                        if (selected) {
+                            Modifier.background(MaterialTheme.colorScheme.primary)
+                        } else {
+                            Modifier.border(1.5.dp, MaterialTheme.colorScheme.outline, CircleShape)
+                        },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (selected) {
+                    Icon(
+                        AppIcons.Delivered,
+                        contentDescription = "Выбрано",
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+            }
+        }
         val progress = (-offsetX.value / triggerPx).coerceIn(0f, 1f)
         Icon(
             AppIcons.Reply,
@@ -989,7 +1543,7 @@ private fun MessageRow(
             }
             // A message that is nothing but a round video gets no bubble: the circle
             // floats on the conversation, the way other messengers draw them.
-            val bareVideoNote =
+            val bare =
                 msg.text.isBlank() &&
                     msg.voice == null &&
                     msg.files.isEmpty() &&
@@ -997,24 +1551,27 @@ private fun MessageRow(
                     msg.replyTo == null &&
                     msg.pending.isEmpty() &&
                     msg.media.size == 1 &&
-                    msg.media.single().isVideoNote
-            val bg =
+                    msg.media.single().isVideoNote ||
+                    // …and so does a sticker.
+                    (msg.stickerUrl != null && msg.text.isBlank() && msg.media.isEmpty() && msg.replyTo == null)
+            // Own bubbles carry the accent gradient; incoming ones sit on a neutral raised tone.
+            val bubbleBrush: Brush =
                 when {
-                    bareVideoNote -> Color.Transparent
-                    isMine -> MaterialTheme.colorScheme.primaryContainer
-                    else -> incomingBubbleColor()
+                    bare -> SolidColor(Color.Transparent)
+                    isMine -> accentGradient()
+                    else -> SolidColor(incomingBubbleColor())
                 }
             // Without a bubble behind it, the footer sits on the chat background, so it
             // can't use the on-bubble colour.
             val fg =
                 when {
-                    bareVideoNote -> MaterialTheme.colorScheme.onSurfaceVariant
-                    isMine -> MaterialTheme.colorScheme.onPrimaryContainer
+                    bare -> MaterialTheme.colorScheme.onSurfaceVariant
+                    isMine -> onAccentGradient()
                     else -> MaterialTheme.colorScheme.onSurface
                 }
             // Messages in a run hug each other: the sender-side corners are tight, the first
             // bubble of a run keeps a round top on that side.
-            val big = 18.dp
+            val big = 20.dp
             val tight = 6.dp
             val bubbleShape =
                 if (isMine) {
@@ -1022,17 +1579,37 @@ private fun MessageRow(
                 } else {
                     RoundedCornerShape(topStart = if (startsRun) big else tight, topEnd = big, bottomEnd = big, bottomStart = tight)
                 }
+            // Photos and videos run almost edge to edge; text keeps a comfortable inset.
+            val mediaBubble = !bare && (msg.media.isNotEmpty() || msg.pending.isNotEmpty())
+            val inset = if (mediaBubble) Modifier.padding(horizontal = 6.dp) else Modifier
+            // A bare sticker or circle has no bubble padding: its name and «Переслано от» lines get the text
+            // bubble's inset, or the clipped corner cuts them.
+            val headerInset = if (bare) Modifier.padding(horizontal = 12.dp) else inset
             Column(horizontalAlignment = if (isMine) Alignment.End else Alignment.Start) {
                 Box(
                     Modifier
                         .widthIn(max = maxWidth)
-                        .then(if (bareVideoNote) Modifier else Modifier.shadow(0.5.dp, bubbleShape))
+                        .then(if (bare) Modifier else Modifier.shadow(1.dp, bubbleShape))
                         .clip(bubbleShape)
-                        .background(bg)
-                        .clickable(onClick = onClick)
+                        .background(bubbleBrush)
+                        .combinedClickable(onClick = onClick, onLongClick = onLongClick, onDoubleClick = onDoubleClick)
                         .padding(
-                            horizontal = if (bareVideoNote) 0.dp else 10.dp,
-                            vertical = if (bareVideoNote) 0.dp else 6.dp,
+                            horizontal =
+                                if (bare) {
+                                    0.dp
+                                } else if (mediaBubble) {
+                                    4.dp
+                                } else {
+                                    12.dp
+                                },
+                            vertical =
+                                if (bare) {
+                                    0.dp
+                                } else if (mediaBubble) {
+                                    4.dp
+                                } else {
+                                    7.dp
+                                },
                         ),
                 ) {
                     Column {
@@ -1042,6 +1619,9 @@ private fun MessageRow(
                                 style = MaterialTheme.typography.labelLarge,
                                 fontWeight = FontWeight.SemiBold,
                                 color = senderNameColor(senderName),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = headerInset,
                             )
                         }
                         if (forwardAuthor != null) {
@@ -1051,15 +1631,25 @@ private fun MessageRow(
                                 color = fg.copy(alpha = if (onForwardClick != null) 0.95f else 0.75f),
                                 modifier =
                                     if (onForwardClick != null) {
-                                        Modifier.clickable(onClick = onForwardClick)
+                                        headerInset.clickable(onClick = onForwardClick)
                                     } else {
-                                        Modifier
+                                        headerInset
                                     },
                             )
                             Spacer(Modifier.height(2.dp))
                         }
                         msg.replyTo?.let { reply ->
-                            ReplyQuote(replyAuthor ?: "—", reply.text, fg)
+                            Box(
+                                inset.then(
+                                    if (onReplyClick !=
+                                        null
+                                    ) {
+                                        Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onReplyClick)
+                                    } else {
+                                        Modifier
+                                    },
+                                ),
+                            ) { ReplyQuote(replyAuthor ?: "—", reply.text, fg) }
                             Spacer(Modifier.height(4.dp))
                         }
                         msg.pending.forEach { item ->
@@ -1079,6 +1669,10 @@ private fun MessageRow(
                             }
                             Spacer(Modifier.height(2.dp))
                         }
+                        msg.stickerUrl?.let { sticker ->
+                            AsyncImage(model = sticker, contentDescription = "Стикер", modifier = Modifier.size(STICKER_SIZE))
+                            Spacer(Modifier.height(4.dp))
+                        }
                         msg.media.forEach { media ->
                             if (media.isVideoNote) {
                                 // Played in place, inside its circle — not in the
@@ -1090,37 +1684,58 @@ private fun MessageRow(
                             Spacer(Modifier.height(4.dp))
                         }
                         msg.voice?.let { voice ->
-                            VoiceMessageView(
-                                voice = voice,
-                                fg = fg,
-                                state = voiceState,
-                                onClick = onVoiceClick,
-                                onSeek = onVoiceSeek,
-                            )
+                            Box(inset) {
+                                VoiceMessageView(
+                                    voice = voice,
+                                    fg = fg,
+                                    state = voiceState,
+                                    onClick = onVoiceClick,
+                                    onSeek = onVoiceSeek,
+                                )
+                            }
                             Spacer(Modifier.height(4.dp))
                         }
                         msg.files.forEach { file ->
-                            FileAttachView(
-                                file = file,
-                                fg = fg,
-                                downloaded = file.fileId in downloadedFiles,
-                                progress = downloadingFiles[file.fileId],
-                                onClick = { onDownloadFile(file) },
-                            )
+                            Box(inset) {
+                                FileAttachView(
+                                    file = file,
+                                    fg = fg,
+                                    downloaded = file.fileId in downloadedFiles,
+                                    progress = downloadingFiles[file.fileId],
+                                    onClick = { onDownloadFile(file) },
+                                )
+                            }
                             Spacer(Modifier.height(4.dp))
                         }
                         if (msg.text.isNotEmpty()) {
                             // Own bubbles are accent-tinted, so an accent link could vanish (issue #49):
                             // draw it in the bubble's text color, underlined.
-                            LinkedText(
-                                msg.text,
-                                MaterialTheme.typography.bodyLarge,
+                            Box(inset) {
+                                LinkedText(
+                                    msg.text,
+                                    MaterialTheme.typography.bodyLarge,
+                                    fg,
+                                    onLinkClick,
+                                    linkColor = if (isMine) fg else MaterialTheme.colorScheme.primary,
+                                    spans = msg.spans,
+                                    highlight = searchQuery,
+                                )
+                            }
+                        }
+                        msg.linkPreview?.let { preview -> Box(inset) { LinkPreviewCard(preview, fg) } }
+                        msg.poll?.let { poll -> Box(inset) { PollView(poll, fg, onVote) } }
+                        msg.location?.let { place -> Box(inset) { LocationCard(place, fg) } }
+                        msg.contact?.let { card -> Box(inset) { ContactCardView(card, fg, onWriteTo) } }
+                        // A bot's buttons: full width, one per line, as the official client lays them out.
+                        msg.buttons.flatten().forEach { button ->
+                            BotButtonView(
+                                button,
                                 fg,
-                                onLinkClick,
-                                linkColor = if (isMine) fg else MaterialTheme.colorScheme.primary,
+                                busy = button in pressingButtons,
+                                onPress = { onBotButton(button) },
+                                modifier = inset.padding(top = 4.dp).fillMaxWidth(),
                             )
                         }
-                        msg.linkPreview?.let { preview -> LinkPreviewCard(preview, fg) }
                         // Footer line inside the bubble: reactions then time + delivery
                         // receipt. The row is sized to its content (not the full bubble
                         // width) so a short message keeps a snug bubble instead of being
@@ -1129,7 +1744,7 @@ private fun MessageRow(
                         // Wraps instead of overflowing the bubble when there are many reactions;
                         // each line is end-aligned, so the time stays at the trailing edge.
                         FlowRow(
-                            modifier = Modifier.align(Alignment.End),
+                            modifier = Modifier.align(Alignment.End).then(inset),
                             horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
@@ -1149,7 +1764,7 @@ private fun StagedAttachments(
     items: List<PickedMedia>,
     onRemove: (PickedMedia) -> Unit,
 ) {
-    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+    Box {
         LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1159,8 +1774,8 @@ private fun StagedAttachments(
                     Box(
                         Modifier
                             .fillMaxSize()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(MaterialTheme.colorScheme.surface),
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
                         contentAlignment = Alignment.Center,
                     ) {
                         when (media.kind) {
@@ -1351,7 +1966,7 @@ private fun List<Float>.resample(count: Int): List<Float> {
 }
 
 /** "0:07" / "1:23". */
-private fun formatVoiceDuration(seconds: Int): String {
+internal fun formatVoiceDuration(seconds: Int): String {
     val safe = seconds.coerceAtLeast(0)
     return "${safe / 60}:${(safe % 60).toString().padStart(2, '0')}"
 }
@@ -1421,7 +2036,7 @@ private fun FileAttachView(
 }
 
 /** Human-readable byte size, e.g. "2.4 МБ". */
-private fun formatFileSize(bytes: Long): String =
+internal fun formatFileSize(bytes: Long): String =
     when {
         bytes >= 1_000_000 -> "${(bytes / 100_000) / 10.0} МБ"
         bytes >= 1_000 -> "${bytes / 1_000} КБ"
@@ -1438,21 +2053,217 @@ private fun ReplyQuote(
     Row(
         Modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(fg.copy(alpha = 0.12f))
+            // Light text (own bubbles, dark theme) gets a darker well, not a grey veil it can't stand out on.
+            .background(if (fg.luminance() > 0.5f) Color.Black.copy(alpha = 0.22f) else fg.copy(alpha = 0.12f))
             .height(IntrinsicSize.Min)
             .padding(end = 8.dp),
     ) {
-        Box(Modifier.width(3.dp).fillMaxHeight().background(fg.copy(alpha = 0.6f)))
+        Box(Modifier.width(3.dp).fillMaxHeight().background(fg.copy(alpha = 0.7f)))
         Column(Modifier.padding(start = 6.dp, top = 3.dp, bottom = 3.dp)) {
-            Text(author, style = MaterialTheme.typography.labelMedium, color = fg, maxLines = 1)
+            Text(author, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = fg, maxLines = 1)
             Text(
                 text,
                 style = MaterialTheme.typography.bodySmall,
-                color = fg.copy(alpha = 0.8f),
+                color = fg.copy(alpha = 0.9f),
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }
+    }
+}
+
+/**
+ * A poll in its bubble: question, answers (with a bar and share once we voted or it closed),
+ * and the voter count. Tapping an answer votes; tapping ours again retracts where revoting is on.
+ */
+@Composable
+private fun PollView(
+    poll: com.avenarius.app.model.Poll,
+    fg: Color,
+    onVote: (Set<Int>) -> Unit,
+) {
+    val mine =
+        poll.answers
+            .filter { it.mine }
+            .map { it.id }
+            .toSet()
+    // A multiple-choice poll collects ticks here and sends them once, with «Проголосовать».
+    var picks by remember(poll) { mutableStateOf(mine) }
+    val choosing = poll.multiple && poll.canChoose
+    val results = (poll.voted || poll.closed) && !(choosing && picks != mine)
+    Column(Modifier.widthIn(min = 220.dp).padding(vertical = 2.dp)) {
+        Text(poll.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = fg)
+        Text(
+            when {
+                poll.closed -> "Опрос завершён"
+                else ->
+                    listOfNotNull(
+                        if (poll.anonymous) "Анонимный опрос" else "Опрос",
+                        "несколько ответов".takeIf { poll.multiple },
+                    ).joinToString(" · ")
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = fg.copy(alpha = 0.7f),
+        )
+        Spacer(Modifier.height(6.dp))
+        poll.answers.forEach { a ->
+            val share = if (poll.total > 0) a.votes * 100 / poll.total else 0
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(enabled = if (choosing) true else poll.votesAfterTapping(a.id) != null) {
+                        if (choosing) {
+                            picks = if (a.id in picks) picks - a.id else picks + a.id
+                        } else {
+                            poll.votesAfterTapping(a.id)?.let(onVote)
+                        }
+                    }.padding(vertical = 6.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (results) {
+                        Text(
+                            "$share%",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = fg,
+                            modifier = Modifier.width(40.dp),
+                        )
+                    } else {
+                        val shape = if (poll.multiple) RoundedCornerShape(4.dp) else CircleShape
+                        Box(
+                            Modifier
+                                .size(18.dp)
+                                .clip(shape)
+                                .then(
+                                    if (a.id in picks &&
+                                        choosing
+                                    ) {
+                                        Modifier.background(fg)
+                                    } else {
+                                        Modifier.border(1.5.dp, fg.copy(alpha = 0.6f), shape)
+                                    },
+                                ),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                    }
+                    Text(a.text, style = MaterialTheme.typography.bodyMedium, color = fg, modifier = Modifier.weight(1f))
+                    if (a.mine) Icon(AppIcons.CheckCircle, contentDescription = "Ваш голос", tint = fg, modifier = Modifier.size(16.dp))
+                }
+                if (results) {
+                    Box(
+                        Modifier
+                            .padding(top = 4.dp)
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(CircleShape)
+                            .background(fg.copy(alpha = 0.15f)),
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth(
+                                    share / 100f,
+                                ).fillMaxHeight()
+                                .clip(CircleShape)
+                                .background(fg.copy(alpha = if (a.mine) 1f else 0.55f)),
+                        )
+                    }
+                }
+            }
+        }
+        if (choosing && picks != mine && (picks.isNotEmpty() || poll.voted)) {
+            TextButton(onClick = { onVote(picks) }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (picks.isEmpty()) "Отменить голос" else "Проголосовать", color = fg, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        Text(votesLabel(poll.total), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
+    }
+}
+
+/** A shared place: its coordinates; a tap opens it on a map (OpenStreetMap, which needs no app or account). */
+@Composable
+private fun LocationCard(
+    place: com.avenarius.app.model.GeoPoint,
+    fg: Color,
+) {
+    val uriHandler = LocalUriHandler.current
+
+    fun short(v: Double) = ((v * 100_000).roundToLong() / 100_000.0).toString()
+    val lat = short(place.latitude)
+    val lon = short(place.longitude)
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(fg.copy(alpha = 0.10f))
+            .clickable { uriHandler.openUriSafely("https://www.openstreetmap.org/?mlat=$lat&mlon=$lon#map=16/$lat/$lon") }
+            .padding(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(AppIcons.Location, contentDescription = null, tint = fg, modifier = Modifier.size(28.dp))
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text("Местоположение", style = MaterialTheme.typography.titleSmall, color = fg)
+            Text("$lat, $lon", style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.75f))
+        }
+        Spacer(Modifier.width(8.dp))
+        Icon(AppIcons.Open, contentDescription = "Открыть на карте", tint = fg.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
+    }
+}
+
+/** A shared contact: name and phone, «Написать» for a MAX user and «Скопировать номер». */
+@Composable
+private fun ContactCardView(
+    card: com.avenarius.app.model.ContactCard,
+    fg: Color,
+    onWriteTo: (UserInfo) -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    Column(
+        Modifier
+            .widthIn(min = 200.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(fg.copy(alpha = 0.10f))
+            .padding(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Avatar(card.name, null, 40.dp)
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text(card.name, style = MaterialTheme.typography.titleSmall, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                card.phone?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.75f)) }
+            }
+        }
+        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (card.userId != 0L) {
+                TextButton(onClick = { onWriteTo(UserInfo(card.userId, card.name)) }) { Text("Написать", color = fg) }
+            }
+            card.phone?.let { phone ->
+                TextButton(onClick = { clipboard.setText(AnnotatedString(phone)) }) { Text("Скопировать номер", color = fg) }
+            }
+        }
+    }
+}
+
+/** "Нет голосов" / "1 голос" / "3 голоса" / "5 голосов". */
+private fun votesLabel(n: Int): String {
+    if (n == 0) return "Нет голосов"
+    return "$n ${plural(n, "голос", "голоса", "голосов")}"
+}
+
+/** A view count the way the official client prints it: 999, 1,3K, 12K, 1,2M. */
+internal fun formatViews(n: Int): String {
+    fun short(
+        value: Int,
+        unit: Int,
+        suffix: String,
+    ): String {
+        val tenths = value / (unit / 10)
+        return if (tenths >= 100 || tenths % 10 == 0) "${tenths / 10}$suffix" else "${tenths / 10},${tenths % 10}$suffix"
+    }
+    return when {
+        n < 1_000 -> n.toString()
+        n < 1_000_000 -> short(n, 1_000, "K")
+        else -> short(n, 1_000_000, "M")
     }
 }
 
@@ -1469,13 +2280,27 @@ private fun MessageMeta(
         horizontalArrangement = Arrangement.spacedBy(3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (msg.views > 0) {
+            Icon(AppIcons.Visibility, contentDescription = "Просмотры", tint = fg.copy(alpha = 0.7f), modifier = Modifier.size(13.dp))
+            Text(formatViews(msg.views), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
+            Spacer(Modifier.width(3.dp))
+        }
+        if (msg.edited) Text("изм.", style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
         Text(formatClock(msg.time), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
         if (isMine) {
             val read = msg.status == MessageStatus.READ
             Icon(
                 if (read) AppIcons.Read else AppIcons.Delivered,
                 contentDescription = if (read) "Прочитано" else "Доставлено",
-                tint = if (read) MaterialTheme.colorScheme.primary else fg.copy(alpha = 0.7f),
+                // Own bubbles are accent-filled, so "read" is the full-strength glyph, not an accent one.
+                tint =
+                    if (read && !isMine) {
+                        MaterialTheme.colorScheme.primary
+                    } else if (read) {
+                        fg
+                    } else {
+                        fg.copy(alpha = 0.6f)
+                    },
                 modifier = Modifier.size(16.dp),
             )
         }
@@ -1492,20 +2317,19 @@ private fun ReactionChip(
     val chipBg = if (r.mine) fg.copy(alpha = 0.30f) else fg.copy(alpha = 0.12f)
     Row(
         Modifier
-            .clip(RoundedCornerShape(10.dp))
+            .clip(CircleShape)
             .background(chipBg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 7.dp, vertical = 2.dp),
+            .padding(horizontal = 8.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(r.emoji, style = MaterialTheme.typography.labelMedium)
-        if (r.count > 1) Text("${r.count}", style = MaterialTheme.typography.labelMedium, color = fg)
+        Text(r.emoji, style = MaterialTheme.typography.bodyMedium)
+        if (r.count > 1) Text("${r.count}", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = fg)
     }
 }
 
-/** Banner above the input showing which message is being replied to. */
-
+/** Strip at the top of the input pill showing which message is being replied to. */
 @Composable
 private fun ReplyBanner(
     msg: Message,
@@ -1513,71 +2337,71 @@ private fun ReplyBanner(
     myId: Long,
     onCancel: () -> Unit,
 ) {
-    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.width(3.dp).height(34.dp).background(MaterialTheme.colorScheme.primary))
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    if (msg.senderId == myId) "Вы" else contacts[msg.senderId] ?: "Сообщение",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    msg.text.ifBlank { "Вложение" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
-            }
-            IconButton(onClick = onCancel) { Icon(AppIcons.Close, contentDescription = "Отменить") }
-        }
-    }
+    ComposerBanner(
+        AppIcons.Reply,
+        if (msg.senderId == myId) "Вы" else contacts[msg.senderId] ?: "Сообщение",
+        msg.previewLabel().ifBlank { "Вложение" },
+        onCancel,
+    )
 }
 
-/** Banner shown above the input while editing a message. */
+/** Strip at the top of the input pill while editing a message. */
 @Composable
 private fun EditBanner(
     text: String,
     onCancel: () -> Unit,
 ) {
-    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(AppIcons.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    "Редактирование",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text.ifBlank { "Сообщение" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
-            }
-            IconButton(onClick = onCancel) { Icon(AppIcons.Close, contentDescription = "Отменить") }
+    ComposerBanner(AppIcons.Edit, "Редактирование", text.ifBlank { "Сообщение" }, onCancel)
+}
+
+@Composable
+private fun ComposerBanner(
+    icon: Painter,
+    title: String,
+    text: String,
+    onCancel: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    Row(
+        Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = cs.primary, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(10.dp))
+        Box(
+            Modifier
+                .width(3.dp)
+                .height(32.dp)
+                .clip(CircleShape)
+                .background(cs.primary),
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = cs.primary, maxLines = 1)
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                color = cs.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        IconButton(onClick = onCancel, modifier = Modifier.size(36.dp)) {
+            Icon(AppIcons.Close, contentDescription = "Отменить", modifier = Modifier.size(18.dp))
         }
     }
 }
 
-private val QuickReactions = listOf("❤️", "🥰", "😱", "🤣", "😄", "👍", "😘")
+private val QuickReactions = listOf("❤️", "👍", "🤣", "😱", "🥰", "🔥", "😢")
 
-private val MoreReactions = listOf("🔥", "👏", "😢", "🙏", "💯", "🎉", "😡", "🤔")
+private val MoreReactions = listOf("👏", "😄", "😘", "🙏", "💯", "🎉", "😡", "🤔", "👎", "🤝", "😍", "🤯", "😭", "👀", "✅", "💔")
 
 /**
- * Floating context menu shown when a message is tapped: a (expandable) reactions
- * bar on top, then Reply / Copy. Tapping the dimmed backdrop dismisses it.
+ * Floating context menu shown when a message is tapped: an (expandable) reactions
+ * bar on top, then the actions. It springs in over a dimmed conversation; tapping
+ * the backdrop dismisses it.
  */
-
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MessageContextMenu(
     message: Message,
@@ -1594,6 +2418,16 @@ private fun MessageContextMenu(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onShowReadBy: () -> Unit = {},
+    /** The reactions offered first (the server's menu, or the built-in set). */
+    quick: List<String> = QuickReactions,
+    /** Starts multi-select with this message; null for a message that can't be picked. */
+    onSelect: (() -> Unit)? = null,
+    /** This message is the chat's pinned one (the item then unpins). */
+    pinned: Boolean = false,
+    /** Pins (true) / unpins (false); null where we may not pin. */
+    onPin: ((Boolean) -> Unit)? = null,
+    /** «Реакции»: who reacted; null when nobody has. */
+    onShowReactions: (() -> Unit)? = null,
 ) {
     val clipboard = LocalClipboardManager.current
     var expanded by remember { mutableStateOf(false) }
@@ -1602,54 +2436,79 @@ private fun MessageContextMenu(
     val focusManager = LocalFocusManager.current
     LaunchedEffect(Unit) { focusManager.clearFocus() }
     PlatformBackHandler(enabled = true, onBack = onDismiss)
+    val appear = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { appear.animateTo(1f, spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow)) }
+    val cs = MaterialTheme.colorScheme
+    val mineEmoji = message.reactions.firstOrNull { it.mine }?.emoji
     Box(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.6f))
-            .clickable(onClick = onDismiss)
+            .background(cs.scrim.copy(alpha = 0.55f * appear.value.coerceIn(0f, 1f)))
+            .clickable(interactionSource = null, indication = null, onClick = onDismiss)
             .imePadding(),
         contentAlignment = Alignment.Center,
     ) {
         Column(
-            Modifier.verticalScroll(rememberScrollState()).padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+            Modifier
+                .graphicsLayer {
+                    val v = appear.value
+                    alpha = v.coerceIn(0f, 1f)
+                    scaleX = 0.86f + 0.14f * v
+                    scaleY = 0.86f + 0.14f * v
+                }.verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 24.dp),
+            horizontalAlignment = if (isMine) Alignment.End else Alignment.Start,
         ) {
             // Reactions bar (expandable).
-            Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-                Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        QuickReactions.forEach { emoji ->
-                            Text(emoji, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.clickable { onReact(emoji) })
-                        }
-                        IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(32.dp)) {
+            Surface(shape = RoundedCornerShape(28.dp), color = cs.surfaceContainerHigh, shadowElevation = 8.dp) {
+                Column(Modifier.padding(6.dp).widthIn(max = REACTION_PICK * 8)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        quick.take(7).forEach { emoji -> ReactionPick(emoji, emoji == mineEmoji) { onReact(emoji) } }
+                        Box(
+                            Modifier
+                                .size(
+                                    REACTION_PICK,
+                                ).clip(CircleShape)
+                                .background(cs.surfaceContainerHighest)
+                                .clickable { expanded = !expanded },
+                            contentAlignment = Alignment.Center,
+                        ) {
                             Icon(
-                                if (expanded) AppIcons.Collapse else AppIcons.Expand,
+                                AppIcons.ArrowDown,
                                 contentDescription = if (expanded) "Свернуть" else "Больше реакций",
-                                modifier = Modifier.size(20.dp),
+                                modifier = Modifier.size(22.dp).graphicsLayer { rotationZ = if (expanded) 180f else 0f },
                             )
                         }
                     }
-                    if (expanded) {
-                        Spacer(Modifier.height(6.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            MoreReactions.forEach { emoji ->
-                                Text(
-                                    emoji,
-                                    style = MaterialTheme.typography.headlineSmall,
-                                    modifier = Modifier.clickable { onReact(emoji) },
-                                )
+                    AnimatedVisibility(expanded) {
+                        FlowRow {
+                            (quick.drop(7) + MoreReactions.filter { it !in quick }).forEach { emoji ->
+                                ReactionPick(emoji, emoji == mineEmoji) { onReact(emoji) }
                             }
                         }
                     }
                 }
             }
             Spacer(Modifier.height(12.dp))
+            // What the menu is about: a short quote of the message.
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = if (isMine) cs.primaryContainer else cs.surfaceContainerHigh,
+                contentColor = if (isMine) cs.onPrimaryContainer else cs.onSurface,
+                modifier = Modifier.widthIn(max = 300.dp),
+            ) {
+                Text(
+                    message.previewLabel().ifBlank { "Сообщение" },
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+            }
+            Spacer(Modifier.height(10.dp))
             // Action items.
-            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface) {
-                Column(Modifier.widthIn(min = 220.dp)) {
+            Surface(shape = RoundedCornerShape(22.dp), color = cs.surfaceContainerHigh, shadowElevation = 8.dp) {
+                Column(Modifier.width(250.dp).padding(vertical = 6.dp)) {
                     ContextMenuItem(AppIcons.Reply, "Ответить", onClick = onReply)
                     ContextMenuItem(AppIcons.Forward, "Переслать", onClick = onForward)
                     if (canEdit) {
@@ -1661,16 +2520,94 @@ private fun MessageContextMenu(
                             onDismiss()
                         }
                     }
+                    onPin?.let { pin ->
+                        if (pinned) {
+                            ContextMenuItem(AppIcons.Unpin, "Открепить") { pin(false) }
+                        } else {
+                            ContextMenuItem(AppIcons.Pin, "Закрепить") { pin(true) }
+                        }
+                    }
+                    onSelect?.let { ContextMenuItem(AppIcons.CheckCircle, "Выбрать", onClick = it) }
+                    onShowReactions?.let { ContextMenuItem(AppIcons.Heart, "Реакции", onClick = it) }
                     if (canShowReadBy) {
                         val label = if (readByCount == null || readByCount == 0) "Кто прочитал" else "Кто прочитал ($readByCount)"
                         ContextMenuItem(AppIcons.Read, label, onClick = onShowReadBy)
                     }
                     if (isMine || message.service == null) {
-                        ContextMenuItem(AppIcons.Delete, "Удалить", onClick = onDelete)
+                        ContextMenuItem(AppIcons.Delete, "Удалить", danger = true, onClick = onDelete)
                     }
                 }
             }
         }
+    }
+}
+
+// Eight of these (seven emoji and the chevron) fit the bar on a 360dp-wide screen.
+private val REACTION_PICK = 38.dp
+
+/** «Реакции»: everyone who reacted to a message, grouped by emoji; rows open the profile. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ReactionsSheet(
+    byEmoji: Map<String, List<Long>>?,
+    myId: Long,
+    userInfo: (Long) -> UserInfo,
+    onDismiss: () -> Unit,
+    onOpenUser: (Long) -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    AppSheet(onDismiss) {
+        Text("Реакции", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 24.dp, bottom = 8.dp))
+        if (byEmoji == null) {
+            Box(
+                Modifier.fillMaxWidth().padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) { CircularProgressIndicator(Modifier.size(28.dp)) }
+        } else {
+            LazyColumn(Modifier.heightIn(max = 480.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
+                byEmoji.entries.sortedByDescending { it.value.size }.forEach { (emoji, users) ->
+                    item(key = "e$emoji") {
+                        Text(
+                            "$emoji  ${users.size}",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = cs.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 24.dp, top = 12.dp, bottom = 4.dp),
+                        )
+                    }
+                    items(users, key = { "e$emoji:$it" }) { id ->
+                        val info = userInfo(id)
+                        val name = if (id == myId) "Вы" else info.name
+                        Row(
+                            Modifier.fillMaxWidth().clickable { onOpenUser(id) }.padding(horizontal = 24.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Avatar(name, info.avatarUrl, 40.dp)
+                            Spacer(Modifier.width(14.dp))
+                            Text(name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One emoji in the reaction picker; ours is ringed. */
+@Composable
+private fun ReactionPick(
+    emoji: String,
+    mine: Boolean,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier
+            .size(REACTION_PICK)
+            .clip(CircleShape)
+            .then(if (mine) Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)) else Modifier)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(emoji, style = MaterialTheme.typography.titleLarge)
     }
 }
 
@@ -1760,15 +2697,186 @@ private fun ReadBySheet(
 private fun ContextMenuItem(
     icon: Painter,
     label: String,
+    danger: Boolean = false,
     onClick: () -> Unit,
 ) {
+    val color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 14.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(18.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(22.dp))
-        Text(label, style = MaterialTheme.typography.bodyLarge)
+        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(22.dp))
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = color)
+    }
+}
+
+/** The header while searching inside a chat: the field, the hit counter and older/newer steps. */
+@Composable
+private fun ChatSearchBar(
+    query: String,
+    onQuery: (String) -> Unit,
+    position: String?,
+    nothingFound: Boolean,
+    /** History is being paged back to a hit. */
+    loading: Boolean = false,
+    onOlder: () -> Unit,
+    onNewer: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        // Opened from the ⋮ popup: focus taken while it is still closing is lost, and the
+        // first typed text with it.
+        delay(250)
+        focus.requestFocus()
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .height(64.dp)
+            .padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onClose) { Icon(AppIcons.Back, contentDescription = "Закрыть поиск") }
+        PillTextField(query, onQuery, "Поиск в чате", Modifier.weight(1f), focusRequester = focus)
+        if (loading) {
+            Spacer(Modifier.width(8.dp))
+            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+        }
+        Text(
+            position ?: if (nothingFound) "нет" else "",
+            style = MaterialTheme.typography.labelMedium,
+            color = cs.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 8.dp),
+        )
+        IconButton(onClick = onOlder, enabled = position != null, modifier = Modifier.size(40.dp)) {
+            Icon(AppIcons.ArrowDown, contentDescription = "Раньше", modifier = Modifier.graphicsLayer { rotationZ = 180f })
+        }
+        IconButton(onClick = onNewer, enabled = position != null, modifier = Modifier.size(40.dp)) {
+            Icon(AppIcons.ArrowDown, contentDescription = "Позже")
+        }
+    }
+}
+
+/** The composer's formatting bar: «Ж», «К», «З̶», «моно» for the selected text, under the field. */
+@Composable
+private fun FormatBar(onFormat: (String) -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    Row(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        // Each label drawn the way its run looks: Ж bold, К italic, З struck through, моно monospace.
+        listOf("STRONG" to "Ж", "EMPHASIZED" to "К", "STRIKETHROUGH" to "З", "MONOSPACED" to "моно").forEach { (type, label) ->
+            Text(
+                AnnotatedString(label, spanStyleOf(type) ?: SpanStyle()),
+                style = MaterialTheme.typography.labelLarge,
+                color = cs.onSurface,
+                modifier =
+                    Modifier
+                        .clip(CircleShape)
+                        .background(cs.surfaceContainerHighest)
+                        .clickable { onFormat(type) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+            )
+        }
+    }
+}
+
+/** Shows the composer's formatting runs in the field itself (the text is unchanged). */
+private fun spansShown(spans: List<TextSpan>): VisualTransformation =
+    if (spans.isEmpty()) {
+        VisualTransformation.None
+    } else {
+        VisualTransformation { text ->
+            val ranges =
+                spans.mapNotNull { s ->
+                    val start = s.from.coerceIn(0, text.length)
+                    val end = (s.from + s.length).coerceIn(start, text.length)
+                    spanStyleOf(s.type)?.takeIf { end > start }?.let { AnnotatedString.Range(it, start, end) }
+                }
+            TransformedText(AnnotatedString(text.text, spanStyles = ranges), OffsetMapping.Identity)
+        }
+    }
+
+/** The pulsing red dot of an ongoing recording. */
+@Composable
+private fun RecordingDot() {
+    val pulse = rememberInfiniteTransition(label = "rec")
+    val alpha by pulse.animateFloat(1f, 0.25f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "recAlpha")
+    Box(
+        Modifier
+            .size(10.dp)
+            .graphicsLayer { this.alpha = alpha }
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.error),
+    )
+}
+
+/** The attach picker: a sheet of big round shortcuts. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AttachSheet(
+    onDismiss: () -> Unit,
+    onGallery: () -> Unit,
+    onFile: () -> Unit,
+    /** Null where the platform has no camera capture. */
+    onPhoto: (() -> Unit)?,
+    onVideo: (() -> Unit)?,
+    /** Null where a poll can't be sent. */
+    onPoll: (() -> Unit)? = null,
+) {
+    AppSheet(onDismiss) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 4.dp, bottom = 28.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+        ) {
+            AttachOption(AppIcons.Image, "Галерея", tileColor(0f)) {
+                onDismiss()
+                onGallery()
+            }
+            onPhoto?.let {
+                AttachOption(AppIcons.Camera, "Камера", tileColor(-70f)) {
+                    onDismiss()
+                    it()
+                }
+            }
+            onVideo?.let {
+                AttachOption(AppIcons.Video, "Видео", tileColor(70f)) {
+                    onDismiss()
+                    it()
+                }
+            }
+            AttachOption(AppIcons.Document, "Файл", tileColor(150f)) {
+                onDismiss()
+                onFile()
+            }
+            onPoll?.let {
+                AttachOption(AppIcons.Poll, "Опрос", tileColor(220f)) {
+                    onDismiss()
+                    it()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttachOption(
+    icon: Painter,
+    label: String,
+    tile: Color,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier.clip(RoundedCornerShape(20.dp)).clickable(onClick = onClick).padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.size(60.dp).clip(CircleShape).background(tile), contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(28.dp))
+        }
+        Text(label, style = MaterialTheme.typography.labelLarge)
     }
 }
 
@@ -1796,10 +2904,10 @@ private fun PendingAction(
  */
 @Composable
 private fun PendingThumbnail(item: PendingAttach) {
-    val shape = RoundedCornerShape(10.dp)
+    val shape = RoundedCornerShape(16.dp)
     val failed = item.state == UploadState.FAILED
     Box(
-        Modifier.width(240.dp).heightIn(min = 120.dp, max = 320.dp).clip(shape),
+        Modifier.width(260.dp).heightIn(min = 120.dp, max = 320.dp).clip(shape),
         contentAlignment = Alignment.Center,
     ) {
         if (item.kind == PickedKind.FILE) {
@@ -1906,6 +3014,144 @@ private fun VideoNoteView(
 
 private val VIDEO_NOTE_SIZE = 200.dp
 
+// Past any bubble's height: scrolling to the last item with it lands at the list's very end
+// (the list clamps it), rather than at the top of a post taller than the screen.
+private const val END_OFFSET = 100_000
+
+private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollToEnd(lastIndex: Int) = scrollToItem(lastIndex, END_OFFSET)
+
+private fun Message.listKey(): Any = id ?: cid ?: time
+
+/** Whether the list follows a message appended at the end: our own send always, others only near the bottom. */
+internal fun followAppended(
+    mine: Boolean,
+    lastVisible: Int,
+    prevSize: Int,
+): Boolean = mine || lastVisible >= prevSize - 2
+
+/** Whether older history came in before the message the list was anchored on ([anchorKey], set when paging back). */
+internal fun olderPrepended(
+    firstKey: Any,
+    anchorKey: Any?,
+): Boolean = anchorKey != null && firstKey != anchorKey
+
+private val STICKER_SIZE = 160.dp
+
+/**
+ * One button under a bot's message, full width as the official client draws them. Link
+ * buttons open their URL (↗ in the corner), callback buttons tell the bot ([busy] while
+ * that is on its way); other kinds need more than this client does and stay inert.
+ */
+@Composable
+private fun BotButtonView(
+    button: BotButton,
+    fg: Color,
+    busy: Boolean,
+    onPress: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val uriHandler = LocalUriHandler.current
+    val url = button.url
+    val active = url != null || button.isCallback
+    Box(
+        modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(fg.copy(alpha = 0.12f))
+            .clickable(enabled = active && !busy) { if (url != null) uriHandler.openUriSafely(url) else onPress() }
+            .padding(horizontal = 24.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (busy) {
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = fg)
+        } else {
+            Text(
+                button.text,
+                style = MaterialTheme.typography.labelLarge,
+                color = fg.copy(alpha = if (active) 1f else 0.55f),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+            )
+        }
+        if (url != null) {
+            Icon(
+                AppIcons.Open,
+                contentDescription = "Ссылка",
+                tint = fg.copy(alpha = 0.8f),
+                modifier = Modifier.align(Alignment.TopEnd).offset(x = 18.dp, y = (-4).dp).size(12.dp),
+            )
+        }
+    }
+}
+
+/** The bar under the header that carries the chat's pinned message. */
+@Composable
+private fun PinnedBar(
+    message: Message,
+    onClick: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .width(3.dp)
+                .height(32.dp)
+                .clip(CircleShape)
+                .background(cs.primary),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "Закреплённое сообщение",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = cs.primary,
+                maxLines = 1,
+            )
+            Text(
+                message.previewLabel().replace('\n', ' '),
+                style = MaterialTheme.typography.bodySmall,
+                color = cs.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Icon(AppIcons.Pin, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(18.dp))
+    }
+}
+
+/** The header while messages are being picked: the count and what can be done with them. */
+@Composable
+private fun SelectionBar(
+    count: Int,
+    onClose: () -> Unit,
+    /** Null when none of the picked messages has text. */
+    onCopy: (() -> Unit)?,
+    onForward: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .height(64.dp)
+            .padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onClose) { Icon(AppIcons.Close, contentDescription = "Отменить выбор") }
+        Text("Выбрано: $count", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f).padding(start = 4.dp))
+        if (onCopy != null) IconButton(onClick = onCopy) { Icon(AppIcons.Copy, contentDescription = "Копировать") }
+        IconButton(onClick = onForward) { Icon(AppIcons.Forward, contentDescription = "Переслать") }
+        IconButton(onClick = onDelete) {
+            Icon(AppIcons.Delete, contentDescription = "Удалить", tint = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
 /**
  * Fills a media tile while its image is being fetched (or if the fetch failed), so
  * a message with several photos shows its layout and progress straight away rather
@@ -1938,15 +3184,15 @@ private fun MediaThumbnail(
     media: MediaAttach,
     onClick: () -> Unit,
 ) {
-    val shape = RoundedCornerShape(10.dp)
+    val shape = RoundedCornerShape(16.dp)
     // The server reports the dimensions, so the tile can take its final shape before
     // the bytes arrive — no blank bubble, and no reflow once the image lands. Without
     // them, fall back to a minimum height so the placeholder still has a box to fill.
     var mod =
         if (media.width > 0 && media.height > 0) {
-            Modifier.width(240.dp).aspectRatio(media.width.toFloat() / media.height)
+            Modifier.width(260.dp).aspectRatio(media.width.toFloat() / media.height)
         } else {
-            Modifier.width(240.dp).heightIn(min = 140.dp, max = 320.dp)
+            Modifier.width(260.dp).heightIn(min = 140.dp, max = 320.dp)
         }
     mod = mod.clip(shape)
     Box(modifier = Modifier.clickable(onClick = onClick), contentAlignment = Alignment.Center) {
@@ -1989,7 +3235,7 @@ private fun MediaThumbnail(
 }
 
 /** "m:ss" (or "h:mm:ss") for a video-length badge. */
-private fun formatDuration(totalSec: Int): String {
+internal fun formatDuration(totalSec: Int): String {
     val h = totalSec / 3600
     val m = totalSec % 3600 / 60
     val s = totalSec % 60
@@ -2079,29 +3325,31 @@ private fun ZoomableImage(url: String) {
     )
 }
 
-/** A centered, muted chip for a group service/system event. */
+/** A centered, translucent pill for a day label or a group service/system event. */
 @Composable
 private fun ServiceMessageChip(text: String) {
-    // A translucent pill that reads on the wallpaper in either theme.
+    // Reads on the aurora backdrop in either theme.
     val light = isLightTheme()
     val chipBg =
         if (light) {
             MaterialTheme.colorScheme.scrim.copy(
-                alpha = 0.25f,
+                alpha = 0.22f,
             )
         } else {
-            MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.85f)
+            MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.8f)
         }
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.Center) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp, horizontal = 24.dp), horizontalArrangement = Arrangement.Center) {
         Text(
             text,
             style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.Center,
             color = if (light) MaterialTheme.colorScheme.onScrim else MaterialTheme.colorScheme.onSurface,
             modifier =
                 Modifier
-                    .clip(RoundedCornerShape(12.dp))
+                    .clip(RoundedCornerShape(14.dp))
                     .background(chipBg)
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                    .padding(horizontal = 12.dp, vertical = 5.dp),
         )
     }
 }
@@ -2136,33 +3384,18 @@ private fun serviceMessageText(
 
 @Composable
 private fun NewMessagesDivider() {
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        HorizontalDivider(Modifier.weight(1f))
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.Center) {
         Text(
-            "новые сообщения",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(horizontal = 8.dp),
+            "Новые сообщения",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = onAccentGradient(),
+            modifier = Modifier.clip(CircleShape).background(accentGradient()).padding(horizontal = 14.dp, vertical = 5.dp),
         )
-        HorizontalDivider(Modifier.weight(1f))
     }
 }
 
-/** Soft diagonal gradient behind the conversation, derived from the scheme's accent colors. */
+/** Incoming bubbles (and the input pill): white on the light backdrop, a raised tone on the dark one. */
 @Composable
-private fun chatWallpaper(): Brush {
-    val cs = MaterialTheme.colorScheme
-    return if (isLightTheme()) {
-        Brush.linearGradient(listOf(lerp(cs.primaryContainer, cs.primary, 0.25f), lerp(cs.tertiaryContainer, cs.tertiary, 0.25f)))
-    } else {
-        Brush.linearGradient(listOf(cs.surfaceContainerLowest, lerp(cs.surface, cs.primaryContainer, 0.2f)))
-    }
-}
-
-/** Incoming bubbles (and the input pill): white on the light wallpaper, a raised tone on the dark one. */
-@Composable
-private fun incomingBubbleColor(): Color =
+internal fun incomingBubbleColor(): Color =
     if (isLightTheme()) MaterialTheme.colorScheme.surfaceContainerLowest else MaterialTheme.colorScheme.surfaceContainerHigh
